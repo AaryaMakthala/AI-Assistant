@@ -27,12 +27,20 @@ _SET_CLAIMS = text(f"SELECT set_config('{_CLAIMS_SETTING}', :claims, true)")
 async def set_tenant_claims(
     session: AsyncSession,
     *,
-    user_id: uuid.UUID,
     org_id: uuid.UUID,
+    user_id: uuid.UUID | None = None,
     role: str | None = None,
 ) -> None:
-    """Bind the caller's identity to the session's current transaction."""
-    claims: dict[str, str] = {"sub": str(user_id), "org_id": str(org_id)}
+    """Bind the caller's identity to the session's current transaction.
+
+    `user_id` may be omitted for background work that acts on behalf of an organization
+    rather than a person (document ingestion). Org-scoped policies still apply; the
+    user-scoped ones (chat) then match nothing, which is the correct outcome — a worker
+    has no business reading anyone's chat history.
+    """
+    claims: dict[str, str] = {"org_id": str(org_id)}
+    if user_id is not None:
+        claims["sub"] = str(user_id)
     if role is not None:
         claims["role"] = role
     await session.execute(_SET_CLAIMS, {"claims": json.dumps(claims)})
@@ -40,12 +48,12 @@ async def set_tenant_claims(
 
 @asynccontextmanager
 async def tenant_session(
-    *, user_id: uuid.UUID, org_id: uuid.UUID, role: str | None = None
+    *, org_id: uuid.UUID, user_id: uuid.UUID | None = None, role: str | None = None
 ) -> AsyncIterator[AsyncSession]:
     """A session whose queries are already constrained to one user and org."""
     async with get_session_factory()() as session:
         await session.begin()
-        await set_tenant_claims(session, user_id=user_id, org_id=org_id, role=role)
+        await set_tenant_claims(session, org_id=org_id, user_id=user_id, role=role)
         try:
             yield session
             await session.commit()

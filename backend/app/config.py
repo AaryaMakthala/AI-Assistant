@@ -2,6 +2,7 @@
 
 import sys
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, ValidationError
@@ -42,9 +43,34 @@ class Settings(BaseSettings):
 
     cors_allow_origins: list[str] = ["http://localhost:3000"]
 
+    # --- Document ingestion (CLAUDE.md 4.2, Phase 3) ---
+
+    #: Where uploaded bytes land, named by generated UUID — never by user-supplied name.
+    upload_dir: Path = Path("var/uploads")
+    #: Hard ceiling enforced while streaming, before the file is fully on disk.
+    max_upload_bytes: int = 25 * 1024 * 1024
+    #: Guards against a zip bomb: an OOXML part that expands beyond this is refused.
+    max_extracted_bytes: int = 200 * 1024 * 1024
+
+    #: Pinned. Changing this invalidates every stored vector and requires a full
+    #: re-embed — never a mix (CLAUDE.md section 7, Risk 1).
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_dim: int = 384
+
+    chunk_size: int = 1000
+    chunk_overlap: int = 150
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def celery_broker_url(self) -> str:
+        return str(self.redis_url)
+
+    @property
+    def celery_result_backend(self) -> str:
+        return str(self.redis_url)
 
 
 def _format_validation_error(exc: ValidationError) -> str:

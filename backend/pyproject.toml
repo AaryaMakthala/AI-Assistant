@@ -13,6 +13,19 @@ dependencies = [
     "alembic>=1.14",
     "pgvector>=0.3.6",
     "loguru>=0.7",
+    "python-multipart>=0.0.18",
+    "slowapi>=0.1.9",
+    "pyjwt[crypto]>=2.10",
+    # Document extraction. Each library is fed only bytes that already passed the
+    # allowlist and size checks in app/security/uploads.py (CLAUDE.md 4.2).
+    "pymupdf>=1.24",
+    "python-docx>=1.1",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "langchain-text-splitters>=0.3",
+    # bge-small-en-v1.5 runs locally; pulls torch, so the first sync is a large download.
+    "sentence-transformers>=3.3",
+    "celery[redis]>=5.4",
 ]
 
 [dependency-groups]
@@ -20,6 +33,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
+    "python-dotenv>=1.0",
     "black>=24.10",
     "ruff>=0.7",
     "pip-audit>=2.7",

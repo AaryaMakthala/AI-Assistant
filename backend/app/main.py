@@ -6,10 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel
 
+from app.api.documents import router as documents_router
 from app.config import get_settings
 from app.db.session import dispose_engine
 from app.errors import register_exception_handlers, register_request_context
 from app.logging_config import configure_logging
+from app.security.rate_limit import register_rate_limiting
 
 
 class HealthResponse(BaseModel):
@@ -50,12 +52,14 @@ def create_app() -> FastAPI:
     )
 
     register_request_context(app)
+    register_rate_limiting(app)
     register_exception_handlers(app)
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
 
+    app.include_router(documents_router)
     return app
 
 

@@ -1,0 +1,130 @@
+"""JWT verification: identity comes from a verified token and nowhere else (4.6)."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import jwt
+import pytest
+from fastapi import HTTPException
+
+from app.config import get_settings
+from app.security.auth import JWT_AUDIENCE, decode_token, principal_from_claims
+
+pytestmark = pytest.mark.usefixtures("valid_env")
+
+
+def _token(claims: dict[str, Any], *, secret: str | None = None, expires_in: int = 3600) -> str:
+    payload = {
+        "aud": JWT_AUDIENCE,
+        "exp": datetime.now(UTC) + timedelta(seconds=expires_in),
+        **claims,
+    }
+    key = secret if secret is not None else get_settings().jwt_secret.get_secret_value()
+    return jwt.encode(payload, key, algorithm="HS256")
+
+
+def test_valid_token_yields_the_principal() -> None:
+    user_id, org_id = uuid.uuid4(), uuid.uuid4()
+
+    claims = decode_token(_token({"sub": str(user_id), "org_id": str(org_id)}))
+    principal = principal_from_claims(claims)
+
+    assert principal.user_id == user_id
+    assert principal.org_id == org_id
+    assert principal.role == "member"
+
+
+def test_org_id_is_read_from_app_metadata() -> None:
+    """Supabase puts admin-set custom claims in app_metadata, not at the top level."""
+    user_id, org_id = uuid.uuid4(), uuid.uuid4()
+
+    claims = decode_token(
+        _token({"sub": str(user_id), "app_metadata": {"org_id": str(org_id), "org_role": "admin"}})
+    )
+    principal = principal_from_claims(claims)
+
+    assert principal.org_id == org_id
+    assert principal.role == "admin"
+
+
+def test_user_metadata_cannot_supply_an_org() -> None:
+    """user_metadata is user-editable — trusting it would let anyone pick their tenant."""
+    claims = decode_token(
+        _token({"sub": str(uuid.uuid4()), "user_metadata": {"org_id": str(uuid.uuid4())}})
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        principal_from_claims(claims)
+    assert exc.value.status_code == 403
+
+
+def test_token_signed_with_the_wrong_secret_is_rejected() -> None:
+    token = _token({"sub": str(uuid.uuid4()), "org_id": str(uuid.uuid4())}, secret="not-the-secret")
+
+    with pytest.raises(HTTPException) as exc:
+        decode_token(token)
+    assert exc.value.status_code == 401
+
+
+def test_expired_token_is_rejected() -> None:
+    token = _token({"sub": str(uuid.uuid4()), "org_id": str(uuid.uuid4())}, expires_in=-60)
+
+    with pytest.raises(HTTPException) as exc:
+        decode_token(token)
+    assert exc.value.status_code == 401
+
+
+def test_token_without_expiry_is_rejected() -> None:
+    """A token that never expires is a permanent credential if it ever leaks."""
+    payload = {"aud": JWT_AUDIENCE, "sub": str(uuid.uuid4()), "org_id": str(uuid.uuid4())}
+    secret = get_settings().jwt_secret.get_secret_value()
+
+    with pytest.raises(HTTPException):
+        decode_token(jwt.encode(payload, secret, algorithm="HS256"))
+
+
+def test_token_for_another_audience_is_rejected() -> None:
+    secret = get_settings().jwt_secret.get_secret_value()
+    payload = {
+        "aud": "some-other-service",
+        "sub": str(uuid.uuid4()),
+        "org_id": str(uuid.uuid4()),
+        "exp": datetime.now(UTC) + timedelta(hours=1),
+    }
+
+    with pytest.raises(HTTPException):
+        decode_token(jwt.encode(payload, secret, algorithm="HS256"))
+
+
+def test_unsigned_token_is_rejected() -> None:
+    """The `none` algorithm is the classic JWT bypass; PyJWT must not accept it."""
+    payload = {
+        "aud": JWT_AUDIENCE,
+        "sub": str(uuid.uuid4()),
+        "org_id": str(uuid.uuid4()),
+        "exp": datetime.now(UTC) + timedelta(hours=1),
+    }
+    forged = jwt.encode(payload, key="", algorithm="none")
+
+    with pytest.raises(HTTPException) as exc:
+        decode_token(forged)
+    assert exc.value.status_code == 401
+
+
+def test_token_without_an_org_claim_is_forbidden() -> None:
+    claims = decode_token(_token({"sub": str(uuid.uuid4())}))
+
+    with pytest.raises(HTTPException) as exc:
+        principal_from_claims(claims)
+    assert exc.value.status_code == 403
+
+
+def test_malformed_org_claim_is_forbidden() -> None:
+    claims = decode_token(_token({"sub": str(uuid.uuid4()), "org_id": "not-a-uuid"}))
+
+    with pytest.raises(HTTPException) as exc:
+        principal_from_claims(claims)
+    assert exc.value.status_code == 403

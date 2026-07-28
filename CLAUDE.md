@@ -410,10 +410,3 @@ GITHUB_TOKEN=
 ```
 
 ---
-
-## 10. How to Start
-
-1. Create the project folder: `enterprise-ai-agent/`.
-2. Place this file at the repo root as `CLAUDE.md`.
-3. Begin Phase 0 only. Report back when its acceptance criteria are met, then wait for
-   confirmation before Phase 1.

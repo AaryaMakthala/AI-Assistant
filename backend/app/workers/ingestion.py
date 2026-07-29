@@ -31,7 +31,7 @@ from app.db.models import Document, DocumentChunk
 from app.rag.chunking import chunk_pages
 from app.rag.embeddings import embed_passages
 from app.rag.extraction import ExtractionError, extract_pages
-from app.security.rls import set_tenant_claims
+from app.security.rls import set_tenant_claims, use_tenant_role
 from app.security.uploads import ALLOWED_TYPES, storage_path_for
 from app.workers.celery_app import celery_app
 
@@ -82,6 +82,7 @@ async def _ingest(document_id: uuid.UUID, org_id: uuid.UUID) -> dict[str, Any]:
             # Claims first: every statement below is then filtered by RLS, so a wrong
             # org_id here yields zero rows rather than another tenant's document.
             await set_tenant_claims(session, org_id=org_id)
+            await use_tenant_role(session)
 
             row = (
                 await session.execute(
@@ -107,6 +108,7 @@ async def _ingest(document_id: uuid.UUID, org_id: uuid.UUID) -> dict[str, Any]:
 
             await session.begin()
             await set_tenant_claims(session, org_id=org_id)
+            await use_tenant_role(session)
             try:
                 if extension is None:
                     raise ExtractionError(f"Unsupported stored media type '{mime_type}'.")
@@ -180,6 +182,7 @@ async def _mark_failed(document_id: uuid.UUID, org_id: uuid.UUID, message: str) 
         async with session:
             await session.begin()
             await set_tenant_claims(session, org_id=org_id)
+            await use_tenant_role(session)
             await _set_status(
                 session,
                 document_id=document_id,

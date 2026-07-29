@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, ValidationError
+from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_EXAMPLE_HINT = (
@@ -60,9 +60,60 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 150
 
+    # --- Retrieval and generation (Phase 4) ---
+
+    #: Chunks fetched per question. Beyond roughly this many, recall gains flatten while
+    #: the odds of burying the relevant passage in noise keep rising.
+    retrieval_top_k: int = 6
+    #: Cosine distance above which a chunk is treated as unrelated. pgvector reports
+    #: distance, not similarity: 0 is identical, 2 is opposite. Without a ceiling the
+    #: nearest neighbours of an off-topic question still come back and read as sources.
+    retrieval_max_distance: float = 0.75
+    #: Ceiling on context assembled into one prompt, in characters.
+    retrieval_max_context_chars: int = 12_000
+
+    llm_model: str = "gemini-2.0-flash"
+    llm_fallback_model: str = "llama-3.3-70b-versatile"
+    llm_temperature: float = 0.2
+    llm_max_output_tokens: int = 1024
+    #: Time budget for the whole generation. A stalled provider must surface as an error
+    #: rather than an open connection the client waits on indefinitely.
+    llm_timeout_seconds: float = 60.0
+
+    #: Turns of prior conversation replayed into the prompt.
+    chat_history_limit: int = 10
+
+    # --- JWT verification (CLAUDE.md 4.6) ---
+
+    #: Supabase now signs session tokens with rotatable asymmetric keys (ES256) published
+    #: at the project's JWKS endpoint. `jwt_secret` remains for legacy HS256 projects and
+    #: for locally minted test tokens; both are accepted so a migration needs no downtime.
+    jwt_algorithms: list[str] = ["ES256", "RS256", "HS256"]
+    #: How long a fetched signing key is trusted before it is re-fetched. Rotation is
+    #: expected, so an unbounded cache would eventually reject every live token.
+    jwks_cache_seconds: int = 600
+
+    @property
+    def jwks_url(self) -> str:
+        return f"{str(self.supabase_url).rstrip('/')}/auth/v1/.well-known/jwks.json"
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _require_async_driver(cls, value: object) -> object:
+        """Force the asyncpg driver onto a bare `postgresql://` URL.
+
+        Supabase, Railway and most managed providers hand out the sync form, and pasting
+        it verbatim is the obvious thing to do. Without a driver the URL resolves to
+        psycopg2, which this project does not install — so the whole app would fail at
+        first connection with a ModuleNotFoundError that says nothing about the cause.
+        """
+        if isinstance(value, str) and value.startswith("postgresql://"):
+            return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return value
 
     @property
     def celery_broker_url(self) -> str:

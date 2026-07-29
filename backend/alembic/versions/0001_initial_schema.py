@@ -27,9 +27,14 @@ _NOW = sa.text("now()")
 # through a function keeps every policy identical to Supabase's own `auth.jwt()`,
 # which is defined over the same setting — so the same policies hold whether a query
 # arrives via the backend pool or via Supabase's REST layer.
-_CLAIM_FUNCTIONS = """
-CREATE SCHEMA IF NOT EXISTS app;
-
+#
+# Each statement is listed separately because asyncpg sends DDL as a prepared statement,
+# and Postgres refuses to prepare more than one command at a time. Splitting a combined
+# script on ";" is not an option either: the function bodies below are dollar-quoted and
+# contain semicolons of their own.
+_CLAIM_FUNCTIONS = (
+    "CREATE SCHEMA IF NOT EXISTS app",
+    """
 CREATE OR REPLACE FUNCTION app.current_claims()
 RETURNS jsonb
 LANGUAGE sql
@@ -40,10 +45,11 @@ AS $$
         NULLIF(current_setting('request.jwt.claims', true), '')::jsonb,
         '{}'::jsonb
     )
-$$;
-
--- Returns NULL when the claim is absent or not a UUID. NULL never equals a stored
--- org_id, so a request that forgot to set claims sees zero rows rather than all rows.
+$$
+""",
+    # Returns NULL when the claim is absent or not a UUID. NULL never equals a stored
+    # org_id, so a request that forgot to set claims sees zero rows rather than all rows.
+    """
 CREATE OR REPLACE FUNCTION app.current_org_id()
 RETURNS uuid
 LANGUAGE plpgsql
@@ -55,8 +61,9 @@ BEGIN
 EXCEPTION WHEN invalid_text_representation THEN
     RETURN NULL;
 END
-$$;
-
+$$
+""",
+    """
 CREATE OR REPLACE FUNCTION app.current_user_id()
 RETURNS uuid
 LANGUAGE plpgsql
@@ -68,8 +75,9 @@ BEGIN
 EXCEPTION WHEN invalid_text_representation THEN
     RETURN NULL;
 END
-$$;
-"""
+$$
+""",
+)
 
 _ORG_SCOPED_TABLES = (
     "organizations",
@@ -82,70 +90,92 @@ _ORG_SCOPED_TABLES = (
 
 # FORCE as well as ENABLE: without it the table owner silently bypasses every policy,
 # which is exactly the role a migration or a careless script is most likely to use.
-_ENABLE_RLS = "\n".join(
-    f"ALTER TABLE {t} ENABLE ROW LEVEL SECURITY;\nALTER TABLE {t} FORCE ROW LEVEL SECURITY;"
-    for t in _ORG_SCOPED_TABLES
+_ENABLE_RLS = tuple(
+    statement
+    for table in _ORG_SCOPED_TABLES
+    for statement in (
+        f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
+        f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY",
+    )
 )
 
-_POLICIES = """
--- Read-only for tenants; org and user provisioning happens out of band.
+_POLICIES = (
+    # Read-only for tenants; org and user provisioning happens out of band.
+    """
 CREATE POLICY org_read_own ON organizations
-    FOR SELECT USING (id = app.current_org_id());
-
+    FOR SELECT USING (id = app.current_org_id())
+""",
+    """
 CREATE POLICY users_read_own_org ON users
-    FOR SELECT USING (org_id = app.current_org_id());
-
+    FOR SELECT USING (org_id = app.current_org_id())
+""",
+    """
 CREATE POLICY users_update_self ON users
     FOR UPDATE
     USING (id = app.current_user_id() AND org_id = app.current_org_id())
-    WITH CHECK (id = app.current_user_id() AND org_id = app.current_org_id());
-
+    WITH CHECK (id = app.current_user_id() AND org_id = app.current_org_id())
+""",
+    """
 CREATE POLICY documents_org_isolation ON documents
     FOR ALL
     USING (org_id = app.current_org_id())
-    WITH CHECK (org_id = app.current_org_id());
-
+    WITH CHECK (org_id = app.current_org_id())
+""",
+    """
 CREATE POLICY document_chunks_org_isolation ON document_chunks
     FOR ALL
     USING (org_id = app.current_org_id())
-    WITH CHECK (org_id = app.current_org_id());
-
--- Chat is private to its author, not merely to the org.
+    WITH CHECK (org_id = app.current_org_id())
+""",
+    # Chat is private to its author, not merely to the org.
+    """
 CREATE POLICY chat_sessions_owner_only ON chat_sessions
     FOR ALL
     USING (org_id = app.current_org_id() AND user_id = app.current_user_id())
-    WITH CHECK (org_id = app.current_org_id() AND user_id = app.current_user_id());
-
+    WITH CHECK (org_id = app.current_org_id() AND user_id = app.current_user_id())
+""",
+    """
 CREATE POLICY chat_messages_owner_only ON chat_messages
     FOR ALL
     USING (org_id = app.current_org_id() AND user_id = app.current_user_id())
-    WITH CHECK (org_id = app.current_org_id() AND user_id = app.current_user_id());
-"""
+    WITH CHECK (org_id = app.current_org_id() AND user_id = app.current_user_id())
+""",
+)
 
-_APP_ROLE_GRANTS = """
--- Group role the application's login role must be a member of. It is deliberately
--- NOLOGIN and NOBYPASSRLS: a superuser connection ignores RLS entirely, FORCE included.
+_APP_ROLE_GRANTS = (
+    # Group role the application's login role must be a member of. It is deliberately
+    # NOLOGIN and NOBYPASSRLS: a superuser connection ignores RLS entirely, FORCE included.
+    """
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_tenant') THEN
         CREATE ROLE app_tenant NOLOGIN NOBYPASSRLS;
     END IF;
 END
-$$;
-
-GRANT USAGE ON SCHEMA app, public TO app_tenant;
+$$
+""",
+    "GRANT USAGE ON SCHEMA app, public TO app_tenant",
+    """
 GRANT EXECUTE ON FUNCTION
-    app.current_claims(), app.current_org_id(), app.current_user_id() TO app_tenant;
-GRANT SELECT ON organizations, users TO app_tenant;
+    app.current_claims(), app.current_org_id(), app.current_user_id() TO app_tenant
+""",
+    "GRANT SELECT ON organizations, users TO app_tenant",
+    """
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-    documents, document_chunks, chat_sessions, chat_messages TO app_tenant;
-"""
+    documents, document_chunks, chat_sessions, chat_messages TO app_tenant
+""",
+)
+
+
+def _execute_all(statements: tuple[str, ...]) -> None:
+    for statement in statements:
+        op.execute(statement.strip())
 
 
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    op.execute(_CLAIM_FUNCTIONS)
+    _execute_all(_CLAIM_FUNCTIONS)
 
     op.create_table(
         "organizations",
@@ -286,9 +316,9 @@ def upgrade() -> None:
         "ix_chat_messages_session_created", "chat_messages", ["session_id", "created_at"]
     )
 
-    op.execute(_ENABLE_RLS)
-    op.execute(_POLICIES)
-    op.execute(_APP_ROLE_GRANTS)
+    _execute_all(_ENABLE_RLS)
+    _execute_all(_POLICIES)
+    _execute_all(_APP_ROLE_GRANTS)
 
 
 def downgrade() -> None:

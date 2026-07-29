@@ -19,7 +19,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # DB URL comes from .env via settings — never committed to alembic.ini (CLAUDE.md 4.1).
-config.set_main_option("sqlalchemy.url", str(get_settings().database_url))
+# Percent signs are doubled because alembic.ini is read by configparser with interpolation
+# enabled, and a percent-encoded character in a password (%40 for "@") would otherwise be
+# parsed as an interpolation token rather than part of the credential.
+config.set_main_option("sqlalchemy.url", str(get_settings().database_url).replace("%", "%%"))
 
 target_metadata = Base.metadata
 

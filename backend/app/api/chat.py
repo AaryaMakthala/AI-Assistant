@@ -12,6 +12,7 @@ a multi-second generation would pin a pooled connection for its duration.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -21,16 +22,21 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import case, desc, insert, select, update
-from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import case, delete, desc, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_llm_router
 from app.config import get_settings
 from app.db.models import ChatMessage, ChatSession
 from app.llm.base import LLMError, LLMRouterProtocol, Message
-from app.rag.pipeline import AnswerResult, retrieve_for_question, stream_answer
+from app.rag.pipeline import (
+    AnswerResult,
+    retrieve_for_question,
+    source_payload,
+    stream_answer,
+)
+from app.rag.retrieval import RetrievedChunk
 from app.security.auth import CurrentPrincipal, Principal
 from app.security.rate_limit import CHAT_RATE_LIMIT, limiter
 from app.security.rls import tenant_session
@@ -76,6 +82,29 @@ class ChatMessageResponse(BaseModel):
     content: str
     citations: list[dict[str, Any]]
     created_at: datetime
+    #: True when generation stopped early. Reloading a conversation must not present a
+    #: truncated answer as a finished one just because the stream that produced it is over.
+    incomplete: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_incomplete(cls, value: Any) -> Any:
+        """Surface the flag out of the stored token_usage blob.
+
+        It lives there rather than in its own column because it is generation metadata,
+        and adding a column would mean a migration for a field only the UI reads.
+        """
+        usage = getattr(value, "token_usage", None)
+        if isinstance(usage, dict) and usage.get("incomplete"):
+            return {
+                "id": value.id,
+                "role": value.role,
+                "content": value.content,
+                "citations": value.citations,
+                "created_at": value.created_at,
+                "incomplete": True,
+            }
+        return value
 
 
 class ChatMessageListResponse(BaseModel):
@@ -189,11 +218,70 @@ async def _persist_turn(
                 }
             )
         await session.execute(insert(ChatMessage), rows)
+        # Bumps the session to the top of the sidebar. `func.now()` is transaction time,
+        # so it matches the created_at the messages in this same transaction receive.
         await session.execute(
-            update(ChatSession)
-            .where(ChatSession.id == session_id)
-            .values(updated_at=datetime.now().astimezone())
+            update(ChatSession).where(ChatSession.id == session_id).values(updated_at=func.now())
         )
+
+
+async def _save_turn(
+    *,
+    principal: Principal,
+    session_id: uuid.UUID,
+    question: str,
+    result: AnswerResult,
+    incomplete: bool,
+) -> None:
+    """Persist one turn, absorbing storage failures."""
+    try:
+        await _persist_turn(
+            principal=principal,
+            session_id=session_id,
+            question=question,
+            result=result,
+            incomplete=incomplete,
+        )
+    except Exception as exc:
+        # The user already has their answer; losing the transcript must not retroactively
+        # turn a successful response into an error.
+        logger.opt(exception=exc).error(
+            "Could not persist chat turn for session {session}", session=session_id
+        )
+
+
+async def _shielded_save(
+    *,
+    principal: Principal,
+    session_id: uuid.UUID,
+    question: str,
+    result: AnswerResult,
+    incomplete: bool,
+) -> None:
+    """Run the write to completion even if the surrounding task is being cancelled.
+
+    When a client disconnects mid-answer, Starlette cancels the response task. An
+    unshielded write would then be interrupted at whichever statement it had reached,
+    committing the question with no answer — or nothing at all. The task must be created
+    before shielding: `shield` only protects an already-scheduled task, not a coroutine
+    it is still awaiting inline.
+    """
+    task = asyncio.create_task(
+        _save_turn(
+            principal=principal,
+            session_id=session_id,
+            question=question,
+            result=result,
+            incomplete=incomplete,
+        )
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # The shield was cancelled from outside, not the task. Give the write the moment
+        # it needs to finish rather than abandoning a half-open transaction.
+        await task
+        raise
 
 
 async def _event_stream(
@@ -203,82 +291,96 @@ async def _event_stream(
     question: str,
     session_id: uuid.UUID,
     history: list[Message],
-    chunks: list[Any],
+    chunks: list[RetrievedChunk],
 ) -> AsyncIterator[str]:
     result = AnswerResult()
+    # Assume the worst until the `done` frame is reached. Every early exit — provider
+    # failure, client disconnect, cancelled task — leaves this true, so the flag records
+    # what happened without each exit path having to remember to set it.
+    incomplete = True
 
-    yield _sse("session", {"session_id": str(session_id)})
-    # Sent before generation so the UI can show what is being consulted while it waits,
-    # and so a user can see an answer rests on nothing at all.
-    yield _sse(
-        "sources",
-        {
-            "sources": [
+    def _citations_frame() -> str:
+        return _sse(
+            "citations", {"citations": [citation.as_dict() for citation in result.citations]}
+        )
+
+    try:
+        yield _sse("session", {"session_id": str(session_id)})
+        # Sent before generation so the UI can show what is being consulted while it
+        # waits, and so a user can see when an answer rests on nothing at all.
+        yield _sse("sources", {"sources": source_payload(chunks)})
+
+        try:
+            async for token in stream_answer(
+                llm, question=question, chunks=chunks, history=history, result=result
+            ):
+                yield _sse("token", {"text": token})
+        except LLMError as exc:
+            # The 200 header is long gone, so the failure has to travel as an event.
+            logger.opt(exception=exc).error(
+                "Generation failed for user {user}", user=principal.user_id
+            )
+            # Whatever partial text arrived is still on screen, so its citations are
+            # still worth resolving — stream_answer fills them in even when it raises.
+            yield _citations_frame()
+            yield _sse(
+                "error",
                 {
-                    "number": index,
-                    "document_id": str(chunk.document_id),
-                    "filename": chunk.filename,
-                    "page": chunk.page,
-                    "label": chunk.citation_label,
-                }
-                for index, chunk in enumerate(chunks, start=1)
-            ]
-        },
-    )
+                    "detail": ("The language model is currently unavailable. Please try again."),
+                    "partial": bool(result.text),
+                },
+            )
+            return
+        except Exception as exc:
+            logger.opt(exception=exc).error(
+                "Unexpected error streaming answer for user {user}", user=principal.user_id
+            )
+            yield _citations_frame()
+            yield _sse(
+                "error",
+                {
+                    "detail": "Something went wrong generating the answer.",
+                    "partial": bool(result.text),
+                },
+            )
+            return
 
-    try:
-        async for token in stream_answer(
-            llm, question=question, chunks=chunks, history=history, result=result
-        ):
-            yield _sse("token", {"text": token})
-    except LLMError as exc:
-        # The 200 header is long gone, so the failure has to travel as an event.
-        logger.opt(exception=exc).error(
-            "Generation failed for user {user}", user=principal.user_id
-        )
+        yield _citations_frame()
         yield _sse(
-            "error",
-            {"detail": "The language model is currently unavailable. Please try again."},
+            "done",
+            {
+                "usage": result.completion.usage.as_dict(),
+                "provider": result.completion.provider,
+                "model": result.completion.model,
+                "grounded": result.had_context,
+            },
         )
-        return
-    except Exception as exc:
-        logger.opt(exception=exc).error(
-            "Unexpected error streaming answer for user {user}", user=principal.user_id
+        incomplete = False
+
+        logger.info(
+            "Chat answered for user {user}: {tokens} completion tokens via {provider}, "
+            "{sources} sources",
+            user=principal.user_id,
+            tokens=result.completion.usage.completion_tokens,
+            provider=result.completion.provider,
+            sources=len(result.citations),
         )
-        yield _sse("error", {"detail": "Something went wrong generating the answer."})
-        return
-
-    yield _sse(
-        "citations", {"citations": [citation.as_dict() for citation in result.citations]}
-    )
-    yield _sse(
-        "done",
-        {
-            "usage": result.completion.usage.as_dict(),
-            "provider": result.completion.provider,
-            "model": result.completion.model,
-            "grounded": result.had_context,
-        },
-    )
-
-    logger.info(
-        "Chat answered for user {user}: {tokens} completion tokens via {provider}, "
-        "{sources} sources",
-        user=principal.user_id,
-        tokens=result.completion.usage.completion_tokens,
-        provider=result.completion.provider,
-        sources=len(result.citations),
-    )
-
-    try:
-        await _persist_turn(
-            principal=principal, session_id=session_id, question=question, result=result
-        )
-    except (IntegrityError, OSError) as exc:
-        # The user already has their answer; losing the transcript must not retroactively
-        # turn a successful response into an error.
-        logger.opt(exception=exc).error(
-            "Could not persist chat turn for session {session}", session=session_id
+    finally:
+        # In `finally` so a disconnect partway through still records what the user saw.
+        # Starlette throws GeneratorExit/CancelledError into this generator when the
+        # client goes away, and neither is caught above — but both run this block.
+        if incomplete:
+            logger.warning(
+                "Chat turn ended early for user {user} after {n} chars",
+                user=principal.user_id,
+                n=len(result.text),
+            )
+        await _shielded_save(
+            principal=principal,
+            session_id=session_id,
+            question=question,
+            result=result,
+            incomplete=incomplete,
         )
 
 
@@ -308,15 +410,11 @@ async def chat(
             session, principal=principal, session_id=payload.session_id, question=question
         )
         history = (
-            await _load_history(
-                session, session_id=session_id, limit=settings.chat_history_limit
-            )
+            await _load_history(session, session_id=session_id, limit=settings.chat_history_limit)
             if payload.session_id is not None
             else []
         )
-        chunks = await retrieve_for_question(
-            session, question=question, org_id=principal.org_id
-        )
+        chunks = await retrieve_for_question(session, question=question, org_id=principal.org_id)
 
     return StreamingResponse(
         _event_stream(
@@ -379,16 +477,38 @@ async def list_messages(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found."
             )
 
+        # Newest-first under the limit, then reversed for display. Ordering ascending and
+        # limiting would return the *oldest* N — the start of a long conversation rather
+        # than the part the user was just reading.
         rows = (
             await session.execute(
                 select(ChatMessage)
                 .where(ChatMessage.session_id == session_id)
-                .order_by(ChatMessage.created_at, _ROLE_ORDER)
+                .order_by(desc(ChatMessage.created_at), desc(_ROLE_ORDER))
                 .limit(limit)
             )
         ).scalars()
-        messages = [ChatMessageResponse.model_validate(row) for row in rows]
+        messages = [ChatMessageResponse.model_validate(row) for row in reversed(list(rows))]
     return ChatMessageListResponse(messages=messages)
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a chat session",
+)
+async def delete_session(principal: CurrentPrincipal, session_id: uuid.UUID) -> None:
+    """Remove a conversation and, by cascade, its messages."""
+    async with tenant_session(
+        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+    ) as session:
+        # RLS confines this to the caller's own sessions, so the rowcount doubles as the
+        # existence check — no separate SELECT that another request could race against.
+        deleted = (
+            await session.execute(delete(ChatSession).where(ChatSession.id == session_id))
+        ).rowcount
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found.")
 
 
 __all__ = ["router"]

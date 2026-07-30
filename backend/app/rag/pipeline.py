@@ -107,6 +107,28 @@ def resolve_citations(answer: str, chunks: list[RetrievedChunk]) -> list[Citatio
     return sorted(cited, key=lambda citation: citation.number)
 
 
+def source_payload(chunks: list[RetrievedChunk]) -> list[dict[str, object]]:
+    """The retrieved set as the UI sees it, numbered exactly as the prompt numbers it.
+
+    Deliberately the same shape as :meth:`Citation.as_dict`, so "what was consulted" and
+    "what was cited" render through one component: a citation is the subset of this list
+    the answer actually leaned on, not a different kind of thing.
+    """
+    return [
+        {
+            "number": index,
+            "document_id": str(chunk.document_id),
+            "chunk_id": str(chunk.chunk_id),
+            "filename": chunk.filename,
+            "page": chunk.page,
+            "label": chunk.citation_label,
+            "excerpt": _excerpt(chunk.content),
+            "score": round(chunk.similarity, 4),
+        }
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
 async def retrieve_for_question(
     session: AsyncSession, *, question: str, org_id: uuid.UUID
 ) -> list[RetrievedChunk]:
@@ -153,5 +175,6 @@ __all__ = [
     "Citation",
     "resolve_citations",
     "retrieve_for_question",
+    "source_payload",
     "stream_answer",
 ]

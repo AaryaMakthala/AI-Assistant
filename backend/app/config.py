@@ -99,6 +99,18 @@ class Settings(BaseSettings):
     #: back once with the reason; beyond that the model is usually looping on the same idea.
     sql_max_generation_attempts: int = 2
 
+    # --- Multi-agent orchestration (Phase 7) ---
+
+    #: Hard cap on routing passes for one question (CLAUDE.md section 7, "agent loops
+    #: forever"). A counter in graph state, not an instruction in a prompt — a model cannot
+    #: decline to respect it. The graph is currently acyclic so this is never reached; it
+    #: exists so adding a cycle later cannot produce an unbounded loop.
+    agent_max_iterations: int = 3
+    #: LangGraph's own step ceiling, an independent backstop to the counter above. Counts
+    #: every node execution, so it must exceed the longest legitimate path: router plus a
+    #: three-way fan-out plus synthesis.
+    agent_recursion_limit: int = 12
+
     # --- JWT verification (CLAUDE.md 4.6) ---
 
     #: Supabase now signs session tokens with rotatable asymmetric keys (ES256) published

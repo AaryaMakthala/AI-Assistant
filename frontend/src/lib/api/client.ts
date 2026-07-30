@@ -179,3 +179,82 @@ export async function uploadDocument(
   if (!response.ok) throw await failure(response);
   return (await response.json()) as UploadAcceptedResponse;
 }
+
+export interface UploadProgressOptions extends RequestOptions {
+  /** Fraction of bytes sent, 0–1. Called repeatedly while the body uploads. */
+  onProgress?: (fraction: number) => void;
+}
+
+/**
+ * Upload with byte-level progress.
+ *
+ * XMLHttpRequest rather than `fetch`, because `fetch` still has no upload-progress
+ * event — the request-body stream is not observable, so a fetch-based upload can only
+ * show an indeterminate spinner. For a 25 MB PDF on a slow connection that is the
+ * difference between "working" and "frozen", which is exactly the state CLAUDE.md
+ * section 6 asks to be visible.
+ *
+ * Note this reports only the *transfer*. Ingestion is a Celery job that starts after the
+ * 202, and its progress is polled separately — see `useDocuments`.
+ */
+export function uploadDocumentWithProgress(
+  file: File,
+  options: UploadProgressOptions = {},
+): Promise<UploadAcceptedResponse> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("file", file);
+
+    const request = new XMLHttpRequest();
+    request.open("POST", `${BASE_URL}/documents`);
+    if (options.token) {
+      request.setRequestHeader("Authorization", `Bearer ${options.token}`);
+    }
+
+    const abort = () => request.abort();
+    options.signal?.addEventListener("abort", abort);
+    const cleanup = () => options.signal?.removeEventListener("abort", abort);
+
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        options.onProgress?.(event.loaded / event.total);
+      }
+    });
+
+    request.addEventListener("load", () => {
+      cleanup();
+      let body: { detail?: string; request_id?: string } = {};
+      try {
+        body = JSON.parse(request.responseText);
+      } catch {
+        // A non-JSON body (a proxy's HTML error page) leaves the status-derived message.
+      }
+      if (request.status >= 200 && request.status < 300) {
+        options.onProgress?.(1);
+        resolve(body as unknown as UploadAcceptedResponse);
+        return;
+      }
+      reject(
+        new ApiError(
+          body.detail ?? `Upload failed with status ${request.status}`,
+          request.status,
+          body.request_id ??
+            request.getResponseHeader("x-request-id") ??
+            undefined,
+        ),
+      );
+    });
+
+    request.addEventListener("error", () => {
+      cleanup();
+      reject(new ApiError("The upload could not reach the server.", 0));
+    });
+
+    request.addEventListener("abort", () => {
+      cleanup();
+      reject(new DOMException("Upload aborted", "AbortError"));
+    });
+
+    request.send(form);
+  });
+}

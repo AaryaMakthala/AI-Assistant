@@ -1,26 +1,94 @@
 @import "tailwindcss";
 
+/*
+ * Semantic tokens, not raw colors. Components reference `surface` / `border` / `muted`
+ * rather than a specific grey, so the dark theme below is a redefinition of the same
+ * names instead of a parallel set of `dark:` variants on every element.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --background: #f7f7f8;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --foreground: #18181b;
+  --muted: #71717a;
+  --border: #e4e4e7;
+  --accent: #4f46e5;
+  --accent-foreground: #ffffff;
+  --accent-subtle: #eef2ff;
+  --danger: #dc2626;
+  --danger-subtle: #fef2f2;
+  --warning: #b45309;
+  --warning-subtle: #fffbeb;
+  --success: #15803d;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #09090b;
+    --surface: #131316;
+    --surface-raised: #1c1c21;
+    --foreground: #fafafa;
+    --muted: #a1a1aa;
+    --border: #27272a;
+    --accent: #818cf8;
+    --accent-foreground: #1e1b4b;
+    --accent-subtle: #1e1b4b;
+    --danger: #f87171;
+    --danger-subtle: #2a1215;
+    --warning: #fbbf24;
+    --warning-subtle: #2a2010;
+    --success: #4ade80;
   }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-subtle: var(--accent-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-success: var(--success);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* The caret on the streaming message. Paused rather than removed when generation ends,
+ * so the element does not shift as it disappears. */
+@keyframes caret-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.caret-blink {
+  animation: caret-blink 1.1s steps(1, end) infinite;
+}
+
+/* Respect a user's reduced-motion preference: the blinking caret and the routing
+ * indicator's pulse are decorative, and neither carries information the static state
+ * does not already convey. */
+@media (prefers-reduced-motion: reduce) {
+  .caret-blink,
+  .animate-pulse,
+  .animate-spin {
+    animation: none;
+  }
 }

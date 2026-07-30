@@ -34,6 +34,7 @@ from app.agents.prompts import (
 from app.agents.state import ROUTE_NODES, ROUTES, AgentOutcome, Route, SupervisorState, outcomes
 from app.config import get_settings
 from app.llm.base import Completion, LLMError, LLMRouterProtocol
+from app.rag.pipeline import resolve_citations
 
 #: Used when the router's reply cannot be parsed. Documents are the broadest knowledge source
 #: and the cheapest wrong guess: a search that finds nothing costs one embedding, whereas
@@ -135,11 +136,17 @@ async def synthesis_node(
 
     Synthesis has no tool access. It is the last node, and the material it reads is untrusted, so
     the two facts have to line up: nothing it produces can cause another lookup.
+
+    Citations are resolved here rather than by the RAG node, because only this node knows the
+    final text. They are resolved against `chunks` — what was actually retrieved and sent — so a
+    bracketed number the model invented resolves to nothing instead of rendering as a source
+    (the Phase 4 guarantee, preserved through the graph).
     """
     question = state["question"]
     results = [outcome for outcome in outcomes(state) if outcome is not None]
     history = state.get("history") or []
     routes = state.get("routes") or []
+    chunks = state.get("chunks") or []
 
     # `direct` means the router judged that no lookup was needed. A different prompt, because
     # the synthesis prompt's rules are written around supplied evidence that does not exist here.
@@ -163,10 +170,14 @@ async def synthesis_node(
         logger.error("Synthesis failed for user {user}", user=state["principal"].user_id)
         raise
 
+    citations = [citation.as_dict() for citation in resolve_citations(text, chunks)]
+
     return {
         "answer": text,
+        "citations": citations,
         "steps": [step],
         # Carried out so the caller can report usage and provider without re-deriving them.
+        # Declared in SupervisorState — an undeclared key would be dropped here silently.
         "completion": completion,
     }
 

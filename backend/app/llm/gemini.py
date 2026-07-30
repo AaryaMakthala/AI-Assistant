@@ -1,4 +1,8 @@
-"""Google Gemini provider (primary)."""
+"""Google Gemini provider.
+
+Second in the default failover chain (`LLM_PROVIDER_ORDER`): reached when Groq is
+unavailable, rate limited, or times out before its first token.
+"""
 
 from __future__ import annotations
 
@@ -56,7 +60,7 @@ class GeminiProvider:
 
     def __init__(self, *, model: str | None = None) -> None:
         settings = get_settings()
-        self.model = model or settings.llm_model
+        self.model = model or settings.llm_gemini_model
         self._api_key = settings.gemini_api_key.get_secret_value()
         self._settings = settings
         self._client: Any | None = None

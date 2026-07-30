@@ -5,17 +5,40 @@ token reaches the client.** Once a partial answer has been streamed, switching p
 would splice two different answers together, producing text that reads fluently and is
 wrong in the middle. So a mid-stream failure is surfaced as an error rather than
 papered over.
+
+Which providers are tried, and in what order, is configuration (`LLM_PROVIDER_ORDER`) —
+no provider name is hardcoded into the chain.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 
 from loguru import logger
 
 from app.config import get_settings
 from app.llm.base import Completion, LLMError, LLMProvider, Message
+
+
+def _build_groq() -> LLMProvider:
+    from app.llm.groq_provider import GroqProvider
+
+    return GroqProvider()
+
+
+def _build_gemini() -> LLMProvider:
+    from app.llm.gemini import GeminiProvider
+
+    return GeminiProvider()
+
+
+#: Name → constructor. Imports are deferred into the factories so that building a chain
+#: of one provider never imports the other's SDK.
+_PROVIDER_FACTORIES: dict[str, Callable[[], LLMProvider]] = {
+    "groq": _build_groq,
+    "gemini": _build_gemini,
+}
 
 
 class LLMRouter:
@@ -78,11 +101,30 @@ class LLMRouter:
 
 
 def build_default_router() -> LLMRouter:
-    """Gemini primary, Groq fallback (CLAUDE.md section 2)."""
-    from app.llm.gemini import GeminiProvider
-    from app.llm.groq_provider import GroqProvider
+    """Build the failover chain from `LLM_PROVIDER_ORDER`.
 
-    return LLMRouter([GeminiProvider(), GroqProvider()])
+    Defaults to `groq,gemini` — Groq first, Gemini as the automatic fallback. The order is
+    configuration rather than code so that a provider outage or a quota change is an env
+    edit, not a deploy. Providers are constructed lazily by name from `_PROVIDER_FACTORIES`,
+    so an unrecognised entry is reported with the set of valid names instead of silently
+    dropping a provider out of the chain.
+    """
+    names = get_settings().llm_providers
+    if not names:
+        raise ValueError("LLM_PROVIDER_ORDER is empty; name at least one provider.")
+
+    providers: list[LLMProvider] = []
+    for name in names:
+        factory = _PROVIDER_FACTORIES.get(name)
+        if factory is None:
+            raise ValueError(
+                f"Unknown LLM provider {name!r} in LLM_PROVIDER_ORDER. "
+                f"Known providers: {', '.join(sorted(_PROVIDER_FACTORIES))}."
+            )
+        providers.append(factory())
+
+    logger.info("LLM failover order: {order}", order=" → ".join(names))
+    return LLMRouter(providers)
 
 
 __all__ = ["LLMRouter", "build_default_router"]

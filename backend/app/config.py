@@ -72,8 +72,14 @@ class Settings(BaseSettings):
     #: Ceiling on context assembled into one prompt, in characters.
     retrieval_max_context_chars: int = 12_000
 
-    llm_model: str = "gemini-2.0-flash"
-    llm_fallback_model: str = "llama-3.3-70b-versatile"
+    #: Failover order, tried left to right. Groq leads: it is the faster of the two at
+    #: this size and its free tier is the more generous, so Gemini is held in reserve for
+    #: when Groq rate-limits. Configurable so the order can be changed without a deploy.
+    #: A plain comma-separated string rather than a list, because pydantic-settings decodes
+    #: a list-typed env var as JSON and would reject the obvious `groq,gemini`.
+    llm_provider_order: str = "groq,gemini"
+    llm_groq_model: str = "llama-3.3-70b-versatile"
+    llm_gemini_model: str = "gemini-2.0-flash"
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 1024
     #: Time budget for the whole generation. A stalled provider must surface as an error
@@ -124,6 +130,21 @@ class Settings(BaseSettings):
     @property
     def jwks_url(self) -> str:
         return f"{str(self.supabase_url).rstrip('/')}/auth/v1/.well-known/jwks.json"
+
+    @property
+    def llm_providers(self) -> list[str]:
+        """The failover order as a list of provider names, lowercased and de-duplicated.
+
+        Unknown names are left in: rejecting them here would fail at import time with a
+        pydantic error, whereas the router can name the offending provider and list the
+        ones it does know.
+        """
+        seen: list[str] = []
+        for part in self.llm_provider_order.split(","):
+            name = part.strip().lower()
+            if name and name not in seen:
+                seen.append(name)
+        return seen
 
     @property
     def is_production(self) -> bool:

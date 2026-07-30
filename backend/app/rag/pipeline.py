@@ -75,6 +75,25 @@ def _excerpt(text: str, *, limit: int = 240) -> str:
     return collapsed if len(collapsed) <= limit else collapsed[: limit - 1].rstrip() + "…"
 
 
+def cited_numbers(answer: str) -> list[int]:
+    """The bracketed source numbers `answer` refers to, in order of first appearance.
+
+    Raw and unvalidated — the caller decides what range is legitimate. Split out so a
+    caller holding sources in wire shape rather than as `RetrievedChunk` objects (the
+    supervisor's partial-failure path) can still resolve citations against what was
+    actually sent.
+    """
+    numbers: list[int] = []
+    seen: set[int] = set()
+    for match in _CITATION_REF.finditer(answer):
+        for part in match.group(1).split(","):
+            number = int(part.strip())
+            if number not in seen:
+                seen.add(number)
+                numbers.append(number)
+    return numbers
+
+
 def resolve_citations(answer: str, chunks: list[RetrievedChunk]) -> list[Citation]:
     """Map the bracketed numbers in `answer` onto the chunks that were supplied.
 
@@ -82,27 +101,23 @@ def resolve_citations(answer: str, chunks: list[RetrievedChunk]) -> list[Citatio
     is a hallucinated citation, and rendering it would lend it credibility.
     """
     cited: list[Citation] = []
-    seen: set[int] = set()
 
-    for match in _CITATION_REF.finditer(answer):
-        for part in match.group(1).split(","):
-            number = int(part.strip())
-            if number in seen or not 1 <= number <= len(chunks):
-                continue
-            seen.add(number)
-            chunk = chunks[number - 1]
-            cited.append(
-                Citation(
-                    number=number,
-                    document_id=chunk.document_id,
-                    chunk_id=chunk.chunk_id,
-                    filename=chunk.filename,
-                    page=chunk.page,
-                    label=chunk.citation_label,
-                    excerpt=_excerpt(chunk.content),
-                    score=chunk.similarity,
-                )
+    for number in cited_numbers(answer):
+        if not 1 <= number <= len(chunks):
+            continue
+        chunk = chunks[number - 1]
+        cited.append(
+            Citation(
+                number=number,
+                document_id=chunk.document_id,
+                chunk_id=chunk.chunk_id,
+                filename=chunk.filename,
+                page=chunk.page,
+                label=chunk.citation_label,
+                excerpt=_excerpt(chunk.content),
+                score=chunk.similarity,
             )
+        )
 
     return sorted(cited, key=lambda citation: citation.number)
 
@@ -173,6 +188,7 @@ async def stream_answer(
 __all__ = [
     "AnswerResult",
     "Citation",
+    "cited_numbers",
     "resolve_citations",
     "retrieve_for_question",
     "source_payload",

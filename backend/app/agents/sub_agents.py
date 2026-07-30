@@ -35,7 +35,7 @@ from app.agents.state import AgentOutcome, SupervisorState
 from app.llm.base import LLMError, LLMRouterProtocol
 from app.mcp_servers.github_server import MissingToken, SearchCodeArgs, search_code
 from app.mcp_servers.identity import acting_as
-from app.rag.pipeline import retrieve_for_question
+from app.rag.pipeline import retrieve_for_question, source_payload
 from app.rag.prompts import format_context
 from app.security.rls import tenant_session
 from app.sql_agent.agent import answer_question
@@ -74,11 +74,13 @@ def isolated(state_key: str, source: str) -> Callable[[NodeFn], NodeFn]:
                     source=source,
                     user=state["principal"].user_id,
                 )
+                outcome = AgentOutcome(
+                    source=source, ok=False, detail="this lookup did not complete"
+                )
                 return {
-                    state_key: AgentOutcome(
-                        source=source, ok=False, detail="this lookup did not complete"
-                    ),
+                    state_key: outcome,
                     "steps": [f"{source}: failed unexpectedly"],
+                    "tool_outputs": [outcome.as_tool_output()],
                 }
 
         return wrapper
@@ -106,28 +108,46 @@ async def rag_agent(state: SupervisorState, llm: LLMRouterProtocol) -> dict[str,
             )
     except Exception as exc:
         logger.opt(exception=exc).error("RAG agent failed for user {user}", user=principal.user_id)
+        outcome = AgentOutcome(
+            source="documents", ok=False, detail="the document search did not complete"
+        )
         return {
-            "rag": AgentOutcome(
-                source="documents", ok=False, detail="the document search did not complete"
-            ),
+            "rag": outcome,
             "steps": ["documents: search failed"],
+            "tool_outputs": [outcome.as_tool_output()],
             "chunks": [],
+            "sources": [],
         }
 
     if not chunks:
+        outcome = AgentOutcome(
+            source="documents",
+            ok=True,
+            detail="no relevant passages",
+            metadata={"passages": 0},
+        )
         return {
-            "rag": AgentOutcome(source="documents", ok=True, detail="no relevant passages"),
+            "rag": outcome,
             "steps": ["documents: no relevant passages found"],
+            "tool_outputs": [outcome.as_tool_output()],
             "chunks": [],
+            "sources": [],
         }
 
     # Reuses the Phase 4 formatter, so passages are numbered exactly as the citation
     # resolver expects and are already neutralized against fence forgery.
     content = format_context(chunks, nonce=_context_nonce())
+    outcome = AgentOutcome(
+        source="documents", ok=True, content=content, metadata={"passages": len(chunks)}
+    )
     return {
-        "rag": AgentOutcome(source="documents", ok=True, content=content),
+        "rag": outcome,
         "steps": [f"documents: retrieved {len(chunks)} passage(s)"],
+        "tool_outputs": [outcome.as_tool_output()],
         "chunks": chunks,
+        # The wire shape the client renders, numbered identically to the prompt, so a
+        # citation resolves as a subset of this list rather than as a separate lookup.
+        "sources": source_payload(chunks),
     }
 
 
@@ -158,32 +178,39 @@ async def sql_agent(state: SupervisorState, llm: LLMRouterProtocol) -> dict[str,
             user=principal.user_id,
             err=exc,
         )
+        outcome = AgentOutcome(
+            source="business_data", ok=False, detail="the language model was unavailable"
+        )
         return {
-            "sql": AgentOutcome(
-                source="business_data", ok=False, detail="the language model was unavailable"
-            ),
+            "sql": outcome,
             "steps": ["business_data: generation unavailable"],
+            "tool_outputs": [outcome.as_tool_output()],
         }
     except Exception as exc:
         logger.opt(exception=exc).error("SQL agent failed for user {user}", user=principal.user_id)
+        outcome = AgentOutcome(
+            source="business_data", ok=False, detail="the database query did not complete"
+        )
         return {
-            "sql": AgentOutcome(
-                source="business_data", ok=False, detail="the database query did not complete"
-            ),
+            "sql": outcome,
             "steps": ["business_data: query failed"],
+            "tool_outputs": [outcome.as_tool_output()],
         }
 
     if not answer.ok or answer.result is None:
         # A refusal is a legitimate outcome: the validator rejected every attempt, or the
         # model correctly judged the question unanswerable from the allowed schema.
+        outcome = AgentOutcome(
+            source="business_data",
+            ok=True,
+            content=answer.refusal or "",
+            detail="no query could be answered from the available tables",
+            metadata={"attempts": answer.attempts, "executed": False},
+        )
         return {
-            "sql": AgentOutcome(
-                source="business_data",
-                ok=True,
-                content=answer.refusal or "",
-                detail="no query could be answered from the available tables",
-            ),
+            "sql": outcome,
             "steps": [f"business_data: no answer after {answer.attempts} attempt(s)"],
+            "tool_outputs": [outcome.as_tool_output()],
         }
 
     result = answer.result
@@ -196,9 +223,25 @@ async def sql_agent(state: SupervisorState, llm: LLMRouterProtocol) -> dict[str,
     lines.append("")
     lines.extend(str(row) for row in rows)
 
+    outcome = AgentOutcome(
+        source="business_data",
+        ok=True,
+        content="\n".join(lines),
+        metadata={
+            "executed": True,
+            "row_count": result.row_count,
+            "truncated": result.truncated,
+            "duration_ms": result.duration_ms,
+            "attempts": answer.attempts,
+        },
+    )
     return {
-        "sql": AgentOutcome(source="business_data", ok=True, content="\n".join(lines)),
+        "sql": outcome,
         "steps": [f"business_data: {result.row_count} row(s) in {result.duration_ms} ms"],
+        "tool_outputs": [outcome.as_tool_output()],
+        # The query as executed — already validated, allowlisted and capped by Phase 5. Shown
+        # in the UI behind an expander so an answer over business data is inspectable.
+        "sql_query": answer.sql or "",
     }
 
 
@@ -222,13 +265,16 @@ async def mcp_agent(state: SupervisorState, llm: LLMRouterProtocol) -> dict[str,
         logger.info(
             "MCP agent rejected query for user {user}: {err}", user=principal.user_id, err=exc
         )
+        outcome = AgentOutcome(
+            source="external_code",
+            ok=True,
+            detail="the question could not be turned into a code search",
+            metadata={"tool": "search_code", "invoked": False},
+        )
         return {
-            "mcp": AgentOutcome(
-                source="external_code",
-                ok=True,
-                detail="the question could not be turned into a code search",
-            ),
+            "mcp": outcome,
             "steps": ["external_code: question not searchable"],
+            "tool_outputs": [outcome.as_tool_output()],
         }
 
     try:
@@ -236,27 +282,44 @@ async def mcp_agent(state: SupervisorState, llm: LLMRouterProtocol) -> dict[str,
         with acting_as(principal):
             content = await search_code(args)
     except MissingToken:
+        outcome = AgentOutcome(
+            source="external_code",
+            ok=False,
+            detail="GitHub access is not configured",
+            metadata={"tool": "search_code", "invoked": False},
+        )
         return {
-            "mcp": AgentOutcome(
-                source="external_code", ok=False, detail="GitHub access is not configured"
-            ),
+            "mcp": outcome,
             "steps": ["external_code: not configured"],
+            "tool_outputs": [outcome.as_tool_output()],
         }
     except Exception as exc:
         logger.opt(exception=exc).error("MCP agent failed for user {user}", user=principal.user_id)
+        outcome = AgentOutcome(
+            source="external_code",
+            ok=False,
+            detail="the code search did not complete",
+            metadata={"tool": "search_code", "invoked": True},
+        )
         return {
-            "mcp": AgentOutcome(
-                source="external_code", ok=False, detail="the code search did not complete"
-            ),
+            "mcp": outcome,
             "steps": ["external_code: search failed"],
+            "tool_outputs": [outcome.as_tool_output()],
         }
 
     # A refusal from the tool (rate limit, no results, bad credentials) is already phrased
     # for a reader; it is passed through as content so synthesis can explain it honestly.
     found = not content.startswith("REFUSED:") and "No code matching" not in content
+    outcome = AgentOutcome(
+        source="external_code",
+        ok=True,
+        content=content,
+        metadata={"tool": "search_code", "invoked": True, "found": found},
+    )
     return {
-        "mcp": AgentOutcome(source="external_code", ok=True, content=content),
+        "mcp": outcome,
         "steps": ["external_code: " + ("results found" if found else "nothing found")],
+        "tool_outputs": [outcome.as_tool_output()],
     }
 
 

@@ -1,15 +1,23 @@
 """The state one question carries through the supervisor graph (Phase 7).
 
-Every node reads this and returns a partial update; LangGraph merges the updates. Two
+Every node reads this and returns a partial update; LangGraph merges the updates. Three
 details in here are load-bearing rather than incidental:
+
+**Every key a node writes must be declared here.** LangGraph drops any key in a node's
+return value that the state schema does not declare — silently, with no warning. A node
+returning `{"completion": ...}` against a schema that never mentions `completion` simply
+loses it, and the caller sees a default-constructed value. So the answer, its citations,
+its sources, the executed SQL, the per-agent tool metadata and the completion record are
+all declared explicitly rather than assumed to flow through.
 
 **Each sub-agent owns its own output key.** `rag`, `sql` and `mcp` run concurrently after
 routing, and LangGraph raises `InvalidUpdateError` if two concurrent nodes write the same
 key without a reducer. Giving each its own slot means the fan-out needs no locking and no
-reducer that would have to guess how to combine two agents' findings.
+reducer that would have to guess how to combine two agents' findings. The two keys that
+*are* written by more than one branch — `steps` and `tool_outputs` — carry `operator.add`
+so concurrent writes append instead of colliding.
 
-**`steps` is the audit trail, and it accumulates.** It carries the `operator.add` reducer so
-concurrent branches append rather than overwrite. The UI's "thinking/routing" indicator
+**`steps` is the audit trail, and it accumulates.** The UI's "thinking/routing" indicator
 (CLAUDE.md section 6) reads it, and so does the log line for a request that went wrong.
 
 `Principal` is carried in state rather than read from a global: the graph is driven from a
@@ -20,10 +28,10 @@ same identity. It is never derived from anything the model produced (CLAUDE.md 4
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass
-from typing import Annotated, Literal, TypedDict
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Literal, TypedDict
 
-from app.llm.base import Message
+from app.llm.base import Completion, Message
 from app.rag.retrieval import RetrievedChunk
 from app.security.auth import Principal
 
@@ -59,10 +67,23 @@ class AgentOutcome:
     content: str = ""
     #: Operator-facing reason this agent produced nothing. Safe to show a user.
     detail: str = ""
+    #: Structured, non-prose metadata about what this agent did — the executed SQL, the row
+    #: count, the number of passages. Kept apart from `content` because it is reported to
+    #: the client and never placed in a prompt.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_content(self) -> bool:
         return bool(self.content.strip())
+
+    def as_tool_output(self) -> dict[str, Any]:
+        """This outcome as one entry of `tool_outputs`, safe to serialize to the client."""
+        return {
+            "source": self.source,
+            "ok": self.ok,
+            "detail": self.detail,
+            **self.metadata,
+        }
 
 
 class SupervisorState(TypedDict, total=False):
@@ -71,6 +92,8 @@ class SupervisorState(TypedDict, total=False):
     # --- Inputs, set once before the graph runs ---
     question: str
     principal: Principal
+    #: Prior turns of this conversation, oldest first. Read by the router (user turns only)
+    #: and replayed into the synthesis prompt.
     history: list[Message]
 
     # --- Routing ---
@@ -87,9 +110,25 @@ class SupervisorState(TypedDict, total=False):
     #: Chunks the RAG agent retrieved, kept separately so citations resolve against the
     #: real retrieved set rather than against anything the model claimed.
     chunks: list[RetrievedChunk]
+    #: Everything retrieved, in the wire shape the client renders. Numbered exactly as the
+    #: prompt numbers it, so a citation is a subset of this list rather than a different
+    #: kind of thing.
+    sources: list[dict[str, Any]]
+    #: The single validated SELECT the SQL agent executed, for the UI's expandable "show
+    #: the query" affordance. Empty when no SQL ran.
+    sql_query: str
+    #: One entry per sub-agent that ran, appended concurrently. The structured counterpart
+    #: to `steps`: what each agent did, in a shape a client can read.
+    tool_outputs: Annotated[list[dict[str, Any]], operator.add]
 
     # --- Output ---
     answer: str
+    #: The sources the answer actually cited, resolved against `chunks` — never against
+    #: numbers the model invented.
+    citations: list[dict[str, Any]]
+    #: Provider, model and token usage for the synthesis call. Declared here because a node
+    #: return value carrying an undeclared key is dropped, not merged.
+    completion: Completion
     #: Human-readable trace of what ran, in order. Appended to by every node.
     steps: Annotated[list[str], operator.add]
 
@@ -111,7 +150,12 @@ def initial_state(
         route_reason="",
         iterations=0,
         chunks=[],
+        sources=[],
+        sql_query="",
+        tool_outputs=[],
         answer="",
+        citations=[],
+        completion=Completion(),
         steps=[],
     )
 

@@ -143,19 +143,28 @@ async def stream_supervisor(
     """Run the graph, yielding `(kind, payload)` as it progresses.
 
     Kinds:
-      - `step`   — one trace line, as a node completes; drives the UI's routing indicator
-      - `token`  — one token of the final answer
-      - `final`  — the completed state, once
+      - `step`    — one trace line, as a node completes; drives the UI's routing indicator
+      - `routes`  — the routing decision, once, as soon as the router node has made it
+      - `sources` — the retrieved set, once, as soon as retrieval lands and before any token
+      - `token`   — one token of the final answer
+      - `final`   — the completed state, once
 
     Tokens reach the caller through LangGraph's own custom-stream channel rather than a queue
     this module drains between state snapshots. That distinction is the difference between real
     streaming and the appearance of it: draining a queue only when a node boundary produces a new
     snapshot would hold every token until synthesis had finished, then release them in one burst.
+
+    `sources` and `routes` are yielded from the `values` snapshots rather than waiting for the
+    final state, so the UI can show what is being consulted while the answer is still being
+    written. Both are emitted at most once — a snapshot repeats every key it holds, so an
+    unguarded yield would resend the whole source list on every node boundary.
     """
     graph = build_graph(llm, emit=_write_token)
     settings = get_settings()
 
     seen_steps = 0
+    sent_sources = False
+    sent_routes = False
     final_state: SupervisorState | None = None
 
     async for mode, chunk in graph.astream(
@@ -176,9 +185,27 @@ async def stream_supervisor(
         for step in steps[seen_steps:]:
             yield "step", step
         seen_steps = len(steps)
+
+        if not sent_routes and state.get("routes"):
+            sent_routes = True
+            yield "routes", {
+                "routes": list(state["routes"]),
+                "reason": state.get("route_reason", ""),
+            }
+
+        # Emitted once the RAG branch has run, whether or not it found anything: an empty
+        # list is itself information — it tells the user the answer rests on nothing.
+        if not sent_sources and state.get("rag") is not None:
+            sent_sources = True
+            yield "sources", state.get("sources") or []
+
         final_state = state
 
     if final_state is not None:
+        # A run that never touched the RAG branch still owes the client a sources frame, so
+        # the UI is not left waiting on one that will never arrive.
+        if not sent_sources:
+            yield "sources", final_state.get("sources") or []
         yield "final", final_state
 
 

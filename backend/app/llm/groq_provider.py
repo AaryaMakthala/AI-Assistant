@@ -1,7 +1,9 @@
-"""Groq provider (fallback).
+"""Groq provider.
 
-Wired in from Phase 4 rather than added under pressure later: a single-provider
-dependency is what turns a free-tier rate limit into an outage (CLAUDE.md section 7).
+First in the default failover chain (`LLM_PROVIDER_ORDER`), with Gemini behind it. The
+chain itself is wired from Phase 4 rather than added under pressure later: a
+single-provider dependency is what turns a free-tier rate limit into an outage
+(CLAUDE.md section 7).
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ class GroqProvider:
 
     def __init__(self, *, model: str | None = None) -> None:
         settings = get_settings()
-        self.model = model or settings.llm_fallback_model
+        self.model = model or settings.llm_groq_model
         self._api_key = settings.groq_api_key.get_secret_value()
         self._settings = settings
         self._client: Any | None = None

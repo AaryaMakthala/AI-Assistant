@@ -1,4 +1,4 @@
-"""LLM provider abstraction: Gemini primary, Groq fallback."""
+"""LLM provider abstraction with configurable failover (default: Groq → Gemini)."""
 
 from app.llm.base import (
     Completion,

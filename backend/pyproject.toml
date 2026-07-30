@@ -23,6 +23,10 @@ dependencies = [
     "pandas>=2.2",
     "openpyxl>=3.1",
     "langchain-text-splitters>=0.3",
+    # Parses LLM-generated SQL into an AST so the guardrails in CLAUDE.md 4.3 inspect
+    # structure rather than pattern-match strings. Regex screening of SQL is defeated by
+    # comments, casing and whitespace; a parser is not.
+    "sqlglot>=25.0",
     # LLM providers. Gemini is primary, Groq the failover (CLAUDE.md section 2); the
     # official SDKs own retry and streaming-transport details so this repo does not.
     "google-genai>=1.0",

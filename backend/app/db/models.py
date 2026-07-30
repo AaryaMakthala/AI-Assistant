@@ -38,6 +38,7 @@ EMBEDDING_DIM = 384
 USER_ROLES = ("owner", "admin", "member")
 DOCUMENT_STATUSES = ("pending", "processing", "ready", "failed")
 MESSAGE_ROLES = ("user", "assistant", "system", "tool")
+SQL_AUDIT_STATUSES = ("accepted", "rejected", "failed")
 
 _NEW_UUID = text("gen_random_uuid()")
 
@@ -232,6 +233,45 @@ class ChatMessage(Base):
     session: Mapped[ChatSession] = relationship(back_populates="messages")
 
 
+class SqlQueryAudit(Base):
+    """Every query the SQL agent generated, accepted or not (CLAUDE.md 4.3).
+
+    Append-only by design: migration 0003 gives tenants an INSERT policy and no SELECT,
+    UPDATE or DELETE policy at all. Rejected attempts are recorded too — a log of only the
+    queries that ran would omit exactly the entries worth reviewing.
+
+    Deliberately no FK to `users`: an audit row must outlive the account that caused it.
+    """
+
+    __tablename__ = "sql_query_audit"
+    __table_args__ = (
+        CheckConstraint(_in_list("status", SQL_AUDIT_STATUSES), name="ck_sql_audit_status"),
+        CheckConstraint(
+            "row_count IS NULL OR row_count >= 0", name="ck_sql_audit_row_count_nonneg"
+        ),
+        Index("ix_sql_query_audit_org_created", "org_id", "created_at"),
+        Index("ix_sql_query_audit_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_NEW_UUID
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Null when the model produced nothing parseable; `rejection_reason` carries the detail.
+    generated_sql: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    row_count: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 #: Tables holding org-scoped data; all must have RLS enabled and forced.
 ORG_SCOPED_TABLES = (
     "organizations",
@@ -240,6 +280,7 @@ ORG_SCOPED_TABLES = (
     "document_chunks",
     "chat_sessions",
     "chat_messages",
+    "sql_query_audit",
 )
 
 __all__ = [
@@ -247,11 +288,13 @@ __all__ = [
     "EMBEDDING_DIM",
     "MESSAGE_ROLES",
     "ORG_SCOPED_TABLES",
+    "SQL_AUDIT_STATUSES",
     "USER_ROLES",
     "ChatMessage",
     "ChatSession",
     "Document",
     "DocumentChunk",
     "Organization",
+    "SqlQueryAudit",
     "User",
 ]

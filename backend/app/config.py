@@ -83,6 +83,22 @@ class Settings(BaseSettings):
     #: Turns of prior conversation replayed into the prompt.
     chat_history_limit: int = 10
 
+    # --- Guarded SQL agent (CLAUDE.md 4.3, Phase 5) ---
+
+    #: Hard ceiling on rows any generated query may return. Injected into the query as a
+    #: LIMIT rather than trusted to the model, and re-checked after generation.
+    sql_max_rows: int = 500
+    #: Postgres `statement_timeout` for a generated query. A model can easily produce a
+    #: cross join that is valid, allowed, and would run for hours.
+    sql_query_timeout_ms: int = 5_000
+    #: NOLOGIN group role holding column-level SELECT on the allowlisted tables and nothing
+    #: else. Every generated query runs after `SET LOCAL ROLE` to this, so the database
+    #: refuses a write even if every layer above it were bypassed.
+    sql_agent_role: str = "app_sql_agent"
+    #: Attempts allowed to produce a query that passes validation. A rejected query is fed
+    #: back once with the reason; beyond that the model is usually looping on the same idea.
+    sql_max_generation_attempts: int = 2
+
     # --- JWT verification (CLAUDE.md 4.6) ---
 
     #: Supabase now signs session tokens with rotatable asymmetric keys (ES256) published

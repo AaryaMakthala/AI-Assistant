@@ -1,20 +1,30 @@
 # CLAUDE.md — Enterprise AI Knowledge Intelligence Agent
 
 This file is the single source of truth for building this project. Read it fully before
-writing any code. Work **one phase at a time, in order**. After finishing a phase: run its
-acceptance checks, summarize what was built, and **stop and wait for explicit go-ahead**
-before starting the next phase. Do not skip phases or merge them to "save time" — most
-production incidents in agentic-AI systems come from skipping the boring steps (auth,
-input validation, sandboxing) to get to the fun part (agents).
+writing any code. Work **one phase at a time, in order**. After finishing a phase:
+summarize what was built, list modified files, and **stop and wait for explicit
+go-ahead** before starting the next phase. Do not skip phases or merge them to "save
+time" — most production incidents in agentic-AI systems come from skipping the boring
+steps (auth, input validation, sandboxing) to get to the fun part (agents).
 
-If any instruction here conflicts with speed or convenience, this file wins.
+**Testing is deferred.** Per-phase automated test suites are NOT written or run during
+Phases 0–13. Static verification only at each phase (compiles/typechecks, `ruff`,
+`eslint`, `tsc --noEmit`, and quick manual/stubbed sanity checks where useful). The full
+`pytest` / `vitest` suite — including the security suite — is written and run once, in
+Phase 14, after the whole system is running end-to-end. This is a deliberate speed
+tradeoff: it means bugs from an earlier phase may not surface until Phase 14. Flag
+anything you're uncertain about in your phase summary rather than silently assuming it
+works.
+
+If any instruction here conflicts with speed or convenience, this file wins — with the
+above exception for testing.
 
 ---
 
 ## 0. Ground Rules for Claude Code
 
-1. **One phase per work session.** Do not start Phase N+1 until Phase N's acceptance
-   criteria are met and the user has confirmed.
+1. **One phase per work session.** Do not start Phase N+1 until Phase N's deliverables
+   are in place and the user has confirmed.
 2. **No hardcoded secrets, ever.** All keys/URLs come from `.env`, loaded via Pydantic
    `BaseSettings`. `.env` is gitignored from commit #1. Ship `.env.example` with empty
    placeholders instead.
@@ -24,11 +34,13 @@ If any instruction here conflicts with speed or convenience, this file wins.
 4. **The LLM never gets raw write access to anything.** No LLM-generated SQL runs without
    passing through the guardrails in Section 4.3. No MCP tool executes an action (write,
    delete, external API call with side effects) without an explicit allowlist.
-5. **Write tests as you build, not after.** Each phase has a minimum test list — treat it
-   as part of the deliverable, not an optional extra.
+5. **Testing happens once, at the end (Phase 14).** Do not write test files during
+   Phases 0–13 unless explicitly asked. Do not run `pytest`/`vitest` during Phases 0–13
+   unless explicitly asked. Static checks (lint/typecheck/compile) still run every phase.
 6. **Prefer boring, well-understood tools over clever ones.** This project already has
    enough novel surface area (agents, MCP, RAG) — don't also make the plumbing exotic.
-7. **Small, reviewable commits.** One logical change per commit, message says what and why.
+7. **Small, reviewable commits.** One logical change per commit, message says what and
+   why. The user commits manually — do not run `git commit` unless explicitly asked to.
 
 ---
 
@@ -49,11 +61,6 @@ agent to do something the user didn't ask for (prompt injection via retrieved co
 
 ## 2. Finalized Tech Stack
 
-Your draft stack was good but had redundancy (three vector DB options, three LLM
-providers wired in from day one). Simplify to **one primary + one explicit fallback** per
-layer. Add the pieces your draft was missing: secrets management, sandboxed file
-processing, and a real authz model.
-
 ```
 Frontend
   Next.js 15 (App Router) + TypeScript
@@ -71,22 +78,18 @@ Agent Orchestration
 LLMs
   Primary:  Google Gemini Flash
   Fallback: Groq (Llama 3.3 70B)
-  (Skip OpenRouter initially — one fallback is enough; add a second only if you
-   actually hit rate limits in practice.)
 
 Embeddings
   BAAI/bge-small-en-v1.5 (HuggingFace, local inference via sentence-transformers)
-  Pin the exact model — never swap embedding models on a live index (Section 8, Risk 1)
+  Pin the exact model — never swap embedding models on a live index (Section 7, Risk 1)
 
 Vector Storage
-  Primary: Postgres + pgvector (via Supabase) — one database for structured AND
-           vector data means one connection, one backup story, one RLS policy engine.
-  Local dev only: FAISS, for offline iteration without a DB connection.
-  Drop ChromaDB from the stack — it adds a second storage system for no benefit once
-  you have pgvector.
+  Postgres + pgvector (via Supabase) — one database for structured AND vector data.
 
 Relational Database
-  PostgreSQL via Supabase (also holds users, orgs, chat history, document metadata)
+  PostgreSQL via Supabase (also holds users, orgs, chat history, document metadata,
+  and the structured business tables the SQL agent queries — see Section 4.3, this
+  project runs directly against the real application database, not a separate demo copy)
 
 MCP
   Official MCP Python SDK
@@ -118,8 +121,6 @@ Deployment
 
 ## 3. Repository Structure
 
-Create the project in a **new folder**, not inside an existing repo:
-
 ```
 enterprise-ai-agent/
 ├── CLAUDE.md                  ← this file, lives at repo root
@@ -139,7 +140,7 @@ enterprise-ai-agent/
 │   │   ├── db/                   # SQLAlchemy models, migrations (alembic)
 │   │   ├── security/              # auth, RLS helpers, input validation, rate limiting
 │   │   └── workers/                # Celery tasks
-│   └── tests/
+│   └── tests/                       # written once, in Phase 14
 │       ├── unit/
 │       ├── integration/
 │       └── security/            # SQLi attempts, prompt-injection attempts, auth bypass
@@ -155,9 +156,8 @@ enterprise-ai-agent/
 
 ## 4. Security Principles (non-negotiable, apply from Phase 1 onward)
 
-This section exists because "AI agent that runs SQL and calls external tools" is exactly
-the kind of system that gets breached in demos. Treat every item below as a blocker, not
-a nice-to-have.
+Deferred testing does not mean deferred security *design*. Every item below is built in
+from the start — only the automated proof that it works is deferred to Phase 14.
 
 ### 4.1 Secrets
 - All API keys, DB URLs, JWT secrets live in `.env`, never in code or commit history.
@@ -176,15 +176,23 @@ a nice-to-have.
   traversal.
 
 ### 4.3 The SQL Agent Is the Highest-Risk Component — Guard It Explicitly
+- The SQL agent runs against the **real application database** directly (no separate
+  demo/sample dataset). Because of this, the guardrails below are load-bearing, not
+  cosmetic — treat them as blockers even though their automated proof is deferred.
 - The DB role the SQL agent connects as is **read-only** at the Postgres level (`GRANT
-  SELECT` only). Even if the LLM generates `DROP TABLE`, the database itself refuses it.
+  SELECT` only), scoped to the specific business tables it's meant to answer questions
+  about. Even if the LLM generates `DROP TABLE`, the database itself refuses it.
 - Maintain an explicit table/column allowlist the agent is told about via `get_schema()`
-  — do not expose internal/admin tables to the schema tool.
+  — do not expose internal/admin tables (users, sessions, credentials, audit logs) to the
+  schema tool, ever.
 - Run every generated query through a SQL parser (e.g. `sqlglot`) that rejects anything
   that isn't a single `SELECT` statement before execution — reject multiple statements,
   DDL/DML keywords, and comments used to smuggle extra statements.
 - Enforce a hard `LIMIT` (e.g. 500 rows) and a query timeout on every execution.
 - Log every generated query with the user ID that triggered it.
+- Because this hits real data with no test coverage until Phase 14, prefer the most
+  conservative allowlist that still satisfies the phase's goal — narrower is safer here
+  than broad-and-untested.
 
 ### 4.4 Prompt Injection From Retrieved Content
 - Treat all retrieved document text and all MCP tool results as **data, not
@@ -219,21 +227,24 @@ a nice-to-have.
 - Pydantic models validate every request body — no raw dict access to user input.
 
 ### 4.8 Dependency Hygiene
-- Run `pip-audit` (backend) and `npm audit` (frontend) as part of CI before each phase's
-  code is considered "done."
+- Run `pip-audit` (backend) and `npm audit` (frontend) once, in Phase 14, alongside the
+  rest of the deferred verification pass.
 
 ---
 
 ## 5. Phased Build Plan
 
-Each phase lists: **Goal → Tasks → Deliverable → Acceptance Criteria**. Do not proceed
-past a phase until acceptance criteria pass.
+Each phase lists: **Goal → Tasks → Deliverable → Verification (this phase)**. "Verification"
+is static only (compile/lint/typecheck, targeted manual/stubbed sanity runs where they're
+cheap) — no automated test suite until Phase 14. Do not proceed past a phase until its
+deliverable is actually in place; "verification passes" is not the same bar as "acceptance
+criteria met," and that gap is intentional and closes in Phase 14.
 
 ### Phase 0 — Scaffolding
 - Goal: an empty but correctly wired monorepo.
 - Tasks: create folder structure above; init FastAPI app with `/health`; init Next.js
   app; docker-compose with postgres+redis; `.env.example`; `.gitignore`.
-- Acceptance: `docker compose up` starts postgres+redis; `GET /health` returns 200;
+- Verification: `docker compose up` starts postgres+redis; `GET /health` returns 200;
   Next.js dev server renders a blank page.
 
 ### Phase 1 — Backend Core & Config
@@ -241,23 +252,24 @@ past a phase until acceptance criteria pass.
 - Tasks: `config.py` (Pydantic BaseSettings), async SQLAlchemy engine, Alembic setup,
   Loguru structured logging, global exception handler that never leaks stack traces to
   the client.
-- Acceptance: app boots with missing `.env` failing loudly and clearly, not silently.
+- Verification: app boots with missing `.env` failing loudly and clearly, not silently.
 
 ### Phase 2 — Database Schema & RLS
 - Goal: core tables + row-level security from day one, not bolted on later.
 - Tasks: `organizations`, `users`, `documents`, `document_chunks` (with vector column),
   `chat_sessions`, `chat_messages`. Write RLS policies for org-scoped access. Alembic
   migration.
-- Acceptance: a test proves user A cannot read user B's org's documents via direct SQL
-  under the app's DB role.
+- Verification: migration applies cleanly; manually confirm (e.g. via `psql`) that a
+  cross-org `SELECT` under the app's DB role returns nothing. Full automated proof of
+  this is part of the Phase 14 security suite.
 
 ### Phase 3 — Document Ingestion Pipeline
 - Goal: upload → extract → chunk → embed → store, running as a background job.
 - Tasks: upload endpoint (validated, sandboxed), Celery task for extraction (PyMuPDF /
   python-docx / pandas), `RecursiveCharacterTextSplitter`, bge-small embeddings, store
   vectors + metadata in pgvector.
-- Acceptance: uploading a sample PDF results in queryable chunks in
-  `document_chunks` with correct `org_id` and `source`/`page` metadata.
+- Verification: uploading a sample PDF results in queryable chunks in `document_chunks`
+  with correct `org_id` and `source`/`page` metadata (manual check).
 
 ### Phase 4 — RAG Retrieval + Basic Chat
 - Goal: a working single-purpose RAG chat endpoint (no SQL/MCP yet), streaming to the
@@ -265,73 +277,93 @@ past a phase until acceptance criteria pass.
 - Tasks: retrieval function (top-k vector search, org-scoped), prompt template with
   injection-safe delimiters (Section 4.4), streaming response via SSE, source citations
   returned alongside the answer.
-- Acceptance: asking about content from an uploaded doc returns a correct answer with a
-  citation; asking something not in any doc returns an honest "I don't have that
-  information" instead of a hallucinated answer.
+- Verification: asking about content from an uploaded doc returns a correct answer with
+  a citation; asking something not in any doc returns an honest "I don't have that
+  information" (manual/spot check — automated proof deferred to Phase 14).
 
 ### Phase 5 — Guarded SQL Agent
-- Goal: natural-language → safe SQL → result, on a **separate read-only** demo dataset
-  (e.g. sample customers/orders tables), fully isolated from the real app tables.
+- Goal: natural-language → safe SQL → result, running directly against the real
+  application's structured business tables (see Section 4.3 — no separate demo dataset).
 - Tasks: `get_schema()`/`describe_table()`/`execute_query()` tools, sqlglot validation
-  layer, row limit + timeout, read-only DB role, full audit logging.
-- Acceptance: an attempted `DROP TABLE`/`DELETE`/stacked-query prompt injection is
-  rejected before reaching the database, with a test proving it.
+  layer, row limit + timeout, read-only DB role scoped to an explicit table allowlist,
+  full audit logging.
+- Verification: manually attempt a `DROP TABLE`/stacked-query prompt and confirm it's
+  rejected before reaching the database. This one check is worth doing live even though
+  the formal test is deferred — it's the highest-risk component in the system.
 
 ### Phase 6 — MCP Servers
 - Goal: Document MCP and Database MCP wrapping Phases 3–5 behind the MCP protocol;
   GitHub MCP (read-only) as the external-system example.
 - Tasks: implement MCP servers per Section 4.5 scoping rules; argument validation on
   every tool.
-- Acceptance: an MCP client can discover and call each tool; malformed arguments are
-  rejected with a clear error, not a crash.
+- Verification: an MCP client can discover and call each tool; manually confirm malformed
+  arguments are rejected with a clear error, not a crash.
 
 ### Phase 7 — LangGraph Multi-Agent Orchestration
 - Goal: a supervisor agent that routes a question to RAG agent, SQL agent, or MCP agent
   (or a combination), then synthesizes a final answer.
 - Tasks: intent-routing node, sub-agent nodes wrapping Phases 4–6, response synthesis
   node, max-iteration guard to prevent infinite agent loops.
-- Acceptance: a mixed question ("what's our refund policy, and how many refunds did we
-  process last month") correctly triggers both RAG and SQL agents and merges the answer.
+- Verification: a mixed question ("what's our refund policy, and how many refunds did we
+  process last month") correctly triggers both RAG and SQL agents and merges the answer
+  (manual run).
 
 ### Phase 8 — Frontend Chat UI
 - Goal: a polished chat interface (see Section 6 spec).
 - Tasks: streaming chat pane, file upload with progress, source citation display, chat
   history sidebar, markdown rendering for answers.
-- Acceptance: a full round trip works end-to-end from the browser against the real
-  backend, with visible sources.
+- Verification: a full round trip works end-to-end from the browser against the real
+  backend, with visible sources (manual click-through).
 
 ### Phase 9 — Auth & RBAC Integration (Frontend)
 - Goal: login/signup via Supabase Auth, JWT attached to every API call, role-aware UI
   (e.g. hide admin-only views).
-- Acceptance: an unauthenticated request to any protected endpoint is rejected; a
-  logged-in user only ever sees their org's data in the UI.
+- Verification: manually confirm an unauthenticated request to a protected endpoint is
+  rejected, and a logged-in user only sees their org's data in the UI.
 
 ### Phase 10 — Background Jobs Hardening
 - Goal: Celery/Redis handles all slow work; retries and dead-letter handling for failed
   ingestion jobs.
-- Acceptance: a large (e.g. 100-page) PDF upload doesn't block the API and completes
+- Verification: a large (e.g. 100-page) PDF upload doesn't block the API and completes
   asynchronously with a visible status in the UI.
 
 ### Phase 11 — Observability
 - Goal: Sentry for errors, LangSmith for agent traces (non-prod only unless
   data-handling is explicitly reviewed), structured logs correlated by request ID.
-- Acceptance: a deliberately triggered error shows up in Sentry with useful context and
+- Verification: a deliberately triggered error shows up in Sentry with useful context and
   no leaked secrets.
 
-### Phase 12 — Security & Integration Testing
-- Goal: a dedicated `tests/security/` suite.
-- Tasks: SQL injection attempts against the SQL agent, prompt-injection documents fed
-  into RAG, auth-bypass attempts (missing JWT, wrong org_id, expired token), file-upload
-  fuzzing (oversized files, disallowed types, zip bombs).
-- Acceptance: every attack in the suite is blocked and produces an audit log entry, not
-  a silent failure.
+### Phase 12 — MCP/Agent Hardening Review
+- Goal: a design-level pass over everything built so far against Section 4, before the
+  formal test suite is written.
+- Tasks: re-read Sections 4.3–4.6 against the actual code; fix anything found; note
+  anything ambiguous for the Phase 14 test suite to specifically target.
+- Verification: written summary of the review; no automated tests yet.
 
 ### Phase 13 — Dockerize & Deploy
 - Goal: reproducible deployment.
 - Tasks: production Dockerfiles for frontend/backend, docker-compose for local
   full-stack, deploy backend to Railway/Render, frontend to Vercel, confirm env vars are
   set via each platform's secret manager (not committed anywhere).
-- Acceptance: a fresh clone + documented setup steps produces a working deployed system.
+- Verification: a fresh clone + documented setup steps produces a working deployed
+  system.
+
+### Phase 14 — Full Test Pass (Testing happens here, once, for everything)
+- Goal: the single point where every phase's acceptance criteria gets a real automated
+  test, run against the fully assembled system.
+- Tasks:
+  - Backend: `pytest` covering unit + integration for Phases 1–11 (RLS cross-org
+    isolation, ingestion correctness, RAG citation/honesty behavior, SQL agent
+    injection rejection, MCP argument validation, agent routing/max-iteration guard).
+  - `tests/security/`: SQL injection attempts against the SQL agent, prompt-injection
+    documents fed into RAG, auth-bypass attempts (missing JWT, wrong org_id, expired
+    token), file-upload fuzzing (oversized files, disallowed types, zip bombs).
+  - Frontend: `vitest`/`playwright` for the chat UI round trip and auth-gated routes.
+  - `pip-audit` and `npm audit`.
+- Verification (this is the real acceptance bar for the whole project): every check
+  above passes, or every failure is triaged, fixed, and re-run. Anything not fixable
+  immediately goes into the Risk Register (Section 7) as a tracked, explicit gap — not a
+  silent TODO.
 
 ---
 
@@ -358,14 +390,16 @@ past a phase until acceptance criteria pass.
 |---|---|---|
 | Vector search returns garbage after a model change | Query embedded with a different model than the stored chunks | Pin embedding model version in config; re-embed the whole index on any change, never mix |
 | SQL agent touches unintended tables | Schema tool exposes more than it should | Explicit table allowlist in `get_schema()`, never introspect the full DB automatically |
+| SQL agent runs against real data with no automated proof until Phase 14 | Testing deferred by design | Keep the allowlist as narrow as possible per phase; do the one manual injection check in Phase 5 even though the suite is deferred |
 | Free-tier LLM rate limits stall production | Single provider dependency | Gemini → Groq fallback wired from Phase 4, not bolted on later |
 | Large upload blocks the API | Synchronous processing in the request handler | All ingestion is a Celery task from Phase 3 onward |
-| Prompt injection via a malicious uploaded doc | Retrieved text treated as instructions | Delimiter + system-instruction pattern (4.4), tested in Phase 12 |
+| Prompt injection via a malicious uploaded doc | Retrieved text treated as instructions | Delimiter + system-instruction pattern (4.4), formally tested in Phase 14 |
 | Agent loops forever | No termination condition in the LangGraph graph | Explicit max-iteration guard on the supervisor node |
-| Data leak across organizations | Missing or bypassed authz check | Enforce both API-layer checks and Postgres RLS (4.6) |
+| Data leak across organizations | Missing or bypassed authz check | Enforce both API-layer checks and Postgres RLS (4.6); formally tested in Phase 14 |
 | Secrets committed to git | `.env` accidentally staged | `.gitignore` from commit #1, `.env.example` only, pre-commit secret scan |
 | Cost/quota overrun | Free-tier limits hit silently | Log token usage per request from Phase 4; alert threshold in Phase 11 |
 | Zip bomb / malformed file crashes a worker | No size/type validation before processing | Enforce limits in Phase 3 before the file reaches the extraction library |
+| A bug from an early phase isn't caught until Phase 14 | Per-phase testing deferred by design | Phase 12 hardening review exists specifically to catch design-level issues before the formal suite; keep phase summaries honest about uncertainty |
 
 ---
 
@@ -374,9 +408,10 @@ past a phase until acceptance criteria pass.
 - **Python**: `black` + `ruff`, full type hints, every API input/output is a Pydantic
   model — no raw `dict` in request/response signatures.
 - **TypeScript**: strict mode on, `eslint` + `prettier`, no `any`.
-- **Tests**: `pytest` (backend), `vitest`/`playwright` (frontend) — each phase's
-  acceptance criteria maps to at least one automated test, not just manual verification.
-- **Commits**: one logical change per commit; message states what changed and why.
+- **Tests**: written once, in Phase 14 — `pytest` (backend), `vitest`/`playwright`
+  (frontend). Each phase's deliverable maps to at least one Phase 14 test.
+- **Commits**: one logical change per commit; message states what changed and why. User
+  commits manually.
 - **No silent TODOs**: if something is deferred, it goes in this file's risk register or
   a tracked issue, not a comment that gets forgotten.
 
@@ -408,6 +443,5 @@ LANGSMITH_API_KEY=
 # GitHub MCP
 GITHUB_TOKEN=
 ```
-
 
 ---

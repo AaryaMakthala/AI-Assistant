@@ -10,14 +10,14 @@
  * "consulting two sources" from "broken".
  */
 
-import { Database, FileSearch, Github, MessageCircle } from "lucide-react";
+import { Database, FileSearch, GitPullRequest, MessageCircle } from "lucide-react";
 import type { AgentRoute } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const ROUTE_LABELS: Record<AgentRoute, { label: string; Icon: typeof Database }> = {
   documents: { label: "Documents", Icon: FileSearch },
   business_data: { label: "Business data", Icon: Database },
-  external: { label: "Code", Icon: Github },
+  external: { label: "Code", Icon: GitPullRequest },
   direct: { label: "Direct reply", Icon: MessageCircle },
 };
 

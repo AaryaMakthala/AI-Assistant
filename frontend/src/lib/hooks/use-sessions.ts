@@ -46,6 +46,10 @@ export function useSessions(token?: string) {
   }, [token]);
 
   useEffect(() => {
+    // Fetch-on-mount: `refresh` flips the loading flag before awaiting, which the rule
+    // reads as a cascading render. The cascade is the point here — one extra render to
+    // show the spinner, then one to show the rows.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 

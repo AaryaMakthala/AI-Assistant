@@ -9,7 +9,7 @@
  */
 
 import { Loader2, MessageSquareText, WifiOff } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Composer } from "./composer";
 import { MessageBubble } from "./message-bubble";
 import type { Citation } from "@/lib/api";
@@ -60,9 +60,10 @@ export function ChatPane({
 
   // Re-pin whenever a new turn starts, so sending a message always brings the view back
   // down even if the user had scrolled up to read something.
-  useEffect(() => {
-    if (isStreaming) setIsPinned(true);
-  }, [isStreaming]);
+  const handleSend = (message: string) => {
+    setIsPinned(true);
+    onSend(message);
+  };
 
   const isEmpty = !turns.length && !isLoadingHistory;
 
@@ -86,7 +87,7 @@ export function ChatPane({
             </div>
           )}
 
-          {isEmpty && <EmptyState onSend={onSend} disabled={disabled} />}
+          {isEmpty && <EmptyState onSend={handleSend} disabled={disabled} />}
 
           {turns.length > 0 && (
             <div className="space-y-6">
@@ -117,7 +118,7 @@ export function ChatPane({
       </div>
 
       <Composer
-        onSend={onSend}
+        onSend={handleSend}
         onStop={onStop}
         isStreaming={isStreaming}
         disabled={disabled}

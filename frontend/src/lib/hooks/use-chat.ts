@@ -106,7 +106,9 @@ export function useChat({
   // Read inside the async send loop, which closes over the values it captured at call
   // time. A ref keeps the callbacks current without re-creating `send` on every render.
   const callbacksRef = useRef({ onSessionCreated, onTurnComplete });
-  callbacksRef.current = { onSessionCreated, onTurnComplete };
+  useEffect(() => {
+    callbacksRef.current = { onSessionCreated, onTurnComplete };
+  }, [onSessionCreated, onTurnComplete]);
   // Mirrors `sessionId` so the stream handler can compare against it without a state
   // updater — updaters must stay pure, and StrictMode calls them twice, which would fire
   // the sidebar refresh twice for one new session.

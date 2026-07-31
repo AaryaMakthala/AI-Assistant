@@ -65,19 +65,51 @@ export interface ChatMessageListResponse {
   messages: ChatMessage[];
 }
 
+export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
+
 export interface DocumentSummary {
   id: string;
   filename: string;
   mime_type: string;
   size_bytes: number;
-  status: "pending" | "processing" | "ready" | "failed";
+  status: DocumentStatus;
   page_count: number | null;
+  chunk_count: number | null;
+  word_count: number | null;
   error_message: string | null;
+  org_id: string;
+  uploaded_by: string | null;
   created_at: string;
+  updated_at: string;
+  processing_started_at: string | null;
+  processing_completed_at: string | null;
 }
 
 export interface DocumentListResponse {
   documents: DocumentSummary[];
+  total: number;
+}
+
+/** The polling view of one document. Mirrors `DocumentStatusResponse`. */
+export interface DocumentStatusDetail {
+  id: string;
+  org_id: string;
+  filename: string;
+  upload_status: string;
+  processing_status: DocumentStatus;
+  /** Ingestion has finished, one way or the other; stop polling. */
+  is_terminal: boolean;
+  /** Chunks exist and are searchable. */
+  is_indexed: boolean;
+  chunk_count: number | null;
+  page_count: number | null;
+  word_count: number | null;
+  retry_count: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  processing_started_at: string | null;
+  processing_completed_at: string | null;
 }
 
 export interface UploadAcceptedResponse {

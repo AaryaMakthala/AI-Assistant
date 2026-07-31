@@ -33,6 +33,21 @@ def create_celery() -> Celery:
         worker_prefetch_multiplier=1,
         task_track_started=True,
         result_expires=24 * 3600,
+        # A task whose worker dies is redelivered, but only if the worker was lost
+        # cleanly. `reject_on_worker_lost` covers the harder case — a SIGKILL from an OOM
+        # killer — by requeuing rather than silently dropping the message. The reaper in
+        # app/workers/maintenance.py exists because even this is not total.
+        task_reject_on_worker_lost=True,
+        beat_schedule={
+            "reap-stuck-documents": {
+                "task": "app.workers.maintenance.reap_stuck_documents",
+                "schedule": float(settings.ingestion_reap_interval_seconds),
+                # Expire a missed tick rather than letting beat catch up: if the worker
+                # was down for an hour, running twelve identical sweeps on restart is
+                # pure duplication — the next scheduled one covers the same ground.
+                "options": {"expires": float(settings.ingestion_reap_interval_seconds)},
+            },
+        },
     )
     app.autodiscover_tasks(["app.workers"])
     return app

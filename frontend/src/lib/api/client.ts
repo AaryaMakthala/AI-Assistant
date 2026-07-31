@@ -13,6 +13,7 @@ import type {
   ChatSessionListResponse,
   ChatStreamEvent,
   DocumentListResponse,
+  DocumentStatusDetail,
   DocumentSummary,
   MeResponse,
   OrgMemberListResponse,
@@ -164,6 +165,56 @@ export function getDocument(
     `/documents/${encodeURIComponent(documentId)}`,
     options,
   );
+}
+
+/** Ingestion progress for one document. The endpoint the library polls. */
+export function getDocumentStatus(
+  documentId: string,
+  options: RequestOptions = {},
+): Promise<DocumentStatusDetail> {
+  return getJson<DocumentStatusDetail>(
+    `/documents/${encodeURIComponent(documentId)}/status`,
+    options,
+  );
+}
+
+/**
+ * Delete a document and everything derived from it.
+ *
+ * The backend removes the row, its chunks and vectors, its failure trail and the stored
+ * bytes. A 404 here means the document is already gone — which the caller may reasonably
+ * treat as success, since the desired end state holds either way.
+ */
+export async function deleteDocument(
+  documentId: string,
+  options: RequestOptions = {},
+): Promise<void> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(options.token),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+}
+
+/** Re-run ingestion for a document whose bytes are already stored. */
+export async function reprocessDocument(
+  documentId: string,
+  options: RequestOptions = {},
+): Promise<UploadAcceptedResponse> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/reprocess`,
+    {
+      method: "POST",
+      headers: authHeaders(options.token),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as UploadAcceptedResponse;
 }
 
 export async function uploadDocument(

@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 150
 
+    # --- Background job hardening (Phase 10) ---
+
+    #: How often the reaper sweeps for ingestion jobs that will never report back. Cheap
+    #: (two indexed queries), so the interval is set by how long a user should stare at a
+    #: spinner before the truth arrives, not by cost.
+    ingestion_reap_interval_seconds: int = 300
+    #: Kill switch for the sweep. Set false when running a one-off worker against a shared
+    #: database, where another environment's in-flight jobs would look abandoned.
+    ingestion_reaper_enabled: bool = True
+    #: Attempts to embed a batch before falling back to embedding its chunks one at a time.
+    embedding_max_attempts: int = 2
+    #: Chunks embedded per batch. Larger is faster per chunk but loses more work to a
+    #: single failure and holds more of the model's activations in memory at once.
+    embedding_batch_size: int = 32
+
     # --- Retrieval and generation (Phase 4) ---
 
     #: Chunks fetched per question. Beyond roughly this many, recall gains flatten while

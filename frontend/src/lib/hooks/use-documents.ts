@@ -21,15 +21,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
+  deleteDocument,
   getDocument,
   listDocuments,
+  reprocessDocument,
   uploadDocumentWithProgress,
   type DocumentSummary,
 } from "@/lib/api";
 
-/** Extensions the backend accepts (CLAUDE.md 4.2). Checked client-side purely to fail
- * fast with a clear message — the backend allowlist is the one that actually enforces. */
-export const ACCEPTED_EXTENSIONS = ["pdf", "docx", "csv", "xlsx", "txt"] as const;
+/** Extensions the backend accepts (CLAUDE.md 4.2, plus Markdown from Phase 10). Checked
+ * client-side purely to fail fast with a clear message — the backend allowlist is the one
+ * that actually enforces. */
+export const ACCEPTED_EXTENSIONS = [
+  "pdf",
+  "docx",
+  "csv",
+  "xlsx",
+  "txt",
+  "md",
+  "markdown",
+] as const;
 
 /** Mirrors the backend's `max_upload_bytes`. Same reasoning: a local check saves a
  * 25 MB round trip that would only be rejected, but it is not the enforcement point. */
@@ -82,6 +93,8 @@ export function useDocuments(token?: string) {
   const [uploads, setUploads] = useState<UploadState[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  /** Documents with a delete in flight, so their row can show it and block a second click. */
+  const [deletingIds, setDeletingIds] = useState<ReadonlySet<string>>(new Set());
 
   const pollCountRef = useRef(0);
   const mountedRef = useRef(true);
@@ -197,6 +210,78 @@ export function useDocuments(token?: string) {
     setUploads((current) => current.filter((item) => item.id !== id));
   }, []);
 
+  /**
+   * Delete a document and everything derived from it.
+   *
+   * The row is removed from local state only after the server confirms, so a failed
+   * delete leaves the library showing what is actually still there. A 404 counts as
+   * success: the document is gone, which is what was asked for.
+   */
+  const remove = useCallback(
+    async (documentId: string) => {
+      if (!token) return;
+      setDeletingIds((current) => new Set(current).add(documentId));
+      try {
+        await deleteDocument(documentId, { token });
+      } catch (caught) {
+        if (!(caught instanceof ApiError && caught.status === 404)) {
+          if (mountedRef.current) {
+            setError(
+              caught instanceof ApiError
+                ? caught.message
+                : "The document could not be deleted.",
+            );
+          }
+          return;
+        }
+      } finally {
+        if (mountedRef.current) {
+          setDeletingIds((current) => {
+            const next = new Set(current);
+            next.delete(documentId);
+            return next;
+          });
+        }
+      }
+
+      if (!mountedRef.current) return;
+      setDocuments((current) => current.filter((row) => row.id !== documentId));
+      // Drop any upload row that was tracking it, so a deleted document does not linger
+      // in the in-flight list being polled for a status it no longer has.
+      setUploads((current) =>
+        current.filter((item) => item.documentId !== documentId),
+      );
+      setError(undefined);
+    },
+    [token],
+  );
+
+  /** Re-run ingestion for a document that failed. */
+  const reprocess = useCallback(
+    async (documentId: string) => {
+      if (!token) return;
+      try {
+        const accepted = await reprocessDocument(documentId, { token });
+        if (!mountedRef.current) return;
+        // Reset the polling budget so the new job gets a full window.
+        pollCountRef.current = 0;
+        setDocuments((current) =>
+          current.map((row) => (row.id === documentId ? accepted.document : row)),
+        );
+        setError(undefined);
+      } catch (caught) {
+        if (mountedRef.current) {
+          setError(
+            caught instanceof ApiError
+              ? caught.message
+              : "Processing could not be restarted.",
+          );
+        }
+      }
+    },
+    [token],
+  );
+
   // Follow queued and in-flight ingestion jobs to a terminal status.
   const pending = documents.filter(
     (document) => document.status === "pending" || document.status === "processing",
@@ -263,8 +348,12 @@ export function useDocuments(token?: string) {
     uploads,
     isLoading,
     error,
+    deletingIds,
     refresh,
     upload,
     dismissUpload,
+    remove,
+    reprocess,
+    clearError: useCallback(() => setError(undefined), []),
   };
 }

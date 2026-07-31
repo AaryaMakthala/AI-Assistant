@@ -74,7 +74,9 @@ class AllowedType:
     sniff: _Sniffer
 
 
-#: The allowlist from CLAUDE.md 4.2. Anything not named here is refused.
+#: The allowlist from CLAUDE.md 4.2, plus Markdown (Phase 10). Anything not named here is
+#: refused. Markdown is read as plain UTF-8 text — the syntax is never rendered, and no
+#: link, image or HTML block in it is ever fetched, so it carries no more risk than .txt.
 ALLOWED_TYPES: dict[str, AllowedType] = {
     "pdf": AllowedType("pdf", "application/pdf", _is_pdf),
     "docx": AllowedType(
@@ -89,6 +91,11 @@ ALLOWED_TYPES: dict[str, AllowedType] = {
     ),
     "csv": AllowedType("csv", "text/csv", _is_text),
     "txt": AllowedType("txt", "text/plain", _is_text),
+    # Both spellings are in common use and are the same format. They deliberately share one
+    # AllowedType: `extension` is the canonical name the extractor dispatches on, so a
+    # `.markdown` upload is handled by the `md` extractor rather than needing its own.
+    "md": AllowedType("md", "text/markdown", _is_text),
+    "markdown": AllowedType("md", "text/markdown", _is_text),
 }
 
 _ALLOWED_LIST = ", ".join(sorted(ALLOWED_TYPES))

@@ -7,7 +7,8 @@
  * neither collapses to a few rows on a short screen.
  */
 
-import { MessageSquare, Plus, Trash2 } from "lucide-react";
+import { FolderOpen, MessageSquare, Plus, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 import { DocumentLibrary } from "./document-library";
 import { MembersPanel } from "./members-panel";
@@ -22,6 +23,7 @@ export function Sidebar({
   activeSessionId,
   documents,
   uploads,
+  deletingDocumentIds,
   isDisabled,
   canManageOrg,
   token,
@@ -30,11 +32,14 @@ export function Sidebar({
   onDeleteSession,
   onUpload,
   onDismissUpload,
+  onDeleteDocument,
+  onReprocessDocument,
 }: {
   sessions: ChatSession[];
   activeSessionId?: string;
   documents: DocumentSummary[];
   uploads: UploadState[];
+  deletingDocumentIds?: ReadonlySet<string>;
   isDisabled?: boolean;
   /** Owners and admins only. Presentation; the server gates the data independently. */
   canManageOrg?: boolean;
@@ -44,6 +49,8 @@ export function Sidebar({
   onDeleteSession: (id: string) => void;
   onUpload: (file: File) => void;
   onDismissUpload: (id: string) => void;
+  onDeleteDocument: (id: string) => void;
+  onReprocessDocument: (id: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("chats");
 
@@ -128,13 +135,31 @@ export function Sidebar({
       )}
 
       {activeTab === "documents" && (
-        <DocumentLibrary
-          documents={documents}
-          uploads={uploads}
-          onUpload={onUpload}
-          onDismissUpload={onDismissUpload}
-          disabled={isDisabled}
-        />
+        <>
+          <DocumentLibrary
+            documents={documents}
+            uploads={uploads}
+            deletingIds={deletingDocumentIds}
+            onUpload={onUpload}
+            onDismissUpload={onDismissUpload}
+            onDelete={onDeleteDocument}
+            onReprocess={onReprocessDocument}
+            disabled={isDisabled}
+          />
+          <div className="border-t border-border px-3 py-2">
+            <Link
+              href="/documents"
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted",
+                "transition-colors hover:text-foreground focus-visible:ring-2",
+                "focus-visible:ring-accent focus-visible:outline-none",
+              )}
+            >
+              <FolderOpen className="size-3.5" aria-hidden />
+              Manage all documents
+            </Link>
+          </div>
+        </>
       )}
 
       {activeTab === "members" && (

@@ -62,6 +62,7 @@ export function Workspace() {
         activeSessionId={chat.sessionId}
         documents={documents.documents}
         uploads={documents.uploads}
+        deletingDocumentIds={documents.deletingIds}
         isDisabled={!isAuthenticated}
         canManageOrg={canManageOrg}
         token={token}
@@ -81,6 +82,8 @@ export function Workspace() {
         }}
         onUpload={(file) => void documents.upload(file)}
         onDismissUpload={documents.dismissUpload}
+        onDeleteDocument={(id) => void documents.remove(id)}
+        onReprocessDocument={(id) => void documents.reprocess(id)}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">

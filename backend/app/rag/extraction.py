@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -28,6 +29,48 @@ _OOXML_MARKERS = {
     "docx": "word/document.xml",
     "xlsx": "xl/workbook.xml",
 }
+
+#: Zero-width and bidirectional control characters. Invisible in any viewer, but they land
+#: inside tokens and split a word into two the embedding model has never seen. A PDF
+#: extractor emits them routinely; they also happen to be the classic way to hide text in a
+#: document, so removing them makes what is indexed match what a human reads.
+#: Written as escapes rather than literals so the source stays greppable and reviewable.
+_INVISIBLE = re.compile("[​-‏‪-‮⁠-⁤﻿]")
+
+#: Any run of horizontal whitespace, including the non-breaking and typographic spaces PDF
+#: extraction produces.
+_HORIZONTAL_WS = re.compile(r"[^\S\n]+")
+
+#: Three or more newlines — i.e. more than one blank line between blocks.
+_EXTRA_BLANK_LINES = re.compile(r"\n{3,}")
+
+
+def normalize_text(raw: str) -> str:
+    """Collapse extraction artefacts into clean, embeddable text.
+
+    Three transformations, each earning its place: invisible characters are dropped,
+    runs of horizontal whitespace become a single space, and runs of blank lines collapse
+    to one. A single blank line is preserved because it is the paragraph boundary the
+    chunker splits on first — flattening it would cost the splitter its best separator.
+
+    This runs before chunking, so chunk boundaries and the stored text agree. Normalizing
+    afterwards would let a chunk be sized against whitespace that is then thrown away.
+    """
+    text = _INVISIBLE.sub("", raw.replace("\r\n", "\n").replace("\r", "\n"))
+    text = _HORIZONTAL_WS.sub(" ", text)
+    # Trailing spaces first, so a line of only spaces becomes empty and is then eligible
+    # to be collapsed as a blank line rather than surviving as whitespace.
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    return _EXTRA_BLANK_LINES.sub("\n\n", text).strip()
+
+
+def count_words(text: str) -> int:
+    """Whitespace-delimited word count.
+
+    Deliberately naive: this is a size signal shown in the UI, not linguistic analysis,
+    and a real tokenizer here would cost far more than the number is worth.
+    """
+    return len(text.split())
 
 
 class ExtractionError(Exception):
@@ -159,6 +202,20 @@ def _extract_txt(path: Path) -> Iterator[ExtractedPage]:
         yield ExtractedPage(page=None, text=text, label="document")
 
 
+def _extract_markdown(path: Path) -> Iterator[ExtractedPage]:
+    """Markdown as plain text, deliberately unrendered.
+
+    The syntax is left in place rather than stripped: `## Refund policy` embeds just as
+    well as `Refund policy`, and a heading marker is a useful structural hint to the model
+    reading a retrieved chunk. Nothing here parses links or HTML blocks, so no reference in
+    the file is ever resolved or fetched — the same treatment .txt gets, which is what
+    keeps a Markdown upload from being a request-forgery primitive.
+    """
+    text = _decode_text(path).strip()
+    if text:
+        yield ExtractedPage(page=None, text=text, label="document")
+
+
 def _extract_csv(path: Path) -> Iterator[ExtractedPage]:
     content = _decode_text(path)
     try:
@@ -200,14 +257,19 @@ _EXTRACTORS = {
     "xlsx": _extract_xlsx,
     "csv": _extract_csv,
     "txt": _extract_txt,
+    "md": _extract_markdown,
 }
 
 
 def extract_pages(path: Path, *, extension: str) -> list[ExtractedPage]:
-    """Extract text from a stored upload, dispatching on its validated extension.
+    """Extract and normalize text from a stored upload, dispatching on its extension.
 
     The extension comes from the allowlist check at upload time, never from the
     filename at this point — by here the file is named after a UUID.
+
+    Normalization happens here rather than in each extractor so every format gets it, and
+    a page left empty by it is dropped: a page of nothing but whitespace would otherwise
+    become a chunk of nothing, take up a retrieval slot, and cite a page with no content.
     """
     extractor = _EXTRACTORS.get(extension)
     if extractor is None:
@@ -215,10 +277,21 @@ def extract_pages(path: Path, *, extension: str) -> list[ExtractedPage]:
     if not path.exists():
         raise ExtractionError("Stored file is missing.")
 
-    pages = list(extractor(path))
+    pages = [
+        ExtractedPage(page=page.page, text=normalized, label=page.label)
+        for page in extractor(path)
+        if (normalized := normalize_text(page.text))
+    ]
     if not pages:
         raise ExtractionError("No readable text was found in this document.")
     return pages
 
 
-__all__ = ["CSV_ROWS_PER_PAGE", "ExtractedPage", "ExtractionError", "extract_pages"]
+__all__ = [
+    "CSV_ROWS_PER_PAGE",
+    "ExtractedPage",
+    "ExtractionError",
+    "count_words",
+    "extract_pages",
+    "normalize_text",
+]

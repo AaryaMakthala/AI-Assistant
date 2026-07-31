@@ -37,8 +37,14 @@ EMBEDDING_DIM = 384
 
 USER_ROLES = ("owner", "admin", "member")
 DOCUMENT_STATUSES = ("pending", "processing", "ready", "failed")
+#: Terminal statuses. A document in one of these is not going to change on its own, which
+#: is what lets the UI stop polling and the reaper skip it.
+TERMINAL_DOCUMENT_STATUSES = ("ready", "failed")
 MESSAGE_ROLES = ("user", "assistant", "system", "tool")
 SQL_AUDIT_STATUSES = ("accepted", "rejected", "failed")
+#: Pipeline stages a dead-letter row can be attributed to. `abandoned` is the reaper's:
+#: nobody reported a failure, the job simply stopped existing.
+INGESTION_STAGES = ("extraction", "chunking", "embedding", "storage", "abandoned", "unknown")
 
 _NEW_UUID = text("gen_random_uuid()")
 
@@ -100,7 +106,21 @@ class Document(Base):
         UniqueConstraint("id", "org_id", name="uq_documents_id_org"),
         CheckConstraint(_in_list("status", DOCUMENT_STATUSES), name="ck_documents_status"),
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_nonneg"),
+        CheckConstraint(
+            "chunk_count IS NULL OR chunk_count >= 0", name="ck_documents_chunk_count_nonneg"
+        ),
+        CheckConstraint(
+            "word_count IS NULL OR word_count >= 0", name="ck_documents_word_count_nonneg"
+        ),
         Index("ix_documents_org_created", "org_id", "created_at"),
+        # Partial, matching migration 0005: the reaper only scans non-terminal rows, and on
+        # a table that is mostly `ready` a full index would be almost entirely dead weight.
+        Index(
+            "ix_documents_status_started",
+            "status",
+            "processing_started_at",
+            postgresql_where=text("status IN ('pending', 'processing')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -123,6 +143,21 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
     error_message: Mapped[str | None] = mapped_column(Text)
     page_count: Mapped[int | None] = mapped_column(Integer)
+    #: Chunks actually stored. Denormalized from document_chunks so the status endpoint
+    #: answers "is this indexed yet" without counting rows on every poll.
+    chunk_count: Mapped[int | None] = mapped_column(Integer)
+    #: Words in the extracted text, recorded once during ingestion.
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    #: The Celery task currently responsible for this document. Kept so a delete can
+    #: revoke work that is queued but not yet started.
+    task_id: Mapped[str | None] = mapped_column(String(155))
+    #: Attempts made so far. Surfaced to the UI because "still retrying" and "failed for
+    #: good" look identical otherwise.
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    #: Set when a worker picks the document up, cleared conceptually by a terminal status.
+    #: The reaper uses it to find jobs whose worker died mid-run.
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -166,6 +201,49 @@ class DocumentChunk(Base):
     )
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class IngestionFailure(Base):
+    """Dead-letter record for an ingestion job that exhausted its retries.
+
+    A failed document already carries a short `error_message` for the user. This table is
+    the operator's view of the same event: the full reason, which attempt it died on, and
+    how it ended. Kept separate because the two have different audiences and different
+    lifetimes — the user's copy disappears when they delete the document, and so should
+    this one, which is why it cascades rather than outliving its parent.
+
+    Rows are written by the worker, never by a request. The `reason` is an exception
+    string, so it is treated as untrusted text: it is truncated and only ever rendered
+    as data.
+    """
+
+    __tablename__ = "ingestion_failures"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id", "org_id"],
+            ["documents.id", "documents.org_id"],
+            name="fk_ingestion_failures_document_same_org",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            _in_list("stage", INGESTION_STAGES),
+            name="ck_ingestion_failures_stage",
+        ),
+        Index("ix_ingestion_failures_org_created", "org_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_NEW_UUID
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    #: Which part of the pipeline gave up, so a systemic failure is greppable by stage.
+    stage: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class ChatSession(Base):
@@ -278,6 +356,7 @@ ORG_SCOPED_TABLES = (
     "users",
     "documents",
     "document_chunks",
+    "ingestion_failures",
     "chat_sessions",
     "chat_messages",
     "sql_query_audit",
@@ -286,14 +365,17 @@ ORG_SCOPED_TABLES = (
 __all__ = [
     "DOCUMENT_STATUSES",
     "EMBEDDING_DIM",
+    "INGESTION_STAGES",
     "MESSAGE_ROLES",
     "ORG_SCOPED_TABLES",
     "SQL_AUDIT_STATUSES",
+    "TERMINAL_DOCUMENT_STATUSES",
     "USER_ROLES",
     "ChatMessage",
     "ChatSession",
     "Document",
     "DocumentChunk",
+    "IngestionFailure",
     "Organization",
     "SqlQueryAudit",
     "User",

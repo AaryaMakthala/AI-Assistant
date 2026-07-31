@@ -9,8 +9,10 @@
  * that phase would imply knowledge the frontend does not have.
  */
 
-import { AlertCircle, CheckCircle2, FileText, Loader2, Upload, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileText, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
 import { useRef, useState } from "react";
+import { ConfirmDialog } from "./confirm-dialog";
+import { StatusBadge } from "./status-badge";
 import {
   ACCEPTED_EXTENSIONS,
   type UploadState,
@@ -23,17 +25,24 @@ const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 export function DocumentLibrary({
   documents,
   uploads,
+  deletingIds,
   onUpload,
   onDismissUpload,
+  onDelete,
+  onReprocess,
   disabled,
 }: {
   documents: DocumentSummary[];
   uploads: UploadState[];
+  deletingIds?: ReadonlySet<string>;
   onUpload: (file: File) => void;
   onDismissUpload: (id: string) => void;
+  onDelete: (id: string) => void;
+  onReprocess: (id: string) => void;
   disabled?: boolean;
 }) {
   const [isDragging, setIsDragging] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // dragenter/dragleave fire for every child element crossed. Counting them means the
   // highlight survives moving across the zone's contents instead of flickering.
@@ -133,12 +142,37 @@ export function DocumentLibrary({
           <ul className="space-y-0.5">
             {documents.map((row) => (
               <li key={row.id}>
-                <DocumentRow row={row} />
+                <DocumentRow
+                  row={row}
+                  isDeleting={deletingIds?.has(row.id)}
+                  onRequestDelete={() => setPendingDelete(row)}
+                  onReprocess={() => onReprocess(row.id)}
+                />
               </li>
             ))}
           </ul>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this document?"
+        description={
+          <>
+            <span className="font-medium text-foreground">
+              {pendingDelete?.filename}
+            </span>{" "}
+            and everything indexed from it will be removed permanently. Answers will
+            no longer be able to cite it. This cannot be undone.
+          </>
+        }
+        isBusy={pendingDelete ? deletingIds?.has(pendingDelete.id) : false}
+        onConfirm={() => {
+          if (pendingDelete) onDelete(pendingDelete.id);
+          setPendingDelete(null);
+        }}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
@@ -225,36 +259,44 @@ function UploadRow({
   );
 }
 
-const STATUS_TEXT: Record<DocumentSummary["status"], string> = {
-  pending: "Queued",
-  processing: "Processing",
-  ready: "Ready",
-  failed: "Failed",
-};
-
 // Named `row`, not `document`: a prop called `document` shadows the DOM global inside
 // this component, which turns any later use of it into a confusing type error.
-function DocumentRow({ row }: { row: DocumentSummary }) {
+function DocumentRow({
+  row,
+  isDeleting,
+  onRequestDelete,
+  onReprocess,
+}: {
+  row: DocumentSummary;
+  isDeleting?: boolean;
+  onRequestDelete: () => void;
+  onReprocess: () => void;
+}) {
   const isFailed = row.status === "failed";
-  const isBusy = row.status === "pending" || row.status === "processing";
+
+  // Facts worth showing, in the order they become known. Assembled rather than
+  // concatenated inline so a null field leaves no stray separator behind.
+  const details = [
+    row.page_count ? `${row.page_count} pages` : null,
+    row.chunk_count ? `${row.chunk_count} chunks` : null,
+    row.size_bytes ? formatBytes(row.size_bytes) : null,
+  ].filter(Boolean);
 
   return (
-    <div className="flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-surface-raised">
+    <div
+      className={cn(
+        "group flex items-start gap-2 rounded-md px-2 py-1.5 hover:bg-surface-raised",
+        isDeleting && "opacity-50",
+      )}
+    >
       <FileText className="mt-0.5 size-3.5 shrink-0 text-muted" aria-hidden />
       <div className="min-w-0 flex-1">
         <p className="truncate text-xs" title={row.filename}>
           {row.filename}
         </p>
-        <p
-          className={cn(
-            "mt-0.5 flex items-center gap-1 text-[0.6875rem]",
-            isFailed ? "text-danger" : "text-muted",
-          )}
-        >
-          {isBusy && <Loader2 className="size-2.5 animate-spin" aria-hidden />}
-          {STATUS_TEXT[row.status]}
-          {row.page_count ? ` · ${row.page_count} pages` : ""}
-          {row.size_bytes ? ` · ${formatBytes(row.size_bytes)}` : ""}
+        <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[0.6875rem] text-muted">
+          <StatusBadge status={row.status} chunkCount={row.chunk_count} />
+          {details.join(" · ")}
         </p>
         {isFailed && row.error_message && (
           <p className="mt-0.5 text-[0.6875rem] break-words text-danger">
@@ -262,6 +304,44 @@ function DocumentRow({ row }: { row: DocumentSummary }) {
           </p>
         )}
       </div>
+
+      <span className="flex shrink-0 items-center gap-0.5">
+        {isFailed && (
+          <button
+            type="button"
+            onClick={onReprocess}
+            disabled={isDeleting}
+            aria-label={`Retry processing ${row.filename}`}
+            title="Try processing again"
+            className={cn(
+              "flex size-6 items-center justify-center rounded text-muted opacity-0",
+              "transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+              "hover:text-accent focus-visible:ring-2 focus-visible:ring-accent",
+              "focus-visible:outline-none disabled:cursor-not-allowed",
+            )}
+          >
+            <RotateCw className="size-3" aria-hidden />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRequestDelete}
+          disabled={isDeleting}
+          aria-label={`Delete ${row.filename}`}
+          className={cn(
+            "flex size-6 items-center justify-center rounded text-muted opacity-0",
+            "transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+            "hover:text-danger focus-visible:ring-2 focus-visible:ring-accent",
+            "focus-visible:outline-none disabled:cursor-not-allowed",
+          )}
+        >
+          {isDeleting ? (
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <Trash2 className="size-3" aria-hidden />
+          )}
+        </button>
+      </span>
     </div>
   );
 }

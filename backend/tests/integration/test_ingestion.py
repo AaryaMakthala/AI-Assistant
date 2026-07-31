@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from dotenv import dotenv_values
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -134,10 +134,16 @@ def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path
         assert result["status"] == "ready"
         assert result["chunks"] > 0
 
-        rows, status, page_count = asyncio.run(_read_back(ingestion_env, ids))
+        rows, document = asyncio.run(_read_back(ingestion_env, ids))
 
-        assert status == "ready"
-        assert page_count == 2
+        assert document.status == "ready"
+        assert document.page_count == 2
+        # Phase 10 progress columns: recorded once, and consistent with what was stored.
+        assert document.chunk_count == len(rows)
+        assert document.word_count > 0
+        assert document.processing_started_at is not None
+        assert document.processing_completed_at is not None
+        assert document.processing_completed_at >= document.processing_started_at
         assert rows, "no chunks were stored"
         # Every chunk carries the owning org — this is what RLS filters on.
         assert {row.org_id for row in rows} == {ids["org"]}
@@ -145,6 +151,13 @@ def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path
         assert {row.page for row in rows} == {1, 2}
         assert all(row.chunk_metadata["source"] == "policy.pdf" for row in rows)
         assert all(row.chunk_metadata["locator"].startswith("page ") for row in rows)
+        # Phase 10 requires each vector to carry its own provenance, so a record is
+        # interpretable without joining back to the document it came from.
+        for row in rows:
+            assert row.chunk_metadata["org_id"] == str(ids["org"])
+            assert row.chunk_metadata["document_id"] == str(ids["doc"])
+            assert row.chunk_metadata["page"] == row.page
+            assert isinstance(row.chunk_metadata["chunk_index"], int)
         assert any("Refunds are issued" in row.content for row in rows)
         assert all(len(row.embedding) == get_settings().embedding_dim for row in rows)
     finally:
@@ -152,7 +165,15 @@ def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path
 
 
 async def _read_back(url: str, ids: dict[str, uuid.UUID]):
-    """Read the stored chunks back through RLS, as the application would."""
+    """Read the stored chunks back through RLS, as the application would.
+
+    The embedding is selected through the ORM column rather than as raw SQL text. pgvector
+    registers a SQLAlchemy type that decodes `vector` into a list of floats; a `text()`
+    query bypasses it and hands back the literal string `'[0.1,0.2,...]'`, so `len()` would
+    count characters instead of dimensions and the assertion would fail against perfectly
+    valid data.
+    """
+    from app.db.models import DocumentChunk
     from app.security.rls import set_tenant_claims
 
     engine = create_async_engine(url, connect_args={"statement_cache_size": 0})
@@ -161,21 +182,29 @@ async def _read_back(url: str, ids: dict[str, uuid.UUID]):
         await set_tenant_claims(conn, org_id=ids["org"])  # type: ignore[arg-type]
         chunks = (
             await conn.execute(
-                text(
-                    "SELECT org_id, page, content, embedding, chunk_metadata FROM"
-                    " document_chunks WHERE document_id = :doc ORDER BY chunk_index"
-                ),
-                {"doc": ids["doc"]},
+                select(
+                    DocumentChunk.org_id,
+                    DocumentChunk.page,
+                    DocumentChunk.content,
+                    DocumentChunk.embedding,
+                    DocumentChunk.chunk_metadata,
+                )
+                .where(DocumentChunk.document_id == ids["doc"])
+                .order_by(DocumentChunk.chunk_index)
             )
         ).all()
         document = (
             await conn.execute(
-                text("SELECT status, page_count FROM documents WHERE id = :id"),
+                text(
+                    "SELECT status, page_count, chunk_count, word_count,"
+                    " processing_started_at, processing_completed_at"
+                    " FROM documents WHERE id = :id"
+                ),
                 {"id": ids["doc"]},
             )
         ).one()
     await engine.dispose()
-    return chunks, document.status, document.page_count
+    return chunks, document
 
 
 def test_ingestion_marks_an_unreadable_file_as_failed(ingestion_env: str) -> None:

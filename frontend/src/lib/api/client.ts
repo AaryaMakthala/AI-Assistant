@@ -1,8 +1,10 @@
 /**
  * Backend API client.
  *
- * The auth token is supplied per call rather than read from a module-level store: Phase 9
- * wires up Supabase Auth, and this keeps the two decoupled until then.
+ * The auth token is supplied per call rather than read from a module-level store. That
+ * keeps this module free of any dependency on how a session is obtained: `lib/auth.tsx`
+ * owns the Supabase session and hands the current access token to each call, so a refresh
+ * is picked up automatically and nothing here caches a token past its expiry.
  */
 
 import { parseEventStream } from "./sse";
@@ -12,6 +14,8 @@ import type {
   ChatStreamEvent,
   DocumentListResponse,
   DocumentSummary,
+  MeResponse,
+  OrgMemberListResponse,
   UploadAcceptedResponse,
 } from "./types";
 
@@ -257,4 +261,16 @@ export function uploadDocumentWithProgress(
 
     request.send(form);
   });
+}
+
+/** The authenticated caller, per the server. The only trustworthy source of the role. */
+export function getMe(options: RequestOptions = {}): Promise<MeResponse> {
+  return getJson<MeResponse>("/me", options);
+}
+
+/** Members of the caller's organization. 403s for a non-admin — the gate is server-side. */
+export function listOrgMembers(
+  options: RequestOptions = {},
+): Promise<OrgMemberListResponse> {
+  return getJson<OrgMemberListResponse>("/org/members", options);
 }

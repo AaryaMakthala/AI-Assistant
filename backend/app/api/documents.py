@@ -76,7 +76,9 @@ async def upload_document(
         )
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-    async with tenant_session(org_id=principal.org_id, user_id=principal.user_id) as session:
+    async with tenant_session(
+        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+    ) as session:
         row = (
             await session.execute(
                 insert(Document)
@@ -118,7 +120,9 @@ async def list_documents(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> DocumentListResponse:
-    async with tenant_session(org_id=principal.org_id, user_id=principal.user_id) as session:
+    async with tenant_session(
+        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+    ) as session:
         rows = (
             await session.execute(
                 select(Document).order_by(Document.created_at.desc()).limit(limit).offset(offset)
@@ -130,7 +134,9 @@ async def list_documents(
 
 @router.get("/{document_id}", response_model=DocumentResponse, summary="Ingestion status")
 async def get_document(principal: CurrentPrincipal, document_id: uuid.UUID) -> DocumentResponse:
-    async with tenant_session(org_id=principal.org_id, user_id=principal.user_id) as session:
+    async with tenant_session(
+        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+    ) as session:
         row = (
             await session.execute(select(Document).where(Document.id == document_id))
         ).scalar_one_or_none()

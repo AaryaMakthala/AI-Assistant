@@ -8,7 +8,7 @@
  * data flow readable.
  */
 
-import { PanelRightOpen } from "lucide-react";
+import { LogOut, PanelRightOpen } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ChatPane } from "@/components/chat-pane";
 import { Sidebar } from "@/components/sidebar";
@@ -19,10 +19,15 @@ import { useDocuments } from "@/lib/hooks/use-documents";
 import { useSessions } from "@/lib/hooks/use-sessions";
 import { cn } from "@/lib/utils";
 
+/** Roles allowed to see org administration. Mirrors ADMIN_ROLES in the backend router. */
+const ADMIN_ROLES = ["owner", "admin"];
+
 export function Workspace() {
-  const { token, isAuthenticated } = useAuth();
+  const { token, isAuthenticated, isLoading, me, role, signOut } = useAuth();
   const [activeChunkId, setActiveChunkId] = useState<string | undefined>();
   const [isPanelOpen, setIsPanelOpen] = useState(false);
+
+  const canManageOrg = Boolean(role && ADMIN_ROLES.includes(role));
 
   const sessions = useSessions(token);
   const documents = useDocuments(token);
@@ -58,6 +63,8 @@ export function Workspace() {
         documents={documents.documents}
         uploads={documents.uploads}
         isDisabled={!isAuthenticated}
+        canManageOrg={canManageOrg}
+        token={token}
         onNewChat={() => {
           chat.reset();
           setActiveChunkId(undefined);
@@ -78,26 +85,49 @@ export function Workspace() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border bg-surface px-4 py-2.5">
-          <h1 className="text-sm font-semibold">Knowledge Assistant</h1>
-          <button
-            type="button"
-            onClick={() => setIsPanelOpen((open) => !open)}
-            aria-pressed={isPanelOpen}
-            className={cn(
-              "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors",
-              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              isPanelOpen
-                ? "bg-accent-subtle text-accent"
-                : "text-muted hover:text-foreground",
+          <div className="flex min-w-0 items-baseline gap-2">
+            <h1 className="text-sm font-semibold">Knowledge Assistant</h1>
+            {me?.org_name && (
+              <span className="truncate text-xs text-muted">{me.org_name}</span>
             )}
-          >
-            <PanelRightOpen className="size-3.5" aria-hidden />
-            Sources
-            {activeTurn?.sources.length ? ` (${activeTurn.sources.length})` : ""}
-          </button>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setIsPanelOpen((open) => !open)}
+              aria-pressed={isPanelOpen}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors",
+                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+                isPanelOpen
+                  ? "bg-accent-subtle text-accent"
+                  : "text-muted hover:text-foreground",
+              )}
+            >
+              <PanelRightOpen className="size-3.5" aria-hidden />
+              Sources
+              {activeTurn?.sources.length ? ` (${activeTurn.sources.length})` : ""}
+            </button>
+
+            {isAuthenticated && (
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                title={me?.email ?? undefined}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted",
+                  "transition-colors hover:text-foreground",
+                  "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+                )}
+              >
+                <LogOut className="size-3.5" aria-hidden />
+                Sign out
+              </button>
+            )}
+          </div>
         </header>
 
-        {!isAuthenticated && <AuthNotice />}
+        {!isAuthenticated && !isLoading && <AuthNotice />}
 
         <ChatPane
           turns={chat.turns}
@@ -126,11 +156,13 @@ export function Workspace() {
 }
 
 /**
- * Shown when no token is available.
+ * Shown when no session is available.
  *
- * Every backend endpoint requires a verified JWT (CLAUDE.md 4.6), so without one the app
- * can render but cannot do anything. Saying so plainly beats letting every action fail
- * with a 401 the user has to interpret.
+ * `proxy.ts` normally redirects an anonymous visitor to /login before this renders, so in
+ * practice this covers the narrower case of a session that expired or was signed out in
+ * another tab. Every backend endpoint requires a verified JWT (CLAUDE.md 4.6), so without
+ * one the app can render but cannot do anything — saying so plainly beats letting every
+ * action fail with a 401 the user has to interpret.
  */
 function AuthNotice() {
   return (
@@ -138,10 +170,11 @@ function AuthNotice() {
       role="status"
       className="border-b border-warning/30 bg-warning-subtle px-4 py-2 text-xs text-warning"
     >
-      Not signed in — the assistant cannot reach your organization&apos;s data.
-      Sign-in arrives in the next phase; set{" "}
-      <code className="font-mono">NEXT_PUBLIC_DEV_JWT</code> to a development
-      token to try it now.
+      Your session has ended.{" "}
+      <a href="/login" className="underline hover:text-foreground">
+        Sign in again
+      </a>{" "}
+      to reach your organization&apos;s data.
     </div>
   );
 }

@@ -10,11 +10,12 @@
 import { MessageSquare, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { DocumentLibrary } from "./document-library";
+import { MembersPanel } from "./members-panel";
 import type { ChatSession, DocumentSummary } from "@/lib/api";
 import type { UploadState } from "@/lib/hooks/use-documents";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
-type Tab = "chats" | "documents";
+type Tab = "chats" | "documents" | "members";
 
 export function Sidebar({
   sessions,
@@ -22,6 +23,8 @@ export function Sidebar({
   documents,
   uploads,
   isDisabled,
+  canManageOrg,
+  token,
   onNewChat,
   onSelectSession,
   onDeleteSession,
@@ -33,6 +36,9 @@ export function Sidebar({
   documents: DocumentSummary[];
   uploads: UploadState[];
   isDisabled?: boolean;
+  /** Owners and admins only. Presentation; the server gates the data independently. */
+  canManageOrg?: boolean;
+  token?: string;
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
@@ -40,6 +46,21 @@ export function Sidebar({
   onDismissUpload: (id: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("chats");
+
+  // A role can drop between renders (a sign-out, or a /me that resolves late). Falling back
+  // rather than rendering a hidden tab's content keeps the two in step.
+  const activeTab: Tab = tab === "members" && !canManageOrg ? "chats" : tab;
+
+  const tabs: ReadonlyArray<readonly [Tab, string]> = canManageOrg
+    ? ([
+        ["chats", "Chats"],
+        ["documents", "Docs"],
+        ["members", "Members"],
+      ] as const)
+    : ([
+        ["chats", "Chats"],
+        ["documents", "Documents"],
+      ] as const);
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
@@ -63,22 +84,17 @@ export function Sidebar({
         aria-label="Sidebar sections"
         className="flex gap-1 px-3 pb-2"
       >
-        {(
-          [
-            ["chats", "Chats"],
-            ["documents", "Documents"],
-          ] as const
-        ).map(([value, label]) => (
+        {tabs.map(([value, label]) => (
           <button
             key={value}
             type="button"
             role="tab"
-            aria-selected={tab === value}
+            aria-selected={activeTab === value}
             onClick={() => setTab(value)}
             className={cn(
               "flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
               "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              tab === value
+              activeTab === value
                 ? "bg-surface-raised text-foreground"
                 : "text-muted hover:text-foreground",
             )}
@@ -88,7 +104,7 @@ export function Sidebar({
         ))}
       </div>
 
-      {tab === "chats" ? (
+      {activeTab === "chats" && (
         <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
           {sessions.length === 0 ? (
             <p className="px-1 py-6 text-center text-xs text-muted">
@@ -109,7 +125,9 @@ export function Sidebar({
             </ul>
           )}
         </nav>
-      ) : (
+      )}
+
+      {activeTab === "documents" && (
         <DocumentLibrary
           documents={documents}
           uploads={uploads}
@@ -117,6 +135,12 @@ export function Sidebar({
           onDismissUpload={onDismissUpload}
           disabled={isDisabled}
         />
+      )}
+
+      {activeTab === "members" && (
+        <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+          <MembersPanel token={token} />
+        </nav>
       )}
     </aside>
   );

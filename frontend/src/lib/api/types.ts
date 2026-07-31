@@ -172,3 +172,25 @@ export type ChatStreamEvent =
   | CitationsEvent
   | DoneEvent
   | ErrorEvent;
+
+/** The authenticated caller, as the server understands them. Mirrors `MeResponse`. */
+export interface MeResponse {
+  user_id: string;
+  org_id: string;
+  role: string;
+  email?: string | null;
+  org_name?: string | null;
+}
+
+/** A member of the caller's organization. Mirrors `MemberResponse`. */
+export interface OrgMember {
+  id: string;
+  email: string;
+  full_name?: string | null;
+  role: string;
+  created_at: string;
+}
+
+export interface OrgMemberListResponse {
+  members: OrgMember[];
+}

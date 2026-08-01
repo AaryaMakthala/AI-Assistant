@@ -13,11 +13,21 @@ from app.config import get_settings
 from app.db.session import dispose_engine
 from app.errors import register_exception_handlers, register_request_context
 from app.logging_config import configure_logging
+from app.observability import configure_sentry, configure_tracing
+from app.observability.sentry import sentry_is_active
+from app.observability.tracing import tracing_is_enabled
 from app.security.rate_limit import register_rate_limiting
 
 
 class HealthResponse(BaseModel):
     status: str
+    environment: str
+    #: Whether errors reach Sentry from this process. Reported so a deploy can confirm
+    #: observability is live without waiting for something to break — the alternative is
+    #: discovering an unset DSN during the incident it was meant to help with.
+    error_reporting: bool = False
+    #: Whether agent traces are being shipped. Expected false in production.
+    agent_tracing: bool = False
 
 
 @asynccontextmanager
@@ -37,6 +47,12 @@ def create_app() -> FastAPI:
         level="DEBUG" if settings.debug else "INFO",
         serialize=settings.is_production,
     )
+    # Observability comes up next, and before the app object exists: Sentry's Starlette
+    # integration patches Starlette at init time, so an app constructed first would not be
+    # instrumented. Both calls are no-ops when unconfigured.
+    configure_sentry(settings, component="api")
+    configure_tracing(settings)
+
     app = FastAPI(
         title="Enterprise AI Knowledge Intelligence Agent",
         version="0.1.0",
@@ -59,7 +75,12 @@ def create_app() -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
-        return HealthResponse(status="ok")
+        return HealthResponse(
+            status="ok",
+            environment=settings.environment,
+            error_reporting=sentry_is_active(),
+            agent_tracing=tracing_is_enabled(),
+        )
 
     app.include_router(auth_router)
     app.include_router(documents_router)

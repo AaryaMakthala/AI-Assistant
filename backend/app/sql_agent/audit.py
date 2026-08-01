@@ -27,6 +27,7 @@ from loguru import logger
 from sqlalchemy import insert
 
 from app.db.models import SqlQueryAudit
+from app.observability import capture_exception
 from app.security.rls import tenant_session
 
 AuditStatus = Literal["accepted", "rejected", "failed"]
@@ -93,12 +94,14 @@ async def record_query(
             )
     except Exception as exc:
         # The structured log line above is the surviving record. Loud, because a silently
-        # broken audit trail is worse than a noisy one.
+        # broken audit trail is worse than a noisy one — and reported to Sentry for the
+        # same reason: this failure is invisible to the user and to every layer above.
         logger.opt(exception=exc).error(
             "Could not persist SQL audit row for user {user} (status={status})",
             user=user_id,
             status=status,
         )
+        capture_exception(exc, subsystem="sql_audit", audit_status=status)
 
 
 __all__ = ["AuditStatus", "record_query"]

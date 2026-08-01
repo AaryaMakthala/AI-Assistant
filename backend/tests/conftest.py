@@ -39,3 +39,20 @@ def valid_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sentry_client() -> Iterator[None]:
+    """Leave no Sentry client behind.
+
+    `sentry_sdk.init` installs a *process-global* client, so a test that enables Sentry
+    would otherwise keep transmitting into the previous test's captured-event list — and
+    a test asserting that reporting is off would see the client the last one left running.
+
+    `dsn=""` rather than `dsn=None`: the SDK falls back to reading `SENTRY_DSN` from the
+    environment when the argument is None, which is precisely what these tests set.
+    """
+    yield
+    import sentry_sdk
+
+    sentry_sdk.init(dsn="")

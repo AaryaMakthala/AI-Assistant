@@ -37,6 +37,7 @@ from app.api.dependencies import get_llm_router
 from app.config import get_settings
 from app.db.models import ChatMessage, ChatSession
 from app.llm.base import Completion, LLMError, LLMRouterProtocol, Message
+from app.observability import capture_exception, record_token_usage
 from app.rag.pipeline import cited_numbers
 from app.security.auth import CurrentPrincipal, Principal
 from app.security.rate_limit import CHAT_RATE_LIMIT, limiter
@@ -277,10 +278,12 @@ async def _save_turn(
         )
     except Exception as exc:
         # The user already has their answer; losing the transcript must not retroactively
-        # turn a successful response into an error.
+        # turn a successful response into an error. Reported, because a chat that answers
+        # correctly and saves nothing looks entirely healthy from outside.
         logger.opt(exception=exc).error(
             "Could not persist chat turn for session {session}", session=session_id
         )
+        capture_exception(exc, subsystem="chat_persistence")
 
 
 async def _shielded_save(
@@ -447,6 +450,10 @@ async def _event_stream(
             provider=result.completion.provider,
             sources=len(result.citations),
         )
+        # Cost telemetry, and the alert when one turn is unexpectedly expensive
+        # (CLAUDE.md section 7, cost/quota overrun). After the `done` frame, so the
+        # accounting can never delay the answer.
+        record_token_usage(result.completion, route="chat")
     finally:
         # In `finally` so a disconnect partway through still records what the user saw.
         # Starlette throws GeneratorExit/CancelledError into this generator when the

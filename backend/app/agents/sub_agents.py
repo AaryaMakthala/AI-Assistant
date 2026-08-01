@@ -35,6 +35,7 @@ from app.agents.state import AgentOutcome, SupervisorState
 from app.llm.base import LLMError, LLMRouterProtocol
 from app.mcp_servers.github_server import MissingToken, SearchCodeArgs, search_code
 from app.mcp_servers.identity import acting_as
+from app.observability import capture_exception
 from app.rag.pipeline import retrieve_for_question, source_payload
 from app.rag.prompts import format_context
 from app.security.rls import tenant_session
@@ -74,6 +75,10 @@ def isolated(state_key: str, source: str) -> Callable[[NodeFn], NodeFn]:
                     source=source,
                     user=state["principal"].user_id,
                 )
+                # Reported explicitly, because this is the case no middleware can see: the
+                # exception stops here by design so the fan-out survives, which also means
+                # nothing further up would ever learn a sub-agent is broken.
+                capture_exception(exc, sub_agent=source)
                 outcome = AgentOutcome(
                     source=source, ok=False, detail="this lookup did not complete"
                 )

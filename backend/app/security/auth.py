@@ -28,6 +28,7 @@ from jwt import PyJWKClient
 from loguru import logger
 
 from app.config import get_settings
+from app.observability.context import bind_principal
 
 #: Supabase issues access tokens with this audience.
 JWT_AUDIENCE = "authenticated"
@@ -186,7 +187,12 @@ async def get_principal(
     """FastAPI dependency: the verified caller, or 401."""
     if credentials is None or not credentials.credentials:
         raise _INVALID
-    return principal_from_claims(decode_token(credentials.credentials))
+    principal = principal_from_claims(decode_token(credentials.credentials))
+    # Tag this request's error reports and traces with who made it — after verification, so
+    # the tags reflect claims the server checked rather than ones the client asserted. Only
+    # opaque ids travel; see app/observability/context.py.
+    bind_principal(user_id=principal.user_id, org_id=principal.org_id, role=principal.role)
+    return principal
 
 
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]

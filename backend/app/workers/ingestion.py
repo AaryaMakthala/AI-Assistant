@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import get_settings
 from app.db.models import Document, DocumentChunk, IngestionFailure
+from app.observability import capture_exception
+from app.observability.sentry import set_tag
 from app.rag.chunking import chunk_pages
 from app.rag.embeddings import embed_passages_resilient
 from app.rag.extraction import ExtractionError, count_words, extract_pages
@@ -340,6 +342,10 @@ def ingest_document(self: Any, document_id: str, org_id: str) -> dict[str, Any]:
     doc_uuid = uuid.UUID(document_id)
     org_uuid = uuid.UUID(org_id)
     attempt = self.request.retries
+    # Which tenant and which document, as opaque ids, so an ingestion error in Sentry can be
+    # scoped to one organization without the filename or any content travelling with it.
+    set_tag("org_id", org_id)
+    set_tag("document_id", document_id)
     try:
         return asyncio.run(_ingest(doc_uuid, org_uuid, attempt=attempt))
     except SoftTimeLimitExceeded:
@@ -357,6 +363,12 @@ def ingest_document(self: Any, document_id: str, org_id: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         logger.opt(exception=exc).error("Ingestion crashed for document {doc}", doc=document_id)
+        # Reported here rather than left to Celery's own integration, which only sees a task
+        # that *finished* failing. An attempt that ends in `self.retry` raises `Retry` — a
+        # normal outcome to Celery — so a document that fails twice and then succeeds would
+        # otherwise leave no record of the two failures. Sentry's dedupe drops the duplicate
+        # on the final attempt, so this is one event per failure either way.
+        capture_exception(exc, subsystem="ingestion", attempt=str(attempt))
         if attempt >= self.max_retries:
             # Final attempt: leave a terminal status so the UI stops showing a spinner, and
             # a dead-letter row so the reason survives past this worker's stdout.

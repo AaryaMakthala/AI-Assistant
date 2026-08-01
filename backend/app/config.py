@@ -41,6 +41,37 @@ class Settings(BaseSettings):
     langsmith_api_key: SecretStr | None = None
     github_token: SecretStr | None = None
 
+    # --- Observability (Phase 11) ---
+
+    #: Fraction of requests sampled for performance tracing. Errors are always captured
+    #: regardless of this: it governs transactions only. Defaults off, because tracing every
+    #: request on a free Sentry plan exhausts the quota long before an incident happens.
+    sentry_traces_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    #: Version string attached to every event, so a spike can be attributed to a deploy.
+    #: Usually the commit SHA, supplied by the platform's build environment.
+    sentry_release: str | None = None
+    #: Loguru level at or above which a log line becomes a Sentry *event*. Lines below it
+    #: still attach as breadcrumbs, which is what gives an event its leading context.
+    sentry_event_level: Literal["WARNING", "ERROR", "CRITICAL"] = "ERROR"
+
+    #: Master switch for LangSmith. Off by default: agent traces contain the user's question
+    #: and the retrieved document text, so shipping them to a third party is a decision that
+    #: has to be made deliberately (CLAUDE.md section 2, observability).
+    langsmith_tracing_enabled: bool = False
+    langsmith_project: str = "enterprise-ai-agent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    #: Required to trace a production environment. Without it, tracing self-disables when
+    #: `ENVIRONMENT=production` even if everything else is configured — the "dev/staging
+    #: only" rule enforced in code rather than left to whoever writes the deploy config.
+    langsmith_allow_production: bool = False
+    #: Send run inputs/outputs to LangSmith. Forced off in production regardless, so an
+    #: approved production trace still records structure and timings without content.
+    langsmith_trace_io: bool = True
+
+    #: Total tokens in one chat turn above which a warning is emitted and reported to Sentry
+    #: (CLAUDE.md section 7, cost/quota overrun). 0 disables the check.
+    token_usage_alert_threshold: int = Field(default=0, ge=0)
+
     cors_allow_origins: list[str] = ["http://localhost:3000"]
 
     # --- Document ingestion (CLAUDE.md 4.2, Phase 3) ---
@@ -164,6 +195,40 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def sentry_enabled(self) -> bool:
+        """Whether error reporting should be wired up at all.
+
+        A blank DSN is the normal state for a developer machine, so it disables Sentry
+        rather than failing — but it does so explicitly here instead of relying on the SDK's
+        own no-DSN behaviour, so every call site can branch on one readable predicate.
+        """
+        return bool(self.sentry_dsn and self.sentry_dsn.strip())
+
+    @property
+    def langsmith_enabled(self) -> bool:
+        """Whether agent traces may be shipped to LangSmith.
+
+        Three conditions, all required. The production one is the reason this is a property
+        rather than a bare flag: CLAUDE.md's rule is that production user data does not reach
+        a third-party trace tool without a deliberate review, and a rule that lives only in a
+        deploy checklist is a rule that gets skipped. `langsmith_allow_production` is the
+        recorded outcome of that review.
+        """
+        if not (self.langsmith_tracing_enabled and self.langsmith_api_key):
+            return False
+        return self.langsmith_allow_production or not self.is_production
+
+    @property
+    def langsmith_records_io(self) -> bool:
+        """Whether run inputs and outputs travel with a trace.
+
+        Forced off in production even when tracing is approved there: the structure and
+        timings of a run are what debugging needs, while the question text and retrieved
+        passages are the part that carries tenant data.
+        """
+        return self.langsmith_trace_io and not self.is_production
 
     @field_validator("database_url", mode="before")
     @classmethod

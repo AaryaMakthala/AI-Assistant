@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.logging_config import request_id_var
+from app.observability.context import bind_request, clear_observability_context
 
 
 def _error_body(detail: str, request_id: str) -> dict[str, str]:
@@ -37,6 +38,11 @@ class RequestContextMiddleware:
 
         scope.setdefault("state", {})["request_id"] = request_id
         token = request_id_var.set(request_id)
+        # Tag Sentry's scope with the same id the client and the logs see, so an error
+        # report and the log lines that led to it are one search apart. No-op when Sentry
+        # is unconfigured; imported here so this module works without the observability
+        # package being initialised.
+        bind_request(request_id)
 
         async def send_with_header(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -49,6 +55,7 @@ class RequestContextMiddleware:
             await self.app(scope, receive, send_with_header)
         finally:
             request_id_var.reset(token)
+            clear_observability_context()
 
 
 def _request_id_of(request: Request) -> str:

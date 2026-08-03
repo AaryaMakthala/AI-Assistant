@@ -77,4 +77,6 @@ def test_health_still_works(client: TestClient) -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    # Asserted by key rather than as a whole dict: /health also reports environment and
+    # observability state, and those grow as subsystems are added.
+    assert response.json()["status"] == "ok"

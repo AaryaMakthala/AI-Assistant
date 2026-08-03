@@ -51,8 +51,14 @@ def _isolate_sentry_client() -> Iterator[None]:
 
     `dsn=""` rather than `dsn=None`: the SDK falls back to reading `SENTRY_DSN` from the
     environment when the argument is None, which is precisely what these tests set.
+
+    The reference to `init` is captured *before* yielding. Tests that record events
+    monkeypatch `sentry_sdk.init` to force a transport in, and that patch is still in
+    place during teardown — resetting through it would reinstall an active client and
+    defeat the isolation this fixture exists to provide.
     """
-    yield
     import sentry_sdk
 
-    sentry_sdk.init(dsn="")
+    pristine_init = sentry_sdk.init
+    yield
+    pristine_init(dsn="")

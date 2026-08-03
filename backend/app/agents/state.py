@@ -131,10 +131,18 @@ class SupervisorState(TypedDict, total=False):
     completion: Completion
     #: Human-readable trace of what ran, in order. Appended to by every node.
     steps: Annotated[list[str], operator.add]
+    #: Metadata about the memory strategy used for this request (Phase 12). Informational
+    #: only — does not affect routing. Keys: strategy, total_messages, context_tokens,
+    #: summarized.
+    memory_metadata: dict[str, Any]
 
 
 def initial_state(
-    *, question: str, principal: Principal, history: list[Message] | None = None
+    *,
+    question: str,
+    principal: Principal,
+    history: list[Message] | None = None,
+    memory_metadata: dict[str, Any] | None = None,
 ) -> SupervisorState:
     """A fresh state for one question.
 
@@ -157,6 +165,7 @@ def initial_state(
         citations=[],
         completion=Completion(),
         steps=[],
+        memory_metadata=memory_metadata or {},
     )
 
 

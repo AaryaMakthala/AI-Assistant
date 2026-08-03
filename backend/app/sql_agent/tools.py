@@ -80,8 +80,7 @@ def describe_table(args: DescribeTableArgs) -> str | ToolError:
     spec = lookup_table(args.table)
     if spec is None:
         return ToolError(
-            f"Table {args.table!r} is not available. Available tables: "
-            f"{', '.join(table_names())}."
+            f"Table {args.table!r} is not available. Available tables: {', '.join(table_names())}."
         )
     return spec.render()
 

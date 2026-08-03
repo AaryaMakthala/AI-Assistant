@@ -39,7 +39,6 @@ async def use_tenant_role(session: AsyncSession) -> None:
     await session.execute(_SET_TENANT_ROLE)
 
 
-
 async def set_tenant_claims(
     session: AsyncSession,
     *,

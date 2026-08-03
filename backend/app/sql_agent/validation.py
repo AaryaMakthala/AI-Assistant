@@ -190,7 +190,7 @@ def _reject_bare_star(statement: exp.Expression) -> None:
     for star in statement.find_all(exp.Star):
         if isinstance(star.parent, exp.Select | exp.Column):
             raise SQLValidationError(
-                "Select columns explicitly; '*' is not permitted. Use count(*) for a " "row count."
+                "Select columns explicitly; '*' is not permitted. Use count(*) for a row count."
             )
 
 

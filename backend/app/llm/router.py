@@ -70,8 +70,7 @@ class LLMRouter:
                     # Past the point of no return: the client already holds a partial
                     # answer, and no second provider can continue someone else's sentence.
                     logger.error(
-                        "Provider {provider} failed mid-stream after {n} chars; "
-                        "not failing over",
+                        "Provider {provider} failed mid-stream after {n} chars; not failing over",
                         provider=provider.name,
                         n=len(completion.text),
                     )

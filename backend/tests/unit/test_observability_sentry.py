@@ -53,7 +53,6 @@ class _RecordingTransport(Transport):
         return None
 
 
-
 @pytest.fixture
 def captured_events(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any]]]:
     """Initialise Sentry against an in-process transport and yield what it would send."""

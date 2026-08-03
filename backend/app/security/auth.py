@@ -91,7 +91,6 @@ def reset_jwks_cache() -> None:
         _jwks_failed_until = 0.0
 
 
-
 @dataclass(frozen=True)
 class Principal:
     """The authenticated caller. Every org-scoped query is built from these values."""

@@ -175,8 +175,7 @@ class ReadFileArgs(BaseModel):
         cleaned = value.strip()
         if _UNSAFE_PATH.search(cleaned):
             raise ValueError(
-                "path must be a relative path inside the repository — no '..', leading '/', "
-                "or URL"
+                "path must be a relative path inside the repository — no '..', leading '/', or URL"
             )
         # Only after the check, and only a single explicit "current directory" prefix.
         if cleaned.startswith("./"):

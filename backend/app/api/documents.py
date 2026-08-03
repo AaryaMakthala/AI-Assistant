@@ -16,11 +16,12 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, insert, select, update
 
+from app.api.workspace_deps import assert_workspace_role
 from app.db.models import TERMINAL_DOCUMENT_STATUSES, Document, DocumentChunk
 from app.security.auth import CurrentPrincipal
 from app.security.rate_limit import UPLOAD_RATE_LIMIT, limiter
@@ -44,6 +45,8 @@ class DocumentResponse(BaseModel):
     error_message: str | None = None
     #: Owner and organization, so a client never has to infer either from its own session.
     org_id: uuid.UUID
+    #: Null for documents uploaded before workspaces existed, or outside one.
+    workspace_id: uuid.UUID | None = None
     uploaded_by: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
@@ -107,12 +110,18 @@ async def upload_document(
     request: Request,  # noqa: ARG001 — required by slowapi's decorator
     principal: CurrentPrincipal,
     file: Annotated[UploadFile, File(description="pdf, docx, csv, xlsx or txt")],
+    workspace_id: Annotated[uuid.UUID | None, Form()] = None,
 ) -> UploadAcceptedResponse:
     """Validate and store an upload, then queue ingestion.
 
     Returns 202: the document exists and is queued, but has no chunks yet. The client
     polls the status endpoint rather than waiting on the response.
     """
+    # Checked before the bytes are read: a caller who may not write here should not be
+    # able to spend the server's disk and time finding that out.
+    if workspace_id is not None:
+        await assert_workspace_role(workspace_id, principal, "owner", "admin", "editor")
+
     try:
         stored = await stream_to_storage(file, filename=file.filename or "")
     except UploadRejected as exc:
@@ -137,6 +146,7 @@ async def upload_document(
                     mime_type=stored.mime_type,
                     size_bytes=stored.size_bytes,
                     status="pending",
+                    workspace_id=workspace_id,
                 )
                 .returning(Document)
             )
@@ -184,24 +194,33 @@ async def list_documents(
     principal: CurrentPrincipal,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    workspace_id: uuid.UUID | None = None,
 ) -> DocumentListResponse:
     """Documents visible to the caller's organization, newest first.
 
     RLS scopes the rows; no `org_id` filter appears in the query because one in
     application code would be the *second* place that rule lives and could drift from the
     policy that actually enforces it.
+
+    `workspace_id` narrows the list further, and requires membership of that workspace —
+    otherwise the filter would be a way to read a workspace one has not joined.
     """
+    if workspace_id is not None:
+        await assert_workspace_role(workspace_id, principal)
+
     async with tenant_session(
         org_id=principal.org_id, user_id=principal.user_id, role=principal.role
     ) as session:
-        rows = (
-            await session.execute(
-                select(Document).order_by(Document.created_at.desc()).limit(limit).offset(offset)
-            )
-        ).scalars()
+        stmt = select(Document).order_by(Document.created_at.desc())
+        count_stmt = select(func.count()).select_from(Document)
+        if workspace_id is not None:
+            stmt = stmt.where(Document.workspace_id == workspace_id)
+            count_stmt = count_stmt.where(Document.workspace_id == workspace_id)
+
+        rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars()
         documents = [DocumentResponse.model_validate(row) for row in rows]
         # Counted under the same policy, so it can never report rows the caller cannot see.
-        total = (await session.execute(select(func.count()).select_from(Document))).scalar_one()
+        total = (await session.execute(count_stmt)).scalar_one()
     return DocumentListResponse(documents=documents, total=total)
 
 

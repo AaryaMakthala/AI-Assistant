@@ -144,7 +144,9 @@ AS $$
 DECLARE
     org uuid;
 BEGIN
-    org := app.provision_auth_user(NEW.id, NEW.email, coalesce(NEW.raw_user_meta_data, '{}'::jsonb));
+    org := app.provision_auth_user(
+        NEW.id, NEW.email, coalesce(NEW.raw_user_meta_data, '{}'::jsonb)
+    );
 
     UPDATE auth.users
     SET raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb)

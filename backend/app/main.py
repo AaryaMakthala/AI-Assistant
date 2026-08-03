@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
+from app.api.workspaces import router as workspaces_router
 from app.config import get_settings
 from app.db.session import dispose_engine
 from app.errors import register_exception_handlers, register_request_context
@@ -65,7 +66,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
     )
 
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(documents_router)
     app.include_router(chat_router)
+    app.include_router(workspaces_router)
     return app
 
 

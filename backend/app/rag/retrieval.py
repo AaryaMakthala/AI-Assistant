@@ -64,9 +64,7 @@ async def retrieve_chunks(
 
     settings = get_settings()
     top_k = top_k if top_k is not None else settings.retrieval_top_k
-    max_distance = (
-        max_distance if max_distance is not None else settings.retrieval_max_distance
-    )
+    max_distance = max_distance if max_distance is not None else settings.retrieval_max_distance
 
     # Same model that embedded the stored passages, with the query-side instruction
     # prefix bge expects (CLAUDE.md section 7, Risk 1).

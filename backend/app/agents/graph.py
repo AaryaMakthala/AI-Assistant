@@ -108,6 +108,7 @@ async def run_supervisor(
     question: str,
     principal: Principal,
     history: list[Message] | None = None,
+    memory_metadata: dict[str, Any] | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> SupervisorState:
     """Answer one question through the graph, returning the final state.
@@ -119,7 +120,12 @@ async def run_supervisor(
     graph = build_graph(llm, emit=emit)
 
     final: SupervisorState = await graph.ainvoke(
-        initial_state(question=question, principal=principal, history=history),
+        initial_state(
+            question=question,
+            principal=principal,
+            history=history,
+            memory_metadata=memory_metadata,
+        ),
         # Independent of the state counter in supervisor.py, and cheap insurance against a
         # topology mistake in a future phase.
         config={"recursion_limit": settings.agent_recursion_limit},
@@ -139,6 +145,7 @@ async def stream_supervisor(
     question: str,
     principal: Principal,
     history: list[Message] | None = None,
+    memory_metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[tuple[str, Any]]:
     """Run the graph, yielding `(kind, payload)` as it progresses.
 
@@ -168,7 +175,12 @@ async def stream_supervisor(
     final_state: SupervisorState | None = None
 
     async for mode, chunk in graph.astream(
-        initial_state(question=question, principal=principal, history=history),
+        initial_state(
+            question=question,
+            principal=principal,
+            history=history,
+            memory_metadata=memory_metadata,
+        ),
         config={"recursion_limit": settings.agent_recursion_limit},
         # Both channels on one iterator, so tokens and trace lines arrive in the order they
         # actually happened.
@@ -188,10 +200,13 @@ async def stream_supervisor(
 
         if not sent_routes and state.get("routes"):
             sent_routes = True
-            yield "routes", {
-                "routes": list(state["routes"]),
-                "reason": state.get("route_reason", ""),
-            }
+            yield (
+                "routes",
+                {
+                    "routes": list(state["routes"]),
+                    "reason": state.get("route_reason", ""),
+                },
+            )
 
         # Emitted once the RAG branch has run, whether or not it found anything: an empty
         # list is itself information — it tells the user the answer rests on nothing.

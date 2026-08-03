@@ -135,6 +135,19 @@ class Settings(BaseSettings):
     #: Turns of prior conversation replayed into the prompt.
     chat_history_limit: int = 10
 
+    # --- Workspace & conversation memory (Phase 12) ---
+
+    #: Maximum tokens of conversation history injected into the prompt. Beyond this,
+    #: older messages are summarized. Approximate: 1 token ≈ 4 characters.
+    memory_max_tokens: int = 4000
+    #: Token count above which old messages are summarized rather than replayed verbatim.
+    memory_summary_threshold: int = 2000
+    #: Maximum number of recent messages (both roles) to keep in the context window.
+    memory_recent_window: int = 20
+    #: Which memory strategy to use: "window" (newest N), "summary" (summarize old),
+    #: or "hybrid" (summary of old + verbatim recent).
+    memory_strategy: str = "hybrid"
+
     # --- Guarded SQL agent (CLAUDE.md 4.3, Phase 5) ---
 
     #: Hard ceiling on rows any generated query may return. Injected into the query as a

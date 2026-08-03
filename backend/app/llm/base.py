@@ -73,9 +73,7 @@ class LLMProvider(Protocol):
     name: str
     model: str
 
-    def stream(
-        self, messages: list[Message], *, completion: Completion
-    ) -> AsyncIterator[str]:
+    def stream(self, messages: list[Message], *, completion: Completion) -> AsyncIterator[str]:
         """Yield response text incrementally, recording usage into `completion`."""
         ...
 
@@ -89,10 +87,7 @@ class LLMRouterProtocol(Protocol):
     stub without touching the network.
     """
 
-    def stream(
-        self, messages: list[Message], *, completion: Completion
-    ) -> AsyncIterator[str]:
-        ...
+    def stream(self, messages: list[Message], *, completion: Completion) -> AsyncIterator[str]: ...
 
 
 __all__ = [

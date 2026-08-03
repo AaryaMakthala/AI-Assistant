@@ -36,6 +36,10 @@ from app.db.base import Base
 EMBEDDING_DIM = 384
 
 USER_ROLES = ("owner", "admin", "member")
+#: Workspace-level roles, finer-grained than org roles. Independent hierarchy: a user's
+#: workspace role governs what they can do inside that workspace, regardless of their
+#: org-level role. Ordered from most to least privileged for documentation, not code.
+WORKSPACE_ROLES = ("owner", "admin", "editor", "viewer")
 DOCUMENT_STATUSES = ("pending", "processing", "ready", "failed")
 #: Terminal statuses. A document in one of these is not going to change on its own, which
 #: is what lets the UI stop polling and the reaper skip it.
@@ -128,6 +132,11 @@ class Document(Base):
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    #: The workspace this document belongs to. Nullable for backward compatibility: the
+    #: migration backfills existing rows into a default workspace per org.
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL")
     )
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
@@ -264,6 +273,11 @@ class ChatSession(Base):
     )
     org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    #: The workspace this conversation belongs to. Nullable for backward compatibility:
+    #: the migration backfills existing rows into a default workspace per org.
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL")
+    )
     title: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -350,6 +364,111 @@ class SqlQueryAudit(Base):
     )
 
 
+class Workspace(Base):
+    """A workspace within an organization (Phase 12).
+
+    Workspaces subdivide org-level access. Every document and conversation belongs to one
+    workspace, and membership + role within a workspace govern what a user may do there.
+    Every org has at least one workspace (a "Default" created by the migration).
+    """
+
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("org_id", "slug", name="uq_workspaces_org_slug"),
+        Index("ix_workspaces_org_id", "org_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_NEW_UUID
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    settings: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    members: Mapped[list[WorkspaceMember]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class WorkspaceMember(Base):
+    """Membership of a user in a workspace, with a workspace-scoped role.
+
+    The role here is independent of the user's org-level role: an org admin does not
+    automatically become a workspace admin. Roles are assigned explicitly when a member
+    is added.
+    """
+
+    __tablename__ = "workspace_members"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_members_ws_user"),
+        CheckConstraint(_in_list("role", WORKSPACE_ROLES), name="ck_workspace_members_role"),
+        Index("ix_workspace_members_user_id", "user_id"),
+        Index("ix_workspace_members_org_id", "org_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_NEW_UUID
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Denormalized for RLS: every org-scoped query filters on this without joining.
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, server_default="viewer")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="members")
+
+
+class ConversationSummary(Base):
+    """Cached summary of older messages in a conversation (Phase 12 memory).
+
+    When a conversation exceeds the token budget, older messages are summarized and
+    cached here. The summary replaces those messages in the context window, so the LLM
+    sees a compressed history rather than nothing at all.
+    """
+
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (Index("ix_conversation_summaries_session", "session_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=_NEW_UUID
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The range of message indices this summary covers. Used to avoid re-summarizing.
+    message_range_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_range_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_count: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 #: Tables holding org-scoped data; all must have RLS enabled and forced.
 ORG_SCOPED_TABLES = (
     "organizations",
@@ -360,6 +479,9 @@ ORG_SCOPED_TABLES = (
     "chat_sessions",
     "chat_messages",
     "sql_query_audit",
+    "workspaces",
+    "workspace_members",
+    "conversation_summaries",
 )
 
 __all__ = [
@@ -371,12 +493,16 @@ __all__ = [
     "SQL_AUDIT_STATUSES",
     "TERMINAL_DOCUMENT_STATUSES",
     "USER_ROLES",
+    "WORKSPACE_ROLES",
     "ChatMessage",
     "ChatSession",
+    "ConversationSummary",
     "Document",
     "DocumentChunk",
     "IngestionFailure",
     "Organization",
     "SqlQueryAudit",
     "User",
+    "Workspace",
+    "WorkspaceMember",
 ]

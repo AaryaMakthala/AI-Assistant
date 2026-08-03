@@ -32,8 +32,10 @@ from sqlalchemy import case, delete, desc, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.graph import stream_supervisor
+from app.agents.memory import load_conversation_context
 from app.agents.state import outcomes
 from app.api.dependencies import get_llm_router
+from app.api.workspace_deps import assert_workspace_role
 from app.config import get_settings
 from app.db.models import ChatMessage, ChatSession
 from app.llm.base import Completion, LLMError, LLMRouterProtocol, Message
@@ -61,6 +63,9 @@ class ChatRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=8000)
     session_id: uuid.UUID | None = None
+    #: When present, the new or existing session is scoped to this workspace. Omit to use
+    #: the default (unscoped) behavior for backward compatibility.
+    workspace_id: uuid.UUID | None = None
 
 
 class ChatSessionResponse(BaseModel):
@@ -147,7 +152,12 @@ async def _load_history(
 
 
 async def _ensure_session(
-    session: AsyncSession, *, principal: Principal, session_id: uuid.UUID | None, question: str
+    session: AsyncSession,
+    *,
+    principal: Principal,
+    session_id: uuid.UUID | None,
+    question: str,
+    workspace_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Return the id of the session to append to, creating one if needed.
 
@@ -167,12 +177,15 @@ async def _ensure_session(
         return session_id
 
     title = question.strip()[:80] or None
+    values: dict[str, Any] = {
+        "org_id": principal.org_id,
+        "user_id": principal.user_id,
+        "title": title,
+    }
+    if workspace_id is not None:
+        values["workspace_id"] = workspace_id
     return (
-        await session.execute(
-            insert(ChatSession)
-            .values(org_id=principal.org_id, user_id=principal.user_id, title=title)
-            .returning(ChatSession.id)
-        )
+        await session.execute(insert(ChatSession).values(**values).returning(ChatSession.id))
     ).scalar_one()
 
 
@@ -335,7 +348,8 @@ def _absorb_final(result: _TurnResult, state: dict[str, Any]) -> None:
     # anything citable — reporting a SQL-only answer as ungrounded would misread it as a
     # guess.
     result.grounded = any(
-        outcome.ok and outcome.has_content for outcome in outcomes(state)  # type: ignore[arg-type]
+        outcome.ok and outcome.has_content
+        for outcome in outcomes(state)  # type: ignore[arg-type]
     )
     completion = state.get("completion")
     if isinstance(completion, Completion):
@@ -363,6 +377,7 @@ async def _event_stream(
     question: str,
     session_id: uuid.UUID,
     history: list[Message],
+    memory_metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
     result = _TurnResult()
     # Assume the worst until the `done` frame is reached. Every early exit — provider
@@ -375,7 +390,11 @@ async def _event_stream(
 
         try:
             async for kind, payload in stream_supervisor(
-                llm, question=question, principal=principal, history=history
+                llm,
+                question=question,
+                principal=principal,
+                history=history,
+                memory_metadata=memory_metadata,
             ):
                 if kind == "token":
                     result.text += payload
@@ -437,6 +456,9 @@ async def _event_stream(
                 # Empty unless the SQL agent ran. The UI shows it collapsed, so an answer
                 # over business data stays inspectable without cluttering the reply.
                 "sql_query": result.sql_query,
+                # How much of the conversation the model actually saw. Lets the UI say so
+                # when older turns were compressed rather than replayed verbatim.
+                "memory": memory_metadata or {},
             },
         )
         incomplete = False
@@ -490,20 +512,53 @@ async def chat(
 
     settings = get_settings()
 
-    # Session bookkeeping and history run in their own short transaction, which closes
-    # before the graph starts. Retrieval now happens inside the RAG sub-agent — under its
-    # own org-scoped session — so no connection is held across the multi-second run.
+    # Verified before the session is created: workspace_id arrived in the request body, so
+    # without this a user could file a conversation into a workspace they never joined.
+    if payload.workspace_id is not None:
+        await assert_workspace_role(
+            payload.workspace_id, principal, "owner", "admin", "editor"
+        )
+
+    # Session bookkeeping runs in its own short transaction, which closes before the graph
+    # starts. Retrieval now happens inside the RAG sub-agent — under its own org-scoped
+    # session — so no connection is held across the multi-second run.
     async with tenant_session(
         org_id=principal.org_id, user_id=principal.user_id, role=principal.role
     ) as session:
         session_id = await _ensure_session(
-            session, principal=principal, session_id=payload.session_id, question=question
+            session,
+            principal=principal,
+            session_id=payload.session_id,
+            question=question,
+            workspace_id=payload.workspace_id,
         )
-        history = (
-            await _load_history(session, session_id=session_id, limit=settings.chat_history_limit)
-            if payload.session_id is not None
-            else []
-        )
+
+    history: list[Message] = []
+    memory_metadata: dict[str, Any] = {}
+    if payload.session_id is not None:
+        try:
+            history, memory_metadata = await load_conversation_context(
+                session_id,
+                principal.org_id,
+                principal.user_id,
+                principal.role,
+                llm,
+            )
+        except Exception as exc:
+            # Memory is an enhancement, not a precondition. A summarization or storage
+            # failure must not cost the user their answer — it costs them older context,
+            # so fall back to a plain recent-turns window.
+            logger.opt(exception=exc).warning(
+                "Conversation memory unavailable for session {session}; "
+                "falling back to recent history",
+                session=session_id,
+            )
+            async with tenant_session(
+                org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+            ) as session:
+                history = await _load_history(
+                    session, session_id=session_id, limit=settings.chat_history_limit
+                )
 
     return StreamingResponse(
         _event_stream(
@@ -512,6 +567,7 @@ async def chat(
             question=question,
             session_id=session_id,
             history=history,
+            memory_metadata=memory_metadata,
         ),
         media_type="text/event-stream",
         headers={
@@ -528,18 +584,23 @@ async def list_sessions(
     principal: CurrentPrincipal,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    workspace_id: uuid.UUID | None = None,
 ) -> ChatSessionListResponse:
+    # Membership is required before the filter is honoured. RLS already confines sessions
+    # to their author, so this cannot leak another user's chats — but it keeps the
+    # workspace filter from doubling as a way to probe workspaces one has not joined.
+    if workspace_id is not None:
+        await assert_workspace_role(workspace_id, principal)
+
     async with tenant_session(
         org_id=principal.org_id, user_id=principal.user_id, role=principal.role
     ) as session:
-        rows = (
-            await session.execute(
-                select(ChatSession)
-                .order_by(desc(ChatSession.updated_at))
-                .limit(limit)
-                .offset(offset)
-            )
-        ).scalars()
+        stmt = (
+            select(ChatSession).order_by(desc(ChatSession.updated_at)).limit(limit).offset(offset)
+        )
+        if workspace_id is not None:
+            stmt = stmt.where(ChatSession.workspace_id == workspace_id)
+        rows = (await session.execute(stmt)).scalars()
         sessions = [ChatSessionResponse.model_validate(row) for row in rows]
     return ChatSessionListResponse(sessions=sessions)
 
@@ -597,6 +658,43 @@ async def delete_session(principal: CurrentPrincipal, session_id: uuid.UUID) -> 
         ).rowcount
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat session not found.")
+
+
+class SessionUpdate(BaseModel):
+    """Fields that may be updated on a chat session."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=300)
+
+
+@router.patch(
+    "/sessions/{session_id}",
+    response_model=ChatSessionResponse,
+    summary="Rename a chat session",
+)
+async def rename_session(
+    principal: CurrentPrincipal,
+    session_id: uuid.UUID,
+    payload: SessionUpdate,
+) -> ChatSessionResponse:
+    """Update the title of an existing conversation."""
+    async with tenant_session(
+        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+    ) as session:
+        updated = (
+            await session.execute(
+                update(ChatSession)
+                .where(ChatSession.id == session_id)
+                .values(title=payload.title.strip(), updated_at=func.now())
+                .returning(ChatSession)
+            )
+        ).scalar_one_or_none()
+        if updated is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Chat session not found.",
+            )
+        return ChatSessionResponse.model_validate(updated)
 
 
 __all__ = ["router"]

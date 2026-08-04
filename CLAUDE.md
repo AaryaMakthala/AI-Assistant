@@ -202,6 +202,19 @@ from the start — only the automated proof that it works is deferred to Phase 1
 - Never let a retrieved chunk or tool result trigger another tool call automatically —
   tool calls should originate from the agent's reasoning over the *user's* request, not
   from text found inside a document.
+- **The assistant has a scope boundary, and it is enforced in the prompt.** This is the
+  same category of problem as injection: the assistant needs an explicit statement of what
+  it is *for*, not only of what it must not obey. It answers from three sources — the org's
+  documents, its business data, and connected repositories — and nothing else. General
+  knowledge, trivia, recipes, media, and code unrelated to a connected repo get a bounded
+  refusal that names what the assistant *can* do.
+- A guardrail that forbids inventing *company* facts does not imply this boundary. "What is
+  the capital of Japan" is not a company fact, so a model told only "do not invent company
+  facts" will answer it and remain technically compliant. The refusal must be stated
+  positively and separately — see `DIRECT_SYSTEM_PROMPT` in `app/agents/prompts.py`.
+- The router carries half of this: a general-knowledge question must route to `direct` (to
+  receive the bounded refusal), never to `documents` on the chance a document mentions the
+  topic.
 
 ### 4.5 MCP Server Scoping
 - Each MCP server authenticates the calling agent and exposes the minimum tool set it
@@ -219,6 +232,24 @@ from the start — only the automated proof that it works is deferred to Phase 1
   Postgres RLS policies (so a missed check in application code still can't leak data).
 - Example RLS rule: a user can only `SELECT` documents where `documents.org_id =
   auth.jwt() ->> 'org_id'`.
+
+#### Document visibility (Phase 12.5)
+- `documents.visibility` is either `'org'` (uploaded by an owner/admin, readable by the
+  whole organization) or `'personal'` (readable only by its uploader). Only owners/admins
+  may set `'org'`; a member attempting it gets **403**, never a silent downgrade to
+  personal — the user must know their upload did not go where they expected.
+- **Owners and admins can read members' personal documents.** This is a deliberate choice
+  for administrative oversight, consistent with how most SaaS admin consoles behave, and it
+  is what makes the "Manage All Documents" view and "promote to company doc" possible. It
+  is a real privacy tradeoff and is stated here so it is never assumed either way.
+- **`visibility` is orthogonal to `workspace_id`.** A workspace is an organizational
+  grouping and plays no part in access control; `org_id` is the tenant boundary and
+  `visibility` decides who within that tenant may read the row. Do not conflate them.
+- Verify role from the `users` table inside the policy, not from a JWT claim. Supabase
+  tokens carry a top-level `role` claim meaning the *database* role (`authenticated`), which
+  would collide with the org role this app keeps in `org_role`.
+- Mirror visibility onto `document_chunks` in the policy **and** filter at query time. A
+  query-time-only filter is one missed join away from leaking a colleague's document text.
 
 ### 4.7 Transport & API Hygiene
 - HTTPS only in any deployed environment.
@@ -258,7 +289,8 @@ criteria met," and that gap is intentional and closes in Phase 14.
 - Goal: core tables + row-level security from day one, not bolted on later.
 - Tasks: `organizations`, `users`, `documents`, `document_chunks` (with vector column),
   `chat_sessions`, `chat_messages`. Write RLS policies for org-scoped access. Alembic
-  migration.
+  migration. (`documents` later gains `visibility` and a non-null `uploaded_by` in Phase
+  12.5 — see Section 4.6.)
 - Verification: migration applies cleanly; manually confirm (e.g. via `psql`) that a
   cross-org `SELECT` under the app's DB role returns nothing. Full automated proof of
   this is part of the Phase 14 security suite.
@@ -340,6 +372,49 @@ criteria met," and that gap is intentional and closes in Phase 14.
   anything ambiguous for the Phase 14 test suite to specifically target.
 - Verification: written summary of the review; no automated tests yet.
 
+### Phase 12.1 — Addendum Bug Fixes
+- Goal: three usability bugs found in Phase 12's logs, fixed before new scope lands.
+- Tasks:
+  - Uploads stuck at "Queued": `pending` is the state *before* a worker claims the job, so
+    the cause is that no Celery worker is running. Document the three-process dev workflow
+    (API + worker + beat) in the README; compose covers infrastructure only.
+  - `POST /documents` used `.returning(Document).one()`, yielding a SQLAlchemy `Row` rather
+    than the ORM object — corrected to `.scalar_one()` to match every other query in the
+    router.
+  - The assistant answered general trivia. Fixed in the prompts, per Section 4.4: an
+    explicit scope boundary on `DIRECT_SYSTEM_PROMPT` and out-of-scope routing rules plus
+    negative examples on `ROUTER_SYSTEM_PROMPT`.
+  - Chat pane did not scroll. The scroll logic was already correct; the layout defeated it
+    — flex children with the default `min-height: auto` grew past `h-dvh` so the outer
+    `overflow-hidden` clipped instead of scrolling. Fixed with `min-h-0` on the column chain.
+- Verification: worker running end-to-end takes an upload `Queued → Processing → Ready`;
+  a trivia question gets a bounded refusal while "hi" still works; a long conversation
+  scrolls with the composer fixed.
+
+### Phase 12.5 — Document Permission System
+- Goal: owner-uploaded documents are company-wide; members' uploads are private to them;
+  owners get a management view over all org documents. See Section 4.6.
+- Tasks, in this order (schema → RLS → API → retrieval → frontend):
+  - Migration: add `visibility`, make `uploaded_by` NOT NULL. **Backfill order is
+    load-bearing** — add the column nullable, set every pre-existing row to `'org'`, and
+    only then apply the `'personal'` default, or every existing company document silently
+    becomes invisible.
+  - RLS: per-command policies on `documents`; mirror visibility onto `document_chunks`.
+  - **The ingestion worker sets claims with `org_id` only**, so `app.current_user_id()` is
+    NULL inside it and a personal document matches no policy branch. Ingestion must be
+    granted an explicit, non-user-forgeable service claim or every personal upload hangs at
+    `pending` — and the reaper will re-queue it forever. See the risk register.
+  - API: `visibility` on upload (403 for a member requesting `'org'`), `?scope=` on list,
+    delete restricted to uploader or owner/admin, and a promote-to-org endpoint.
+  - Retrieval: scope the vector search to org-wide chunks plus the caller's own.
+  - The Document MCP server currently discards the `user_id` it fetches — it must pass it
+    through, or the assistant cannot see the caller's own personal documents.
+  - Frontend: split the Docs tab into Company Docs / My Docs, plus an owner-only manage view.
+- Verification: as member A upload a personal doc, then confirm as member B that it is
+  invisible in `documents` *and* `document_chunks` and unreachable via chat — this mirrors
+  the Phase 2 cross-org check and is worth running live even though the suite is Phase 14.
+  Confirm a *personal* upload still reaches `ready`, which is the path RLS breaks.
+
 ### Phase 13 — Dockerize & Deploy
 - Goal: reproducible deployment.
 - Tasks: production Dockerfiles for frontend/backend, docker-compose for local
@@ -358,6 +433,12 @@ criteria met," and that gap is intentional and closes in Phase 14.
   - `tests/security/`: SQL injection attempts against the SQL agent, prompt-injection
     documents fed into RAG, auth-bypass attempts (missing JWT, wrong org_id, expired
     token), file-upload fuzzing (oversized files, disallowed types, zip bombs).
+  - Phase 12.5 specifically: a member cannot read another member's personal document
+    through `documents`, through `document_chunks`, through RAG retrieval, or through the
+    Document MCP server (four separate paths, all of which must fail); an owner *can*; a
+    member requesting `visibility='org'` gets 403 rather than a downgrade; a personal
+    document still ingests to `ready`; and the assistant refuses out-of-scope questions
+    while still answering greetings.
   - Frontend: `vitest`/`playwright` for the chat UI round trip and auth-gated routes.
   - `pip-audit` and `npm audit`.
 - Verification (this is the real acceptance bar for the whole project): every check
@@ -399,6 +480,11 @@ criteria met," and that gap is intentional and closes in Phase 14.
 | Secrets committed to git | `.env` accidentally staged | `.gitignore` from commit #1, `.env.example` only, pre-commit secret scan |
 | Cost/quota overrun | Free-tier limits hit silently | Log token usage per request from Phase 4; alert threshold in Phase 11 |
 | Zip bomb / malformed file crashes a worker | No size/type validation before processing | Enforce limits in Phase 3 before the file reaches the extraction library |
+| A new RLS policy silently breaks the ingestion worker | The worker sets claims with `org_id` only, so `app.current_user_id()` is NULL — a user-scoped policy matches nothing, and a zero-row `UPDATE` does not raise | Grant ingestion an explicit service claim that no user token can produce; after any policy change, upload a *personal* document and confirm it reaches `ready` |
+| A stuck document is re-queued forever | The reaper runs with BYPASSRLS and re-queues anything `pending`, so a row the worker cannot see is retried every tick without `retry_count` climbing | Treat a document stuck at `pending` with `retry_count` 0 as an RLS problem, not a broker problem |
+| A colleague's personal document text leaks through chunks | `document_chunks` policies are org-scoped, and not every chunk query joins `documents` | Mirror visibility into the chunk policy *and* filter at query time (4.6) — the two must agree |
+| The assistant answers as a general chatbot | A prompt that forbids inventing *company* facts still permits general world knowledge | State the scope boundary positively and separately in the prompt, and route out-of-scope questions to `direct` (4.4) |
+| A visibility migration hides every existing document | `ADD COLUMN ... DEFAULT 'personal'` applies the default to existing rows too | Add nullable, backfill `'org'`, then apply the default — and verify the backfill before anything else |
 | A bug from an early phase isn't caught until Phase 14 | Per-phase testing deferred by design | Phase 12 hardening review exists specifically to catch design-level issues before the formal suite; keep phase summaries honest about uncertainty |
 
 ---

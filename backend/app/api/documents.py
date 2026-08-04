@@ -14,21 +14,37 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, insert, select, update
 
+from app.api.dependencies import require_role
 from app.api.workspace_deps import assert_workspace_role
 from app.db.models import TERMINAL_DOCUMENT_STATUSES, Document, DocumentChunk
-from app.security.auth import CurrentPrincipal
+from app.security.auth import CurrentPrincipal, Principal
 from app.security.rate_limit import UPLOAD_RATE_LIMIT, limiter
 from app.security.rls import tenant_session
 from app.security.uploads import UploadRejected, storage_path_for, stream_to_storage
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+#: Accepted `visibility` values, as a type so FastAPI rejects anything else at the edge.
+DocumentVisibility = Literal["org", "personal"]
+#: `all` is the default listing: everything RLS lets the caller see, unsplit.
+DocumentScope = Literal["org", "personal", "all"]
 
 
 class DocumentResponse(BaseModel):
@@ -47,7 +63,10 @@ class DocumentResponse(BaseModel):
     org_id: uuid.UUID
     #: Null for documents uploaded before workspaces existed, or outside one.
     workspace_id: uuid.UUID | None = None
-    uploaded_by: uuid.UUID | None = None
+    uploaded_by: uuid.UUID
+    #: 'org' — readable across the organization. 'personal' — readable by its uploader and
+    #: by owners/admins. Returned so the client can split the library without guessing.
+    visibility: str
     created_at: datetime
     updated_at: datetime
     processing_started_at: datetime | None = None
@@ -99,6 +118,21 @@ class UploadAcceptedResponse(BaseModel):
     )
 
 
+class VisibilityUpdate(BaseModel):
+    """Body of a visibility change. A model rather than a bare string so the allowed values
+    are validated by Pydantic before any query runs (CLAUDE.md 4.7)."""
+
+    visibility: DocumentVisibility
+
+
+#: Roles permitted to publish organization-wide documents and to administer everyone's.
+_ADMIN_ROLES = ("owner", "admin")
+
+
+def _is_admin(principal: CurrentPrincipal) -> bool:
+    return principal.role in _ADMIN_ROLES
+
+
 @router.post(
     "",
     response_model=UploadAcceptedResponse,
@@ -111,14 +145,26 @@ async def upload_document(
     principal: CurrentPrincipal,
     file: Annotated[UploadFile, File(description="pdf, docx, csv, xlsx or txt")],
     workspace_id: Annotated[uuid.UUID | None, Form()] = None,
+    visibility: Annotated[DocumentVisibility, Form()] = "personal",
 ) -> UploadAcceptedResponse:
     """Validate and store an upload, then queue ingestion.
 
     Returns 202: the document exists and is queued, but has no chunks yet. The client
     polls the status endpoint rather than waiting on the response.
+
+    Defaults to `personal`: an upload whose intended audience was not stated should reach
+    the smallest one. Publishing org-wide is an owner/admin action and is refused outright
+    rather than quietly downgraded, so the uploader learns their file did not go where
+    they expected (CLAUDE.md 4.6).
     """
     # Checked before the bytes are read: a caller who may not write here should not be
     # able to spend the server's disk and time finding that out.
+    if visibility == "org" and not _is_admin(principal):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an owner or admin can publish a document to the whole organization.",
+        )
+
     if workspace_id is not None:
         await assert_workspace_role(workspace_id, principal, "owner", "admin", "editor")
 
@@ -147,6 +193,7 @@ async def upload_document(
                     size_bytes=stored.size_bytes,
                     status="pending",
                     workspace_id=workspace_id,
+                    visibility=visibility,
                 )
                 .returning(Document)
             )
@@ -195,6 +242,7 @@ async def list_documents(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     workspace_id: uuid.UUID | None = None,
+    scope: DocumentScope = "all",
 ) -> DocumentListResponse:
     """Documents visible to the caller's organization, newest first.
 
@@ -204,6 +252,11 @@ async def list_documents(
 
     `workspace_id` narrows the list further, and requires membership of that workspace —
     otherwise the filter would be a way to read a workspace one has not joined.
+
+    `scope` splits what RLS already returned into the two sections the library renders. It
+    narrows and never widens: `personal` means the caller's own uploads, so an owner
+    browsing "My Docs" sees their own files rather than everyone's. Requesting a scope can
+    therefore never reveal a row that omitting it would have hidden.
     """
     if workspace_id is not None:
         await assert_workspace_role(workspace_id, principal)
@@ -216,6 +269,15 @@ async def list_documents(
         if workspace_id is not None:
             stmt = stmt.where(Document.workspace_id == workspace_id)
             count_stmt = count_stmt.where(Document.workspace_id == workspace_id)
+        if scope == "org":
+            stmt = stmt.where(Document.visibility == "org")
+            count_stmt = count_stmt.where(Document.visibility == "org")
+        elif scope == "personal":
+            personal = (Document.visibility == "personal") & (
+                Document.uploaded_by == principal.user_id
+            )
+            stmt = stmt.where(personal)
+            count_stmt = count_stmt.where(personal)
 
         rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars()
         documents = [DocumentResponse.model_validate(row) for row in rows]
@@ -301,6 +363,11 @@ async def delete_document(principal: CurrentPrincipal, document_id: uuid.UUID) -
 
     Any queued ingestion is revoked first, so a worker cannot resurrect chunks for a
     document that is about to stop existing.
+
+    A member may read an org-wide document but may not delete one they did not upload;
+    owners and admins may delete anything. The `documents_delete` policy from migration
+    0007 enforces the same rule, so a mistake here narrows what the endpoint reaches
+    rather than what the database returns.
     """
     async with tenant_session(
         org_id=principal.org_id, user_id=principal.user_id, role=principal.role
@@ -309,13 +376,20 @@ async def delete_document(principal: CurrentPrincipal, document_id: uuid.UUID) -
         # gone, and RLS constrains both statements, so this cannot read another org's key.
         row = (
             await session.execute(
-                select(Document.storage_key, Document.task_id).where(Document.id == document_id)
+                select(Document.storage_key, Document.task_id, Document.uploaded_by).where(
+                    Document.id == document_id
+                )
             )
         ).first()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
-        storage_key, task_id = row
+        storage_key, task_id, uploaded_by = row
+        if uploaded_by != principal.user_id and not _is_admin(principal):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete documents you uploaded.",
+            )
         _revoke_task(task_id, document_id)
 
         # Chunks explicitly as well as by cascade. The cascade is the guarantee; this is
@@ -335,6 +409,52 @@ async def delete_document(principal: CurrentPrincipal, document_id: uuid.UUID) -
         org=principal.org_id,
         user=principal.user_id,
     )
+
+
+@router.patch(
+    "/{document_id}/visibility",
+    response_model=DocumentResponse,
+    summary="Publish a document org-wide, or return it to personal (owners and admins)",
+)
+async def update_document_visibility(
+    principal: Annotated[Principal, Depends(require_role(*_ADMIN_ROLES))],
+    document_id: uuid.UUID,
+    body: VisibilityUpdate,
+) -> DocumentResponse:
+    """Change who can read a document.
+
+    Restricted to owners and admins, which is what makes "promote to company doc" possible
+    over a member's personal upload — the same oversight the select policy grants them
+    (CLAUDE.md 4.6). Gated twice: `require_role` rejects a member before any query runs,
+    and `documents_update` constrains the row regardless.
+
+    Demotion back to `personal` is the same operation in reverse, and is deliberately
+    allowed: publishing by mistake must be undoable. The document keeps its original
+    `uploaded_by`, so promoting a colleague's file never reassigns authorship.
+    """
+    async with tenant_session(
+        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+    ) as session:
+        row = (
+            await session.execute(
+                update(Document)
+                .where(Document.id == document_id)
+                .values(visibility=body.visibility)
+                .returning(Document)
+            )
+        ).scalar_one_or_none()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    logger.info(
+        "Set document {doc} visibility to {vis} for org {org} at the request of user {user}",
+        doc=document_id,
+        vis=body.visibility,
+        org=principal.org_id,
+        user=principal.user_id,
+    )
+    return DocumentResponse.model_validate(row)
 
 
 def _revoke_task(task_id: str | None, document_id: uuid.UUID) -> None:

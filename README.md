@@ -312,11 +312,32 @@ Every table holding organization-scoped data is protected by Postgres RLS polici
 
 ### Backend Setup
 
+The backend needs **three** processes running together. Uploads sit at `Queued` forever if
+the Celery worker isn't running — the API only enqueues the job, the worker performs the
+extraction and embedding.
+
 ```bash
 cd backend
 uv sync              # or: poetry install
 cp ../.env.example ../.env   # fill in real values
+
+# Terminal 1 — API
 uvicorn app.main:app --reload
+
+# Terminal 2 — ingestion worker (required, or uploads never leave "Queued")
+celery -A app.workers.celery_app worker --loglevel=info
+
+# Terminal 3 — scheduler, re-queues jobs abandoned by a crashed worker
+celery -A app.workers.celery_app beat --loglevel=info
+```
+
+On Windows, prefix each command with `py -m uv run` and add `--pool=solo` to the worker —
+Celery's default prefork pool does not work on Windows.
+
+Check Redis is reachable before starting the worker:
+
+```bash
+redis-cli -u $REDIS_URL ping   # expects: PONG
 ```
 
 ### Frontend Setup
@@ -334,6 +355,11 @@ docker compose up
 ```
 
 This starts PostgreSQL and Redis locally. The frontend runs at `http://localhost:3000`, and the backend API at `http://localhost:8000`.
+
+Compose covers **infrastructure only** — the API, the Celery worker, and beat are still run
+by hand as shown above. Containerizing the application processes is part of the deployment
+phase. If you use hosted Postgres and Redis, skip compose entirely and point `DATABASE_URL`
+and `REDIS_URL` at the hosted instances.
 
 ---
 

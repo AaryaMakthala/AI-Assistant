@@ -150,7 +150,7 @@ async def upload_document(
                 )
                 .returning(Document)
             )
-        ).one()
+        ).scalar_one()
 
     document = DocumentResponse.model_validate(row)
 

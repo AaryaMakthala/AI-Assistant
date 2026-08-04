@@ -11,6 +11,7 @@ export {
   listSessions,
   reprocessDocument,
   sendMessage,
+  updateDocumentVisibility,
   uploadDocument,
   uploadDocumentWithProgress,
 } from "./client";

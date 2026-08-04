@@ -67,6 +67,12 @@ export interface ChatMessageListResponse {
 
 export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
 
+/** Who may read a document. `org` is organization-wide; `personal` is its uploader's own. */
+export type DocumentVisibility = "org" | "personal";
+
+/** Which section of the library to list. `all` is everything the caller may see. */
+export type DocumentScope = "org" | "personal" | "all";
+
 export interface DocumentSummary {
   id: string;
   filename: string;
@@ -78,7 +84,8 @@ export interface DocumentSummary {
   word_count: number | null;
   error_message: string | null;
   org_id: string;
-  uploaded_by: string | null;
+  uploaded_by: string;
+  visibility: DocumentVisibility;
   created_at: string;
   updated_at: string;
   processing_started_at: string | null;

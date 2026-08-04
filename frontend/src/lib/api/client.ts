@@ -13,8 +13,10 @@ import type {
   ChatSessionListResponse,
   ChatStreamEvent,
   DocumentListResponse,
+  DocumentScope,
   DocumentStatusDetail,
   DocumentSummary,
+  DocumentVisibility,
   MeResponse,
   OrgMemberListResponse,
   UploadAcceptedResponse,
@@ -148,11 +150,18 @@ export async function deleteSession(
 }
 
 export function listDocuments(
-  options: RequestOptions & { limit?: number; offset?: number } = {},
+  options: RequestOptions & {
+    limit?: number;
+    offset?: number;
+    scope?: DocumentScope;
+  } = {},
 ): Promise<DocumentListResponse> {
   const query = new URLSearchParams();
   if (options.limit !== undefined) query.set("limit", String(options.limit));
   if (options.offset !== undefined) query.set("offset", String(options.offset));
+  // Omitted when "all": that is the server's default, and sending it would only make the
+  // request URL noisier.
+  if (options.scope && options.scope !== "all") query.set("scope", options.scope);
   const suffix = query.size ? `?${query}` : "";
   return getJson<DocumentListResponse>(`/documents${suffix}`, options);
 }
@@ -200,6 +209,33 @@ export async function deleteDocument(
   if (!response.ok) throw await failure(response);
 }
 
+/**
+ * Publish a document organization-wide, or return it to personal.
+ *
+ * Owners and admins only; the backend answers 403 for anyone else. Promoting is what makes
+ * a member's upload answerable for the whole organization.
+ */
+export async function updateDocumentVisibility(
+  documentId: string,
+  visibility: DocumentVisibility,
+  options: RequestOptions = {},
+): Promise<DocumentSummary> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/visibility`,
+    {
+      method: "PATCH",
+      headers: {
+        ...authHeaders(options.token),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ visibility }),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as DocumentSummary;
+}
+
 /** Re-run ingestion for a document whose bytes are already stored. */
 export async function reprocessDocument(
   documentId: string,
@@ -219,10 +255,11 @@ export async function reprocessDocument(
 
 export async function uploadDocument(
   file: File,
-  options: RequestOptions = {},
+  options: RequestOptions & { visibility?: DocumentVisibility } = {},
 ): Promise<UploadAcceptedResponse> {
   const form = new FormData();
   form.append("file", file);
+  if (options.visibility) form.append("visibility", options.visibility);
 
   // No Content-Type header: the browser must set it so the multipart boundary matches.
   const response = await fetch(`${BASE_URL}/documents`, {
@@ -238,6 +275,8 @@ export async function uploadDocument(
 export interface UploadProgressOptions extends RequestOptions {
   /** Fraction of bytes sent, 0–1. Called repeatedly while the body uploads. */
   onProgress?: (fraction: number) => void;
+  /** Omitted means the server's default, `personal`. */
+  visibility?: DocumentVisibility;
 }
 
 /**
@@ -259,6 +298,7 @@ export function uploadDocumentWithProgress(
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append("file", file);
+    if (options.visibility) form.append("visibility", options.visibility);
 
     const request = new XMLHttpRequest();
     request.open("POST", `${BASE_URL}/documents`);

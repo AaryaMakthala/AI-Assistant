@@ -25,8 +25,10 @@ import {
   getDocument,
   listDocuments,
   reprocessDocument,
+  updateDocumentVisibility,
   uploadDocumentWithProgress,
   type DocumentSummary,
+  type DocumentVisibility,
 } from "@/lib/api";
 
 /** Extensions the backend accepts (CLAUDE.md 4.2, plus Markdown from Phase 10). Checked
@@ -137,7 +139,7 @@ export function useDocuments(token?: string) {
   }, [refresh]);
 
   const upload = useCallback(
-    async (file: File) => {
+    async (file: File, visibility: DocumentVisibility = "personal") => {
       uploadCounter += 1;
       const id = `upload-${uploadCounter}`;
 
@@ -180,6 +182,7 @@ export function useDocuments(token?: string) {
       try {
         const accepted = await uploadDocumentWithProgress(file, {
           token,
+          visibility,
           onProgress: (fraction) => patch({ progress: fraction }),
         });
         patch({
@@ -256,9 +259,40 @@ export function useDocuments(token?: string) {
     [token],
   );
 
+  /**
+   * Publish a document organization-wide, or return it to personal.
+   *
+   * Owners and admins only. Local state is replaced with the row the server returns rather
+   * than patched optimistically, so a rejected change never leaves the library claiming a
+   * visibility the database does not have.
+   */
+  const setVisibility = useCallback(
+    async (documentId: string, visibility: DocumentVisibility) => {
+      if (!token) return;
+      try {
+        const updated = await updateDocumentVisibility(documentId, visibility, {
+          token,
+        });
+        if (!mountedRef.current) return;
+        setDocuments((current) =>
+          current.map((row) => (row.id === documentId ? updated : row)),
+        );
+        setError(undefined);
+      } catch (caught) {
+        if (mountedRef.current) {
+          setError(
+            caught instanceof ApiError
+              ? caught.message
+              : "The document's visibility could not be changed.",
+          );
+        }
+      }
+    },
+    [token],
+  );
+
   /** Re-run ingestion for a document that failed. */
-  const reprocess = useCallback(
-    async (documentId: string) => {
+  const reprocess = useCallback(    async (documentId: string) => {
       if (!token) return;
       try {
         const accepted = await reprocessDocument(documentId, { token });
@@ -354,6 +388,7 @@ export function useDocuments(token?: string) {
     dismissUpload,
     remove,
     reprocess,
+    setVisibility,
     clearError: useCallback(() => setError(undefined), []),
   };
 }

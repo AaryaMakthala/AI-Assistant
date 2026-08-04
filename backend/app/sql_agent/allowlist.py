@@ -20,7 +20,9 @@ about, and even there the sensitive columns are withheld:
 
 Column-level rather than table-level filtering matters because the DB grant in migration
 0003 mirrors this list exactly. Both layers are derived from the same constants, so they
-cannot drift out of step.
+cannot drift out of step. `visibility` was added later, by migration 0007, and carries its
+grant there — it is safe to expose because it names a category rather than a person, and
+the rows it describes are already filtered to the ones the caller may read.
 """
 
 from __future__ import annotations
@@ -82,6 +84,11 @@ DOCUMENTS = TableSpec(
             "Ingestion state: 'pending', 'processing', 'ready' or 'failed'.",
         ),
         ColumnSpec("page_count", "integer", "Pages extracted; NULL for non-paginated files."),
+        ColumnSpec(
+            "visibility",
+            "text",
+            "'org' for organization-wide files, 'personal' for a single user's own.",
+        ),
         ColumnSpec("created_at", "timestamptz", "When the file was uploaded."),
         ColumnSpec("updated_at", "timestamptz", "When the row last changed."),
     ),

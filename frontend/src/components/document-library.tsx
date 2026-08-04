@@ -7,25 +7,34 @@
  * follows is a Celery job with no progress signal, shown as an indeterminate "Processing"
  * state until the status endpoint reports `ready` or `failed`. Animating a fake bar through
  * that phase would imply knowledge the frontend does not have.
+ *
+ * Documents are split into Company and Mine. The split is presentation over rows the server
+ * already filtered — RLS decides what arrives here, so this cannot reveal anything, and a
+ * missing `visibility` would show a file in the wrong section rather than to the wrong
+ * person. Only owners and admins can upload to Company; the API answers 403 regardless.
  */
 
 import { AlertCircle, CheckCircle2, FileText, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "./confirm-dialog";
 import { StatusBadge } from "./status-badge";
 import {
   ACCEPTED_EXTENSIONS,
   type UploadState,
 } from "@/lib/hooks/use-documents";
-import type { DocumentSummary } from "@/lib/api";
+import type { DocumentSummary, DocumentVisibility } from "@/lib/api";
 import { cn, formatBytes } from "@/lib/utils";
 
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+
+type Section = "company" | "mine";
 
 export function DocumentLibrary({
   documents,
   uploads,
   deletingIds,
+  currentUserId,
+  canManageOrg,
   onUpload,
   onDismissUpload,
   onDelete,
@@ -35,12 +44,17 @@ export function DocumentLibrary({
   documents: DocumentSummary[];
   uploads: UploadState[];
   deletingIds?: ReadonlySet<string>;
-  onUpload: (file: File) => void;
+  /** Whose uploads count as "Mine". Undefined until /me resolves. */
+  currentUserId?: string;
+  /** Owners and admins only. Presentation; the server gates the action independently. */
+  canManageOrg?: boolean;
+  onUpload: (file: File, visibility: DocumentVisibility) => void;
   onDismissUpload: (id: string) => void;
   onDelete: (id: string) => void;
   onReprocess: (id: string) => void;
   disabled?: boolean;
 }) {
+  const [section, setSection] = useState<Section>("company");
   const [isDragging, setIsDragging] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -48,9 +62,27 @@ export function DocumentLibrary({
   // highlight survives moving across the zone's contents instead of flickering.
   const dragDepth = useRef(0);
 
+  const { company, mine } = useMemo(
+    () => ({
+      company: documents.filter((row) => row.visibility === "org"),
+      // An owner sees colleagues' personal files too, so "Mine" is by uploader rather than
+      // by visibility — otherwise their own tab would fill with everyone else's uploads.
+      mine: documents.filter(
+        (row) => row.visibility === "personal" && row.uploaded_by === currentUserId,
+      ),
+    }),
+    [documents, currentUserId],
+  );
+
+  const visible = section === "company" ? company : mine;
+  // Uploading to Company publishes org-wide, which only an owner or admin may do.
+  const canUploadHere = section === "mine" || Boolean(canManageOrg);
+  const isUploadDisabled = disabled || !canUploadHere;
+
   const handleFiles = (files: FileList | null) => {
-    if (!files || disabled) return;
-    for (const file of Array.from(files)) onUpload(file);
+    if (!files || isUploadDisabled) return;
+    const visibility: DocumentVisibility = section === "company" ? "org" : "personal";
+    for (const file of Array.from(files)) onUpload(file, visibility);
   };
 
   // Uploads still in flight are listed separately above the library; once a document row
@@ -61,6 +93,36 @@ export function DocumentLibrary({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        role="tablist"
+        aria-label="Document sections"
+        className="flex gap-1 px-3 pb-2"
+      >
+        {(
+          [
+            ["company", "Company"],
+            ["mine", "My Docs"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={section === value}
+            onClick={() => setSection(value)}
+            className={cn(
+              "flex-1 rounded-md px-2 py-1 text-[0.6875rem] font-medium transition-colors",
+              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+              section === value
+                ? "bg-surface-raised text-foreground"
+                : "text-muted hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       <div
         onDragEnter={(event) => {
           event.preventDefault();
@@ -83,32 +145,43 @@ export function DocumentLibrary({
           handleFiles(event.dataTransfer.files);
         }}
         className={cn(
-          "m-3 rounded-lg border border-dashed p-4 text-center transition-colors",
-          isDragging
+          "m-3 mt-0 rounded-lg border border-dashed p-4 text-center transition-colors",
+          isDragging && !isUploadDisabled
             ? "border-accent bg-accent-subtle"
             : "border-border bg-background",
-          disabled && "opacity-50",
+          isUploadDisabled && "opacity-50",
         )}
       >
-        <Upload className="mx-auto size-4 text-muted" aria-hidden />
-        <p className="mt-2 text-xs text-muted">
-          Drop files here, or{" "}
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => inputRef.current?.click()}
-            className={cn(
-              "font-medium text-accent underline underline-offset-2",
-              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              "disabled:cursor-not-allowed",
-            )}
-          >
-            browse
-          </button>
-        </p>
-        <p className="mt-1 text-[0.6875rem] text-muted">
-          {ACCEPTED_EXTENSIONS.join(", ")} · up to 25 MB
-        </p>
+        {canUploadHere ? (
+          <>
+            <Upload className="mx-auto size-4 text-muted" aria-hidden />
+            <p className="mt-2 text-xs text-muted">
+              Drop files here, or{" "}
+              <button
+                type="button"
+                disabled={isUploadDisabled}
+                onClick={() => inputRef.current?.click()}
+                className={cn(
+                  "font-medium text-accent underline underline-offset-2",
+                  "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+                  "disabled:cursor-not-allowed",
+                )}
+              >
+                browse
+              </button>
+            </p>
+            <p className="mt-1 text-[0.6875rem] text-muted">
+              {section === "company"
+                ? "Visible to everyone in your organization"
+                : "Visible only to you"}
+            </p>
+          </>
+        ) : (
+          <p className="text-[0.6875rem] text-muted">
+            Only an owner or admin can add company documents. Use My Docs for your own
+            files.
+          </p>
+        )}
         <input
           ref={inputRef}
           type="file"
@@ -134,13 +207,15 @@ export function DocumentLibrary({
           </ul>
         )}
 
-        {documents.length === 0 && activeUploads.length === 0 ? (
+        {visible.length === 0 && activeUploads.length === 0 ? (
           <p className="px-1 py-6 text-center text-xs text-muted">
-            No documents yet. Upload one to start asking questions about it.
+            {section === "company"
+              ? "No company documents yet."
+              : "No personal documents yet. Files you upload here stay private to you."}
           </p>
         ) : (
           <ul className="space-y-0.5">
-            {documents.map((row) => (
+            {visible.map((row) => (
               <li key={row.id}>
                 <DocumentRow
                   row={row}

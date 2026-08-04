@@ -12,7 +12,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { DocumentLibrary } from "./document-library";
 import { MembersPanel } from "./members-panel";
-import type { ChatSession, DocumentSummary } from "@/lib/api";
+import type { ChatSession, DocumentSummary, DocumentVisibility } from "@/lib/api";
 import type { UploadState } from "@/lib/hooks/use-documents";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
@@ -26,6 +26,7 @@ export function Sidebar({
   deletingDocumentIds,
   isDisabled,
   canManageOrg,
+  currentUserId,
   token,
   onNewChat,
   onSelectSession,
@@ -43,11 +44,13 @@ export function Sidebar({
   isDisabled?: boolean;
   /** Owners and admins only. Presentation; the server gates the data independently. */
   canManageOrg?: boolean;
+  /** Whose uploads count as personal in the library's "My Docs" section. */
+  currentUserId?: string;
   token?: string;
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
-  onUpload: (file: File) => void;
+  onUpload: (file: File, visibility: DocumentVisibility) => void;
   onDismissUpload: (id: string) => void;
   onDeleteDocument: (id: string) => void;
   onReprocessDocument: (id: string) => void;
@@ -140,25 +143,31 @@ export function Sidebar({
             documents={documents}
             uploads={uploads}
             deletingIds={deletingDocumentIds}
+            currentUserId={currentUserId}
+            canManageOrg={canManageOrg}
             onUpload={onUpload}
             onDismissUpload={onDismissUpload}
             onDelete={onDeleteDocument}
             onReprocess={onReprocessDocument}
             disabled={isDisabled}
           />
-          <div className="border-t border-border px-3 py-2">
-            <Link
-              href="/documents"
-              className={cn(
-                "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted",
-                "transition-colors hover:text-foreground focus-visible:ring-2",
-                "focus-visible:ring-accent focus-visible:outline-none",
-              )}
-            >
-              <FolderOpen className="size-3.5" aria-hidden />
-              Manage all documents
-            </Link>
-          </div>
+          {/* Owners and admins only: the page lists every member's uploads, which is an
+              oversight view rather than a personal one. The backend gates the data too. */}
+          {canManageOrg && (
+            <div className="border-t border-border px-3 py-2">
+              <Link
+                href="/documents"
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted",
+                  "transition-colors hover:text-foreground focus-visible:ring-2",
+                  "focus-visible:ring-accent focus-visible:outline-none",
+                )}
+              >
+                <FolderOpen className="size-3.5" aria-hidden />
+                Manage all documents
+              </Link>
+            </div>
+          )}
         </>
       )}
 

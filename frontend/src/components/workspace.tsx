@@ -65,6 +65,7 @@ export function Workspace() {
         deletingDocumentIds={documents.deletingIds}
         isDisabled={!isAuthenticated}
         canManageOrg={canManageOrg}
+        currentUserId={me?.user_id}
         token={token}
         onNewChat={() => {
           chat.reset();
@@ -80,7 +81,7 @@ export function Workspace() {
           if (id === chat.sessionId) chat.reset();
           void sessions.remove(id);
         }}
-        onUpload={(file) => void documents.upload(file)}
+        onUpload={(file, visibility) => void documents.upload(file, visibility)}
         onDismissUpload={documents.dismissUpload}
         onDeleteDocument={(id) => void documents.remove(id)}
         onReprocessDocument={(id) => void documents.reprocess(id)}

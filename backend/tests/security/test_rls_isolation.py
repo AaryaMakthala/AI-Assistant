@@ -78,6 +78,13 @@ async def _seeded(conn: AsyncConnection) -> dict[str, uuid.UUID]:
                 },
             )
     finally:
+        # Since migration 0007 `fk_documents_uploaded_by` is DEFERRABLE INITIALLY DEFERRED,
+        # so the document inserts above leave trigger events queued until commit. Postgres
+        # refuses to ALTER a table with pending trigger events, which would make the
+        # re-enable below fail and take every test in this module with it. Forcing the
+        # constraint to check now drains that queue; the inserts are valid, so nothing here
+        # can fail — this only moves the check earlier.
+        await conn.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
         for table in ORG_SCOPED_TABLES:
             await conn.execute(text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
     return ids

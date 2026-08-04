@@ -19,7 +19,29 @@ import { NextResponse, type NextRequest } from "next/server";
  * or the new session is discarded the moment this function ends.
  */
 
-const PUBLIC_PATHS = ["/login"];
+/** Reachable without a session. */
+const PUBLIC_PATHS = [
+  "/login",
+  "/check-email",
+  "/forgot-password",
+  "/reset-password",
+  "/auth/callback",
+];
+
+/**
+ * The subset of the above that a signed-in visitor has no reason to see, and is bounced
+ * away from.
+ *
+ * `/reset-password` and `/auth/callback` are deliberately absent. Following a recovery
+ * link *establishes a session* — that session is what authorizes the password change — so
+ * treating "has a session" as "does not belong here" would redirect the user to the
+ * workspace at exactly the moment they arrived to set a new password, making the reset
+ * form unreachable for the only people who ever legitimately reach it.
+ */
+const SIGNED_IN_REDIRECT_PATHS = ["/login", "/check-email", "/forgot-password"];
+
+const matches = (paths: string[], pathname: string) =>
+  paths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
 
 export async function proxy(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -54,9 +76,7 @@ export async function proxy(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isPublic = PUBLIC_PATHS.some(
-    (path) => pathname === path || pathname.startsWith(`${path}/`),
-  );
+  const isPublic = matches(PUBLIC_PATHS, pathname);
 
   if (!user && !isPublic) {
     const target = request.nextUrl.clone();
@@ -67,7 +87,7 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(target);
   }
 
-  if (user && isPublic) {
+  if (user && matches(SIGNED_IN_REDIRECT_PATHS, pathname)) {
     const target = request.nextUrl.clone();
     target.pathname = "/";
     target.search = "";

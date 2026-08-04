@@ -1,36 +1,47 @@
 "use client";
 
-/**
- * Sign in and sign up.
- *
- * One form for both, toggled rather than split across two routes: the fields are identical
- * and the distinction is one call. Two routes would double the copy that has to stay in
- * step for no gain in clarity.
- *
- * Errors are shown as Supabase words them. Rewriting them tends to blur the two cases that
- * matter — wrong password versus unconfirmed email — into a single unhelpful "sign-in
- * failed", and the second one is only solvable if the user is told which it is.
- */
-
-import { Loader2, LogIn } from "lucide-react";
+import { Loader2, LogIn, Eye, EyeOff } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import Link from "next/link";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
 type Mode = "signin" | "signup";
+
+/** Kept in step with the reset-password form so one flow cannot accept what the other rejects. */
+const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * Where to land after signing in. `proxy.ts` puts the originally requested path in `next`,
+ * and it is re-validated here as a same-origin absolute path: the redirect is driven by a
+ * query parameter, so an unchecked value is an open redirect.
+ */
+function postSignInTarget(): string {
+  const next = new URLSearchParams(window.location.search).get("next");
+  if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
+  return next;
+}
 
 export default function LoginPage() {
   const router = useRouter();
   const supabase = getSupabaseClient();
 
   const [mode, setMode] = useState<Mode>("signin");
+  const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [orgName, setOrgName] = useState("");
+  
   const [error, setError] = useState<string | undefined>();
-  const [notice, setNotice] = useState<string | undefined>();
+  const [isUnverified, setIsUnverified] = useState(false);
+  const [resendSuccess, setResendSuccess] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+
+  // Password visibility
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   if (!isSupabaseConfigured() || !supabase) {
     return (
@@ -44,10 +55,45 @@ export default function LoginPage() {
     );
   }
 
+  const handleResend = async () => {
+    setIsBusy(true);
+    setError(undefined);
+    setResendSuccess(false);
+    try {
+      const { error: resendError } = await supabase.auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+      });
+      if (resendError) {
+        setError(resendError.message);
+      } else {
+        setResendSuccess(true);
+      }
+    } catch {
+      setError("Could not reach the authentication service. Please check your connection.");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(undefined);
-    setNotice(undefined);
+    setIsUnverified(false);
+    setResendSuccess(false);
+
+    if (mode === "signup") {
+      if (password !== confirmPassword) {
+        setError("Passwords do not match.");
+        return;
+      }
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters long.`);
+        return;
+      }
+    }
+
     setIsBusy(true);
 
     try {
@@ -56,45 +102,82 @@ export default function LoginPage() {
           email,
           password,
         });
+        
         if (failure) {
-          setError(failure.message);
+          const msg = failure.message;
+          if (msg.toLowerCase().includes("email not confirmed")) {
+            setIsUnverified(true);
+            setError("Your email address has not been verified.");
+          } else if (msg.includes("Invalid login credentials")) {
+            setError("Incorrect email or password. Please try again.");
+          } else {
+            setError(msg);
+          }
           return;
         }
-        // replace, not push: the login page should not be a back-button destination once
-        // the session exists.
-        router.replace("/");
+        router.replace(postSignInTarget());
         return;
       }
 
       const { data, error: failure } = await supabase.auth.signUp({
         email,
         password,
-        // Read by the provisioning trigger (migration 0004) to name the new organization.
-        // Display text only — it never selects an existing org.
-        options: { data: { org_name: orgName.trim() || undefined } },
+        options: {
+          // Without this the verification link points at Supabase's site URL, which is not
+          // this app in local development, and the click leads nowhere useful.
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+          data: {
+            full_name: fullName.trim() || undefined,
+            org_name: orgName.trim() || undefined
+          }
+        },
       });
+
       if (failure) {
-        setError(failure.message);
+        const msg = failure.message;
+        if (msg.includes("User already registered")) {
+          setError("An account with this email already exists. Try signing in instead.");
+        } else if (msg.includes("Password should be at least 6 characters")) {
+          setError("Password must be at least 6 characters long.");
+        } else {
+          setError(msg);
+        }
         return;
       }
-      // No session means the project requires email confirmation. Saying so is the whole
-      // reason to distinguish the two: the account exists and the user must go read email.
+      
       if (!data.session) {
-        setNotice("Check your email to confirm your account, then sign in.");
-        setMode("signin");
+        router.replace(`/check-email?email=${encodeURIComponent(email)}`);
         return;
       }
       router.replace("/");
     } catch {
-      setError("Could not reach the authentication service.");
+      setError("Could not reach the authentication service. Please check your connection.");
     } finally {
       setIsBusy(false);
     }
   };
 
+  const toggleMode = () => {
+    setMode(mode === "signin" ? "signup" : "signin");
+    setError(undefined);
+    setIsUnverified(false);
+    setResendSuccess(false);
+  };
+
   return (
     <Shell>
-      <form onSubmit={submit} className="space-y-3">
+      <form onSubmit={submit} className="space-y-4">
+        {mode === "signup" && (
+          <Field
+            label="Full name"
+            type="text"
+            value={fullName}
+            onChange={setFullName}
+            autoComplete="name"
+            required
+          />
+        )}
+        
         <Field
           label="Email"
           type="email"
@@ -103,33 +186,70 @@ export default function LoginPage() {
           autoComplete="email"
           required
         />
-        <Field
-          label="Password"
-          type="password"
-          value={password}
-          onChange={setPassword}
-          autoComplete={mode === "signin" ? "current-password" : "new-password"}
-          required
-        />
-        {mode === "signup" && (
-          <Field
-            label="Organization name"
-            type="text"
-            value={orgName}
-            onChange={setOrgName}
-            autoComplete="organization"
-            hint="Names your new workspace. Leave blank to use your email name."
+        
+        <div className="space-y-1">
+          <PasswordField
+            label="Password"
+            value={password}
+            onChange={setPassword}
+            autoComplete={mode === "signin" ? "current-password" : "new-password"}
+            required
+            showPassword={showPassword}
+            setShowPassword={setShowPassword}
           />
+          {mode === "signin" && (
+            <div className="flex justify-end pt-1">
+              <Link href="/forgot-password" className="text-xs text-muted hover:text-foreground hover:underline transition-colors">
+                Forgot password?
+              </Link>
+            </div>
+          )}
+          {mode === "signup" && password.length > 0 && (
+            <PasswordStrengthIndicator password={password} />
+          )}
+        </div>
+
+        {mode === "signup" && (
+          <>
+            <PasswordField
+              label="Confirm Password"
+              value={confirmPassword}
+              onChange={setConfirmPassword}
+              autoComplete="new-password"
+              required
+              showPassword={showConfirmPassword}
+              setShowPassword={setShowConfirmPassword}
+            />
+            <Field
+              label="Organization name"
+              type="text"
+              value={orgName}
+              onChange={setOrgName}
+              autoComplete="organization"
+              hint="Names your new workspace. Leave blank to use your name."
+            />
+          </>
         )}
 
         {error && (
-          <p role="alert" className="text-xs text-danger">
-            {error}
-          </p>
+          <div className="rounded-md bg-danger/10 p-3 text-sm text-danger border border-danger/20">
+            <p role="alert">{error}</p>
+            {isUnverified && (
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={isBusy}
+                className="mt-2 text-xs font-medium underline hover:text-danger/80"
+              >
+                Resend verification email
+              </button>
+            )}
+          </div>
         )}
-        {notice && (
-          <p role="status" className="text-xs text-accent">
-            {notice}
+        
+        {resendSuccess && (
+          <p role="status" className="rounded-md bg-accent/10 p-3 text-sm text-accent border border-accent/20">
+            Verification email sent. Please check your inbox.
           </p>
         )}
 
@@ -137,10 +257,10 @@ export default function LoginPage() {
           type="submit"
           disabled={isBusy}
           className={cn(
-            "flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2",
-            "text-sm font-medium text-accent-foreground transition-colors",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:opacity-60",
+            "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
+            "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
+            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
+            "disabled:opacity-60 disabled:pointer-events-none",
           )}
         >
           {isBusy ? (
@@ -152,32 +272,38 @@ export default function LoginPage() {
         </button>
       </form>
 
-      <button
-        type="button"
-        onClick={() => {
-          setMode(mode === "signin" ? "signup" : "signin");
-          setError(undefined);
-          setNotice(undefined);
-        }}
-        className="mt-4 text-xs text-muted hover:text-foreground"
-      >
-        {mode === "signin"
-          ? "No account? Create one"
-          : "Already have an account? Sign in"}
-      </button>
+      <div className="mt-6 text-center">
+        <button
+          type="button"
+          onClick={toggleMode}
+          className="text-sm font-medium text-muted hover:text-foreground transition-colors"
+        >
+          {mode === "signin"
+            ? "Don't have an account? Sign up"
+            : "Already have an account? Sign in"}
+        </button>
+      </div>
     </Shell>
   );
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-background px-4">
-      <div className="w-full max-w-sm rounded-xl border border-border bg-surface p-6">
-        <h1 className="text-base font-semibold">Knowledge Assistant</h1>
-        <p className="mt-1 mb-5 text-xs text-muted">
-          Sign in to reach your organization&apos;s documents and data.
-        </p>
-        {children}
+    <main className="flex min-h-dvh items-center justify-center bg-background/50 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-surface via-background to-background px-4 py-12 sm:px-6 lg:px-8">
+      <div className="w-full max-w-md animate-fade-in relative overflow-hidden rounded-2xl bg-surface shadow-xl border border-border/50">
+        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-accent/40 via-accent to-accent/40 animate-pulse" />
+        
+        <div className="px-8 pt-10 pb-8">
+          <div className="mb-8 text-center">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">
+              Knowledge Assistant
+            </h1>
+            <p className="mt-2 text-sm text-muted">
+              Sign in to reach your organization&apos;s documents and data.
+            </p>
+          </div>
+          {children}
+        </div>
       </div>
     </main>
   );
@@ -201,8 +327,10 @@ function Field({
   hint?: string;
 }) {
   return (
-    <label className="block space-y-1">
-      <span className="text-xs font-medium text-muted">{label}</span>
+    <div className="space-y-1.5">
+      <label className="block text-sm font-medium text-foreground">
+        {label}
+      </label>
       <input
         type={type}
         value={value}
@@ -210,11 +338,118 @@ function Field({
         autoComplete={autoComplete}
         required={required}
         className={cn(
-          "w-full rounded-md border border-border bg-surface-raised px-3 py-2 text-sm",
-          "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+          "block w-full rounded-lg border border-border bg-surface-raised px-3 py-2 text-sm text-foreground",
+          "placeholder:text-muted/60 transition-colors",
+          "focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none",
         )}
       />
-      {hint && <span className="block text-[11px] text-muted">{hint}</span>}
-    </label>
+      {hint && <p className="text-[11px] text-muted pt-0.5">{hint}</p>}
+    </div>
+  );
+}
+
+function PasswordField({
+  label,
+  value,
+  onChange,
+  autoComplete,
+  required,
+  showPassword,
+  setShowPassword,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  autoComplete?: string;
+  required?: boolean;
+  showPassword: boolean;
+  setShowPassword: (show: boolean) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="block text-sm font-medium text-foreground">
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          type={showPassword ? "text" : "password"}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          autoComplete={autoComplete}
+          required={required}
+          className={cn(
+            "block w-full rounded-lg border border-border bg-surface-raised pl-3 pr-10 py-2 text-sm text-foreground",
+            "placeholder:text-muted/60 transition-colors",
+            "focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none",
+          )}
+        />
+        <button
+          type="button"
+          className="absolute inset-y-0 right-0 flex items-center pr-3 text-muted hover:text-foreground transition-colors focus:outline-none"
+          onClick={() => setShowPassword(!showPassword)}
+          tabIndex={-1}
+        >
+          {showPassword ? (
+            <EyeOff className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <Eye className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PasswordStrengthIndicator({ password }: { password: string }) {
+  let score = 0;
+  
+  if (password.length > 5) score += 1;
+  if (password.length > 7) score += 1;
+  
+  let variety = 0;
+  if (/[a-z]/.test(password)) variety += 1;
+  if (/[A-Z]/.test(password)) variety += 1;
+  if (/[0-9]/.test(password)) variety += 1;
+  if (/[^a-zA-Z0-9]/.test(password)) variety += 1;
+  
+  if (variety >= 2) score += 1;
+  if (variety >= 4) score += 1;
+  
+  let strength = "Weak";
+  let colorClass = "bg-danger";
+  let width = "25%";
+  
+  if (score >= 4) {
+    strength = "Very strong";
+    colorClass = "bg-green-500";
+    width = "100%";
+  } else if (score === 3) {
+    strength = "Strong";
+    colorClass = "bg-yellow-500";
+    width = "75%";
+  } else if (score === 2) {
+    strength = "Fair";
+    colorClass = "bg-orange-500";
+    width = "50%";
+  }
+
+  return (
+    <div className="pt-1 space-y-1.5">
+      <div className="h-1.5 w-full bg-border rounded-full overflow-hidden">
+        <div 
+          className={cn("h-full transition-all duration-300 ease-in-out", colorClass)} 
+          style={{ width }} 
+        />
+      </div>
+      <p className="text-[11px] font-medium text-muted flex justify-between">
+        <span>Password strength:</span>
+        <span className={cn(
+          strength === "Weak" && "text-danger",
+          strength === "Fair" && "text-orange-500",
+          strength === "Strong" && "text-yellow-500",
+          strength === "Very strong" && "text-green-500"
+        )}>{strength}</span>
+      </p>
+    </div>
   );
 }

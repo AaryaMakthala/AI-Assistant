@@ -109,8 +109,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     await supabase?.auth.signOut();
-    // Clearing the token is enough: `me` is derived from it, so the identity goes with it.
+    // Clearing the token is enough for this provider: `me` is derived from it, so the
+    // identity goes with it.
     setToken(undefined);
+    // A full navigation rather than a router push: it re-runs `proxy.ts` against the now
+    // cleared cookies and drops every hook's in-memory state, so nothing from the previous
+    // session survives into the login page.
+    window.location.assign("/login");
   }, [supabase]);
 
   const value = useMemo<AuthValue>(

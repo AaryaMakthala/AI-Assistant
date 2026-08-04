@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 
 from loguru import logger
-from sqlalchemy import Float, cast, select
+from sqlalchemy import Float, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -51,12 +51,18 @@ async def retrieve_chunks(
     *,
     query: str,
     org_id: uuid.UUID,
+    user_id: uuid.UUID,
     top_k: int | None = None,
     max_distance: float | None = None,
 ) -> list[RetrievedChunk]:
     """Find the chunks nearest to `query` within one organization.
 
     `session` must already carry tenant claims — see :func:`app.security.rls.tenant_session`.
+
+    Results span the organization's shared documents plus the caller's own uploads; a
+    colleague's personal document is never searched. `user_id` is required rather than
+    optional because a default would silently widen the result set the day a caller forgot
+    to pass it.
     """
     text = query.strip()
     if not text:
@@ -83,8 +89,18 @@ async def retrieve_chunks(
                 cast(distance, Float).label("distance"),
             )
             .join(Document, Document.id == DocumentChunk.document_id)
-            # Explicit predicate alongside RLS: defense in depth, not decoration.
-            .where(DocumentChunk.org_id == org_id, Document.org_id == org_id)
+            # Explicit predicate alongside RLS: defense in depth, not decoration. The
+            # visibility clause mirrors the documents_select policy from migration 0007 —
+            # if the two ever disagree, the narrower one wins and search returns less
+            # rather than more.
+            .where(
+                DocumentChunk.org_id == org_id,
+                Document.org_id == org_id,
+                or_(
+                    Document.visibility == "org",
+                    Document.uploaded_by == user_id,
+                ),
+            )
             .order_by(distance)
             .limit(top_k)
         )

@@ -109,7 +109,7 @@ async def rag_agent(state: SupervisorState, llm: LLMRouterProtocol) -> dict[str,
             org_id=principal.org_id, user_id=principal.user_id, role=principal.role
         ) as session:
             chunks = await retrieve_for_question(
-                session, question=question, org_id=principal.org_id
+                session, question=question, org_id=principal.org_id, user_id=principal.user_id
             )
     except Exception as exc:
         logger.opt(exception=exc).error("RAG agent failed for user {user}", user=principal.user_id)

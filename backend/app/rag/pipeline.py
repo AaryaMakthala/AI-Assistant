@@ -145,15 +145,17 @@ def source_payload(chunks: list[RetrievedChunk]) -> list[dict[str, object]]:
 
 
 async def retrieve_for_question(
-    session: AsyncSession, *, question: str, org_id: uuid.UUID
+    session: AsyncSession, *, question: str, org_id: uuid.UUID, user_id: uuid.UUID
 ) -> list[RetrievedChunk]:
     """Fetch and trim the evidence for one question.
 
     Split from generation so the caller can close its transaction before the LLM call:
     a pooled connection must not be pinned for the many seconds a stream can take.
+
+    `user_id` scopes retrieval to documents the asker may read — org-wide plus their own.
     """
     settings = get_settings()
-    retrieved = await retrieve_chunks(session, query=question, org_id=org_id)
+    retrieved = await retrieve_chunks(session, query=question, org_id=org_id, user_id=user_id)
     chunks = build_context(retrieved, max_chars=settings.retrieval_max_context_chars)
     if not chunks:
         logger.info("No chunks passed the relevance threshold for org {org}", org=org_id)

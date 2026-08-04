@@ -28,7 +28,7 @@ from loguru import logger
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.db.models import Document, DocumentChunk
 from app.mcp_servers.errors import internal_error, refusal
@@ -94,12 +94,12 @@ _STATUSES = frozenset({"pending", "processing", "ready", "failed"})
 
 async def search_documents(args: SearchDocumentsArgs) -> str:
     """Find the passages most relevant to `args.query`."""
-    org_id, _ = current_org_and_user()
+    org_id, user_id = current_org_and_user()
 
     try:
-        async with tenant_session(org_id=org_id) as session:
+        async with tenant_session(org_id=org_id, user_id=user_id) as session:
             chunks = await retrieve_chunks(
-                session, query=args.query, org_id=org_id, top_k=args.top_k
+                session, query=args.query, org_id=org_id, user_id=user_id, top_k=args.top_k
             )
     except Exception as exc:
         logger.opt(exception=exc).error("Document MCP search failed for org {org}", org=org_id)
@@ -121,7 +121,7 @@ async def search_documents(args: SearchDocumentsArgs) -> str:
 
 async def list_documents(args: ListDocumentsArgs) -> str:
     """List the organization's documents and their ingestion status."""
-    org_id, _ = current_org_and_user()
+    org_id, user_id = current_org_and_user()
 
     if args.status is not None and args.status not in _STATUSES:
         return refusal(
@@ -146,7 +146,7 @@ async def list_documents(args: ListDocumentsArgs) -> str:
         statement = statement.where(Document.status == args.status)
 
     try:
-        async with tenant_session(org_id=org_id) as session:
+        async with tenant_session(org_id=org_id, user_id=user_id) as session:
             rows = (await session.execute(statement)).all()
     except Exception as exc:
         logger.opt(exception=exc).error("Document MCP list failed for org {org}", org=org_id)
@@ -171,13 +171,15 @@ async def list_documents(args: ListDocumentsArgs) -> str:
 
 async def read_document(args: ReadDocumentArgs) -> str:
     """Return the beginning of one document, in order."""
-    org_id, _ = current_org_and_user()
+    org_id, user_id = current_org_and_user()
 
     try:
-        async with tenant_session(org_id=org_id) as session:
+        async with tenant_session(org_id=org_id, user_id=user_id) as session:
             # Fetched under RLS with an explicit org predicate: an id belonging to another
             # organization is indistinguishable from one that does not exist, which is the
-            # correct behaviour — a distinguishable error is an existence oracle.
+            # correct behaviour — a distinguishable error is an existence oracle. A
+            # colleague's personal document is hidden by the same policy, so it reads as
+            # absent here too.
             document = (
                 await session.execute(
                     select(Document.filename, Document.status).where(
@@ -195,9 +197,19 @@ async def read_document(args: ReadDocumentArgs) -> str:
             chunks = (
                 await session.execute(
                     select(DocumentChunk.content, DocumentChunk.page, DocumentChunk.chunk_index)
+                    # Joined to `documents` rather than filtered on org alone: chunks carry
+                    # the document's text, so reading them without the visibility predicate
+                    # would hand over a colleague's personal file in full (CLAUDE.md 4.6).
+                    # The chunk policy enforces this too; this is the query-time half.
+                    .join(Document, Document.id == DocumentChunk.document_id)
                     .where(
                         DocumentChunk.document_id == args.document_id,
                         DocumentChunk.org_id == org_id,
+                        Document.org_id == org_id,
+                        or_(
+                            Document.visibility == "org",
+                            Document.uploaded_by == user_id,
+                        ),
                     )
                     .order_by(DocumentChunk.chunk_index)
                     .limit(args.max_chunks)

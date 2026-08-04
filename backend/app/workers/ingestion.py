@@ -54,6 +54,13 @@ _EXTENSION_BY_MIME = {allowed.mime_type: allowed.extension for allowed in ALLOWE
 #: (it can quote document content), so it is bounded before it reaches the database.
 _MAX_REASON_CHARS = 2000
 
+#: Identifies this worker to the document policies added in migration 0007. Those policies
+#: scope reads and writes by uploader, and ingestion has no user to be — without this claim
+#: a personal document would be invisible to the very task meant to process it, so its
+#: status writes would affect zero rows and it would sit `pending` while the reaper
+#: re-queued it forever. Not forgeable from a token: see app/security/rls.py.
+_INGESTION_SVC = "ingestion"
+
 
 async def _open_session() -> tuple[AsyncEngine, AsyncSession]:
     """An engine plus a session bound to it, both owned by the caller.
@@ -133,7 +140,7 @@ async def _ingest(document_id: uuid.UUID, org_id: uuid.UUID, *, attempt: int = 0
             await session.begin()
             # Claims first: every statement below is then filtered by RLS, so a wrong
             # org_id here yields zero rows rather than another tenant's document.
-            await set_tenant_claims(session, org_id=org_id)
+            await set_tenant_claims(session, org_id=org_id, svc=_INGESTION_SVC)
             await use_tenant_role(session)
 
             row = (
@@ -167,7 +174,7 @@ async def _ingest(document_id: uuid.UUID, org_id: uuid.UUID, *, attempt: int = 0
             path = storage_path_for(storage_key)
 
             await session.begin()
-            await set_tenant_claims(session, org_id=org_id)
+            await set_tenant_claims(session, org_id=org_id, svc=_INGESTION_SVC)
             await use_tenant_role(session)
             stage = "extraction"
             try:
@@ -312,7 +319,7 @@ async def _mark_failed(
     try:
         async with session:
             await session.begin()
-            await set_tenant_claims(session, org_id=org_id)
+            await set_tenant_claims(session, org_id=org_id, svc=_INGESTION_SVC)
             await use_tenant_role(session)
             await _set_status(
                 session,

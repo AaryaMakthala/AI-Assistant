@@ -45,6 +45,7 @@ async def set_tenant_claims(
     org_id: uuid.UUID,
     user_id: uuid.UUID | None = None,
     role: str | None = None,
+    svc: str | None = None,
 ) -> None:
     """Bind the caller's identity to the session's current transaction.
 
@@ -52,25 +53,38 @@ async def set_tenant_claims(
     rather than a person (document ingestion). Org-scoped policies still apply; the
     user-scoped ones (chat) then match nothing, which is the correct outcome — a worker
     has no business reading anyone's chat history.
+
+    `svc` names a background service instead of a person, for the one case where omitting
+    `user_id` is not enough: since migration 0007 the document policies are scoped by
+    uploader, so a NULL `user_id` matches no branch and ingestion could neither read a
+    personal document nor record its status. A user's token can never produce this claim —
+    the dict below is built from typed parameters, and `principal_from_claims` reads only
+    `sub`, `org_id`, `org_role` and `email`.
     """
     claims: dict[str, str] = {"org_id": str(org_id)}
     if user_id is not None:
         claims["sub"] = str(user_id)
     if role is not None:
         claims["role"] = role
+    if svc is not None:
+        claims["svc"] = svc
     await session.execute(_SET_CLAIMS, {"claims": json.dumps(claims)})
 
 
 @asynccontextmanager
 async def tenant_session(
-    *, org_id: uuid.UUID, user_id: uuid.UUID | None = None, role: str | None = None
+    *,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID | None = None,
+    role: str | None = None,
+    svc: str | None = None,
 ) -> AsyncIterator[AsyncSession]:
     """A session whose queries are already constrained to one user and org."""
     async with get_session_factory()() as session:
         await session.begin()
         # Order matters: claims are set while still privileged, because app_tenant is
         # granted with INHERIT FALSE and need not hold rights on the config function.
-        await set_tenant_claims(session, org_id=org_id, user_id=user_id, role=role)
+        await set_tenant_claims(session, org_id=org_id, user_id=user_id, role=role, svc=svc)
         await use_tenant_role(session)
         try:
             yield session

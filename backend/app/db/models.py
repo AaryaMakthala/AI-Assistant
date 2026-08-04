@@ -41,6 +41,9 @@ USER_ROLES = ("owner", "admin", "member")
 #: org-level role. Ordered from most to least privileged for documentation, not code.
 WORKSPACE_ROLES = ("owner", "admin", "editor", "viewer")
 DOCUMENT_STATUSES = ("pending", "processing", "ready", "failed")
+#: Who may read a document. 'org' is owner/admin-uploaded and readable organization-wide;
+#: 'personal' is readable by its uploader and by owners/admins (CLAUDE.md 4.6).
+DOCUMENT_VISIBILITIES = ("org", "personal")
 #: Terminal statuses. A document in one of these is not going to change on its own, which
 #: is what lets the UI stop polling and the reaper skip it.
 TERMINAL_DOCUMENT_STATUSES = ("ready", "failed")
@@ -109,6 +112,9 @@ class Document(Base):
     __table_args__ = (
         UniqueConstraint("id", "org_id", name="uq_documents_id_org"),
         CheckConstraint(_in_list("status", DOCUMENT_STATUSES), name="ck_documents_status"),
+        CheckConstraint(
+            _in_list("visibility", DOCUMENT_VISIBILITIES), name="ck_documents_visibility"
+        ),
         CheckConstraint("size_bytes >= 0", name="ck_documents_size_nonneg"),
         CheckConstraint(
             "chunk_count IS NULL OR chunk_count >= 0", name="ck_documents_chunk_count_nonneg"
@@ -117,6 +123,9 @@ class Document(Base):
             "word_count IS NULL OR word_count >= 0", name="ck_documents_word_count_nonneg"
         ),
         Index("ix_documents_org_created", "org_id", "created_at"),
+        # Matches migration 0007: every read is filtered by visibility and, for personal
+        # rows, by uploader.
+        Index("ix_documents_org_visibility_uploaded_by", "org_id", "visibility", "uploaded_by"),
         # Partial, matching migration 0005: the reaper only scans non-terminal rows, and on
         # a table that is mostly `ready` a full index would be almost entirely dead weight.
         Index(
@@ -138,8 +147,14 @@ class Document(Base):
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL")
     )
-    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    uploaded_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    #: 'org' — uploaded by an owner/admin, readable across the organization. 'personal' —
+    #: readable only by its uploader, and by owners/admins for oversight (CLAUDE.md 4.6).
+    #: Independent of `workspace_id`, which groups documents but grants no access.
+    visibility: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="personal"
     )
     # Display name only — never used to build a filesystem path (CLAUDE.md 4.2).
     filename: Mapped[str] = mapped_column(String(500), nullable=False)

@@ -57,7 +57,7 @@ export function CitationChips({
               {citation.number}
             </span>
             <FileText className="size-3 shrink-0" aria-hidden />
-            <span className="truncate">{citation.label}</span>
+            <span className="truncate font-mono text-[0.6875rem]">{citation.label}</span>
           </button>
         );
       })}

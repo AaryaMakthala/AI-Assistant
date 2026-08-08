@@ -4,42 +4,45 @@
  * Semantic tokens, not raw colors. Components reference `surface` / `border` / `muted`
  * rather than a specific grey, so the dark theme below is a redefinition of the same
  * names instead of a parallel set of `dark:` variants on every element.
+ *
+ * Enterprise technical palette: moss (brand/dark surfaces), fern (interactive),
+ * sage (muted text on dark), parchment (app background), ivory (card surface),
+ * clay (warning/processing).
  */
 :root {
-  --background: #f7f7f8;
-  --surface: #ffffff;
-  --surface-raised: #ffffff;
-  --foreground: #18181b;
-  --muted: #71717a;
-  --border: #e4e4e7;
-  --accent: #4f46e5;
-  --accent-foreground: #ffffff;
-  --accent-subtle: #eef2ff;
-  --danger: #dc2626;
+  /* Core palette — do not adjust these hex values */
+  --ink: #2b2e1f;
+  --moss: #3f4a2a;
+  --moss2: #4e5c34;
+  --fern: #6e7c48;
+  --sage: #a8af87;
+  --sage40: rgba(168, 175, 135, 0.35);
+  --parchment: #efe7d1;
+  --ivory: #faf6e9;
+  --border-color: #cbbf9c;
+  --clay: #a8552f;
+
+  /* Semantic mappings for light mode */
+  --background: var(--parchment);
+  --surface: var(--ivory);
+  --surface-raised: var(--ivory);
+  --foreground: var(--ink);
+  --muted: var(--fern);
+  --border: var(--border-color);
+  --accent: var(--fern);
+  --accent-foreground: var(--ivory);
+  --accent-subtle: var(--sage40);
+  --danger: #991b1b;
   --danger-subtle: #fef2f2;
-  --warning: #b45309;
-  --warning-subtle: #fffbeb;
-  --success: #15803d;
+  --warning: var(--clay);
+  --warning-subtle: rgba(168, 85, 47, 0.15);
+  --success: var(--fern);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #09090b;
-    --surface: #131316;
-    --surface-raised: #1c1c21;
-    --foreground: #fafafa;
-    --muted: #a1a1aa;
-    --border: #27272a;
-    --accent: #818cf8;
-    --accent-foreground: #1e1b4b;
-    --accent-subtle: #1e1b4b;
-    --danger: #f87171;
-    --danger-subtle: #2a1215;
-    --warning: #fbbf24;
-    --warning-subtle: #2a2010;
-    --success: #4ade80;
-  }
-}
+/* Dark mode disabled: the palette was designed for light backgrounds.
+ * A real dark theme requires additional tokens with sufficient contrast,
+ * not overrides of light-mode colors. Until then, both modes use the
+ * same parchment/ivory base. */
 
 @theme inline {
   --color-background: var(--background);
@@ -56,8 +59,8 @@
   --color-warning: var(--warning);
   --color-warning-subtle: var(--warning-subtle);
   --color-success: var(--success);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-ibm-plex-mono);
 }
 
 body {

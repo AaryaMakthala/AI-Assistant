@@ -93,7 +93,7 @@ export function SourcesPanel({
                         {source.number}
                       </span>
                       <FileText className="size-3 shrink-0 text-muted" aria-hidden />
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                      <span className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] font-medium">
                         {source.label}
                       </span>
                     </div>
@@ -107,7 +107,7 @@ export function SourcesPanel({
                       <span aria-hidden>·</span>
                       {/* Retrieval similarity: how close the passage was to the question,
                           not how strongly it supports the sentence citing it. */}
-                      <span>match {(source.score * 100).toFixed(0)}%</span>
+                      <span className="font-mono">match {(source.score * 100).toFixed(0)}%</span>
                     </div>
                   </button>
                 </li>

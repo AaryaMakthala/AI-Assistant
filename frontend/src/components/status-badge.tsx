@@ -18,8 +18,8 @@ import { cn } from "@/lib/utils";
 
 const STYLES: Record<DocumentStatus, string> = {
   pending: "bg-surface-raised text-muted",
-  processing: "bg-accent-subtle text-accent",
-  ready: "bg-surface-raised text-success",
+  processing: "bg-warning-subtle text-warning",
+  ready: "bg-accent-subtle text-accent",
   failed: "bg-danger-subtle text-danger",
 };
 

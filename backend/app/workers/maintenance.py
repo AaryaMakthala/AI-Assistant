@@ -27,7 +27,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import Document
+from app.db.legacy_models import Document
 from app.workers.celery_app import celery_app
 from app.workers.ingestion import _open_session, _record_failure
 

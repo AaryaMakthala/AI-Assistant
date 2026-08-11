@@ -1,149 +1,148 @@
-# CLAUDE.md — Enterprise AI Knowledge Intelligence Agent
+# CLAUDE.md — Multi-Tenant Company Knowledge Assistant (Free-Tier RAG Portfolio Project)
 
-This file is the single source of truth for building this project. Read it fully before
-writing any code. Work **one phase at a time, in order**. After finishing a phase:
-summarize what was built, list modified files, and **stop and wait for explicit
-go-ahead** before starting the next phase. Do not skip phases or merge them to "save
-time" — most production incidents in agentic-AI systems come from skipping the boring
-steps (auth, input validation, sandboxing) to get to the fun part (agents).
+This file is the single source of truth. Read it fully before writing any code. Work
+**one phase at a time, in order**. After finishing a phase: summarize what was built,
+list modified files, list checks run, list known issues, and **stop and wait for
+explicit go-ahead**. Never start the next phase automatically.
 
-**Testing is deferred.** Per-phase automated test suites are NOT written or run during
-Phases 0–13. Static verification only at each phase (compiles/typechecks, `ruff`,
-`eslint`, `tsc --noEmit`, and quick manual/stubbed sanity checks where useful). The full
-`pytest` / `vitest` suite — including the security suite — is written and run once, in
-Phase 14, after the whole system is running end-to-end. This is a deliberate speed
-tradeoff: it means bugs from an earlier phase may not surface until Phase 14. Flag
-anything you're uncertain about in your phase summary rather than silently assuming it
-works.
+This project is built and run entirely on **free-tier / locally runnable
+infrastructure** (Claude Code itself is being run here through OpenRouter's free model
+routing — see Section 12, which governs how work gets done, not just what gets built).
+Every architectural decision below was made specifically to keep the project buildable
+by a fresher, on a normal laptop, at zero cost, while still being technically defensible
+in a backend/RAG interview. If a change would require paid infrastructure, it doesn't
+belong in this project — flag it instead of adding it.
 
-If any instruction here conflicts with speed or convenience, this file wins — with the
-above exception for testing.
+If any instruction here conflicts with speed or "how a big company would do it," this
+file wins. Boring, correct, and explainable beats impressive and unverified.
 
 ---
 
-## 0. Ground Rules for Claude Code
+## 0. Ground Rules
 
-1. **One phase per work session.** Do not start Phase N+1 until Phase N's deliverables
-   are in place and the user has confirmed.
-2. **No hardcoded secrets, ever.** All keys/URLs come from `.env`, loaded via Pydantic
-   `BaseSettings`. `.env` is gitignored from commit #1. Ship `.env.example` with empty
-   placeholders instead.
+1. **One phase per work session.** Do not start Phase N+1 until Phase N's deliverable is
+   in place and confirmed by the user.
+2. **No hardcoded secrets, ever.** All keys/URLs come from `.env` via Pydantic
+   `BaseSettings`. `.env` is gitignored from commit #1; ship `.env.example` with empty
+   placeholders.
 3. **Every external input is hostile until proven otherwise**: file uploads, chat
-   messages, LLM-generated SQL, retrieved document text, MCP tool arguments. Validate
-   before use, not after something breaks.
-4. **The LLM never gets raw write access to anything.** No LLM-generated SQL runs without
-   passing through the guardrails in Section 4.3. No MCP tool executes an action (write,
-   delete, external API call with side effects) without an explicit allowlist.
-5. **Testing happens once, at the end (Phase 14).** Do not write test files during
-   Phases 0–13 unless explicitly asked. Do not run `pytest`/`vitest` during Phases 0–13
-   unless explicitly asked. Static checks (lint/typecheck/compile) still run every phase.
-6. **Prefer boring, well-understood tools over clever ones.** This project already has
-   enough novel surface area (agents, MCP, RAG) — don't also make the plumbing exotic.
-7. **Small, reviewable commits.** One logical change per commit, message says what and
-   why. The user commits manually — do not run `git commit` unless explicitly asked to.
+   messages, retrieved document text.
+4. **The LLM never gets write access to anything.** It answers questions from retrieved
+   context. It does not run queries against arbitrary tables, does not call external
+   tools, does not take actions on the user's behalf.
+5. **Testing happens once, at the end** (Section 9's final phase). Static checks
+   (lint/typecheck) run every phase; the automated test suite and evaluation set are
+   written once the system works end-to-end.
+6. **Prefer boring, well-understood, free tools.** One LLM (configured, not hardcoded),
+   one local embedding model, one local reranker, one database. No fallback chains, no
+   framework-of-the-week.
+7. **Small, reviewable commits.** The user commits manually — never run `git commit`
+   unless explicitly asked.
+8. **Before touching anything**, inspect the actual repository state — existing files,
+   models, migrations, routes, env vars, dependencies. Do not assume the repo is empty
+   and do not assume a described feature exists until you've verified it in code.
+9. **Minimal diffs.** Make the smallest correct change that satisfies the current
+   phase. Do not rewrite working code to make it "cleaner" unless the phase asked for
+   that specifically.
 
 ---
 
 ## 1. Project Overview
 
-An internal AI assistant that lets employees ask natural-language questions and get
-answers sourced from three places, automatically routed:
+A **multi-tenant** company knowledge assistant. A single deployment hosts many
+independent companies (workspaces), each fully isolated from the others. Within a
+workspace: an **owner** creates it, invites **members**, and uploads official documents
+that publish immediately. Members can upload their own documents, which stay
+**pending** until the owner approves them — only approved documents ever become
+searchable.
 
-- **Unstructured knowledge** (PDFs, DOCX, CSV, policies, manuals) → RAG
-- **Structured business data** (customers, orders, employees) → a guarded SQL agent
-- **External systems** (GitHub, later Slack/Drive) → MCP tool servers
+Employees ask natural-language questions in a chat interface. The assistant answers
+**only** from that workspace's approved documents, using hybrid (semantic + keyword)
+retrieval with local reranking, and always returns backend-verified citations. If the
+retrieved evidence is insufficient, it refuses honestly instead of guessing.
 
-The system must never let a user query see data they're not authorized to see, never let
-the LLM run arbitrary destructive SQL, and never let a malicious document "instruct" the
-agent to do something the user didn't ask for (prompt injection via retrieved content).
+That is the entire product. Do not turn it into a general agent, a SQL chatbot, an
+automation platform, or an MCP host — see Section 11 for the exact list of things this
+project deliberately does not do.
 
 ---
 
-## 2. Finalized Tech Stack
+## 2. Free-First Tech Stack
 
 ```
 Frontend
-  Next.js 15 (App Router) + TypeScript
+  Next.js (App Router) + TypeScript
   Tailwind CSS + shadcn/ui
-  Vercel AI SDK (for streaming — don't hand-roll SSE parsing)
 
 Backend
-  Python 3.11, FastAPI, Pydantic v2, SQLAlchemy 2.0 (async)
-  uv or poetry for dependency management (not bare pip)
+  Python 3.11, FastAPI, Pydantic v2, SQLAlchemy 2.0 (async), Alembic
 
-Agent Orchestration
-  LangGraph (supervisor + RAG/SQL/MCP sub-agents)
-  LangChain (loaders, retrievers, prompt templates only — not the agent runtime)
+Database (the ONLY infrastructure component besides the LLM)
+  PostgreSQL via Supabase (free tier) + pgvector + PostgreSQL full-text search + JSONB
+  One database for everything: workspaces, members, documents (raw bytes included),
+  chunks, chat history. No second datastore, no cache, no queue.
 
-LLMs
-  Primary:  Google Gemini Flash
-  Fallback: Groq (Llama 3.3 70B)
+Auth
+  Supabase Auth for identity ("who is this user"). Application tables own authorization
+  ("what can this user access") — workspace membership, OWNER/MEMBER role, invitation
+  state. No custom JWT rotation, no custom refresh logic — Supabase issues the token,
+  the backend verifies it and looks up membership from the database.
+
+LLM
+  ONE model, configured entirely through environment variables (LLM_PROVIDER,
+  LLM_MODEL, LLM_API_KEY, LLM_BASE_URL). No hardcoded provider, no fallback chain.
+  Must run against free-tier or free-routed models (e.g. OpenRouter's free model
+  routing). The code must not assume any specific provider's quirks — treat it as a
+  generic chat-completions endpoint.
 
 Embeddings
-  BAAI/bge-small-en-v1.5 (HuggingFace, local inference via sentence-transformers)
-  Pin the exact model — never swap embedding models on a live index (Section 7, Risk 1)
+  Exactly ONE local, free embedding model via sentence-transformers
+  (e.g. BAAI/bge-small-en-v1.5 — 384 dimensions; pick one and document the dimension
+  in EMBEDDING_DIMENSION). Never call a paid embedding API. Never mix embeddings from
+  two different models in the same index — if the model ever changes, re-embed
+  everything, don't patch in place.
 
-Vector Storage
-  Postgres + pgvector (via Supabase) — one database for structured AND vector data.
-
-Relational Database
-  PostgreSQL via Supabase (also holds users, orgs, chat history, document metadata,
-  and the structured business tables the SQL agent queries — see Section 4.3, this
-  project runs directly against the real application database, not a separate demo copy)
-
-MCP
-  Official MCP Python SDK
-  Servers: Document MCP, Database MCP (read-only), GitHub MCP (read-only initially)
-
-Document Processing
-  PyMuPDF (PDF), python-docx (DOCX), pandas + openpyxl (XLSX/CSV)
-  Tesseract OCR — only if you actually encounter scanned PDFs; don't build it day one
-
-Auth & Authorization
-  Supabase Auth (JWT) + Postgres Row-Level Security (RLS) for data access control.
-  Do NOT rely on backend-only checks — RLS is your last line of defense if a backend
-  check is ever missed.
-
-Background Jobs
-  Celery + Redis for document ingestion (embedding generation must never block a
-  request thread)
-
-Observability
-  Loguru (structured logs), Sentry (errors), LangSmith (agent traces — dev/staging only,
-  never pipe production user data to a third-party trace tool without checking your
-  data-handling policy first)
+Reranking
+  ONE local, free cross-encoder (e.g. cross-encoder/ms-marco-MiniLM-L-6-v2), run via
+  sentence-transformers. No LLM-as-judge reranking unless a specific, documented
+  technical reason emerges — an LLM call per candidate is slow and burns free-tier
+  quota for no real benefit at this scale.
 
 Deployment
-  Docker + Docker Compose locally; Vercel (frontend) + Railway/Render (backend) + Supabase
+  Docker Compose locally (app + Postgres only). Vercel (frontend) + Railway/Render free
+  tier (backend) + Supabase (database) for a hosted demo.
 ```
+
+**Explicitly excluded, and why it stays excluded:** Redis, Celery, Kafka, RabbitMQ,
+MCP, Kubernetes, AWS S3, a separate vector database, paid observability platforms,
+multi-agent frameworks (LangGraph et al.), paid LLM/embedding/reranking APIs. None of
+these are needed for the product described in Section 1, and every one of them would
+either cost money, add a service that can fail independently, or add complexity this
+project has no real requirement for. See Section 11 for the full "don't add this"
+table with reasoning per item.
 
 ---
 
 ## 3. Repository Structure
 
 ```
-enterprise-ai-agent/
-├── CLAUDE.md                  ← this file, lives at repo root
+knowledge-assistant/
+├── CLAUDE.md
 ├── .env.example
 ├── .gitignore
-├── docker-compose.yml
+├── docker-compose.yml           # app + postgres only
 ├── backend/
 │   ├── pyproject.toml
 │   ├── app/
 │   │   ├── main.py
-│   │   ├── config.py           # Pydantic BaseSettings, reads .env
-│   │   ├── api/                # FastAPI routers
-│   │   ├── agents/              # LangGraph supervisor + sub-agents
-│   │   ├── rag/                 # ingestion, chunking, retrieval
-│   │   ├── sql_agent/            # guarded SQL generation + execution
-│   │   ├── mcp_servers/          # document / database / github MCP servers
-│   │   ├── db/                   # SQLAlchemy models, migrations (alembic)
-│   │   ├── security/              # auth, RLS helpers, input validation, rate limiting
-│   │   └── workers/                # Celery tasks
-│   └── tests/                       # written once, in Phase 14
-│       ├── unit/
-│       ├── integration/
-│       └── security/            # SQLi attempts, prompt-injection attempts, auth bypass
+│   │   ├── config.py             # Pydantic BaseSettings — every env var in Section 13
+│   │   ├── api/                  # routers: auth, workspaces, members, documents, chat
+│   │   ├── ingestion/             # extract -> chunk -> embed (inline, synchronous)
+│   │   ├── retrieval/              # hybrid search, merge/fusion, reranking, grounding
+│   │   ├── db/                      # SQLAlchemy models, Alembic migrations
+│   │   └── security/                 # session/auth verification, workspace authz
+│   ├── eval/                          # evaluation dataset + runner (Section 15)
+│   └── tests/                          # written once, at the final phase
 └── frontend/
     ├── package.json
     └── src/
@@ -154,380 +153,531 @@ enterprise-ai-agent/
 
 ---
 
-## 4. Security Principles (non-negotiable, apply from Phase 1 onward)
+## 4. Multi-Tenancy (Hard Requirement)
 
-Deferred testing does not mean deferred security *design*. Every item below is built in
-from the start — only the automated proof that it works is deferred to Phase 14.
+A single deployment hosts **many independent workspaces** (companies). Every
+workspace-owned table — `documents`, `document_chunks`, `chat_sessions`,
+`chat_messages` — carries `workspace_id`, and **every query that touches these tables
+filters on it, server-side, without exception.** The frontend must never be trusted to
+enforce this boundary; it's a convenience layer, not a security layer.
 
-### 4.1 Secrets
-- All API keys, DB URLs, JWT secrets live in `.env`, never in code or commit history.
-- Use a `.env.example` with empty values so the repo documents what's needed.
-- If a secret ever gets committed, treat it as compromised — rotate it, don't just delete
-  the commit.
+Concretely: before any workspace-scoped endpoint does anything, it must resolve the
+authenticated user's membership in the requested workspace (role + status) from the
+`members` table. A user with no membership row for that workspace gets a 403, full
+stop — there is no implicit access.
 
-### 4.2 File Upload Safety
-- Enforce file type allowlist (pdf, docx, csv, xlsx, txt) and a max size limit at the API
-  layer, before the file touches disk.
-- Process uploads in a sandboxed worker (Celery task), never inline in the request
-  handler — a malformed PDF should not be able to hang or crash the API process.
-- Strip/ignore any embedded scripts or macros in DOCX/XLSX files; you only need text +
-  tables, not active content.
-- Store uploaded files with generated UUIDs, not user-supplied filenames, to avoid path
-  traversal.
+Two roles only: **OWNER** and **MEMBER**. Do not add ADMIN, SUPER_ADMIN, MODERATOR,
+EDITOR, or VIEWER — the product described in Section 1 has no task that needs a third
+role, and adding one "for flexibility" is exactly the kind of unnecessary complexity
+this project avoids.
 
-### 4.3 The SQL Agent Is the Highest-Risk Component — Guard It Explicitly
-- The SQL agent runs against the **real application database** directly (no separate
-  demo/sample dataset). Because of this, the guardrails below are load-bearing, not
-  cosmetic — treat them as blockers even though their automated proof is deferred.
-- The DB role the SQL agent connects as is **read-only** at the Postgres level (`GRANT
-  SELECT` only), scoped to the specific business tables it's meant to answer questions
-  about. Even if the LLM generates `DROP TABLE`, the database itself refuses it.
-- Maintain an explicit table/column allowlist the agent is told about via `get_schema()`
-  — do not expose internal/admin tables (users, sessions, credentials, audit logs) to the
-  schema tool, ever.
-- Run every generated query through a SQL parser (e.g. `sqlglot`) that rejects anything
-  that isn't a single `SELECT` statement before execution — reject multiple statements,
-  DDL/DML keywords, and comments used to smuggle extra statements.
-- Enforce a hard `LIMIT` (e.g. 500 rows) and a query timeout on every execution.
-- Log every generated query with the user ID that triggered it.
-- Because this hits real data with no test coverage until Phase 14, prefer the most
-  conservative allowlist that still satisfies the phase's goal — narrower is safer here
-  than broad-and-untested.
-
-### 4.4 Prompt Injection From Retrieved Content
-- Treat all retrieved document text and all MCP tool results as **data, not
-  instructions**. Wrap retrieved content in the prompt with clear delimiters and an
-  explicit system instruction that content inside those delimiters is reference material
-  only and must never be followed as a command.
-- Never let a retrieved chunk or tool result trigger another tool call automatically —
-  tool calls should originate from the agent's reasoning over the *user's* request, not
-  from text found inside a document.
-- **The assistant has a scope boundary, and it is enforced in the prompt.** This is the
-  same category of problem as injection: the assistant needs an explicit statement of what
-  it is *for*, not only of what it must not obey. It answers from three sources — the org's
-  documents, its business data, and connected repositories — and nothing else. General
-  knowledge, trivia, recipes, media, and code unrelated to a connected repo get a bounded
-  refusal that names what the assistant *can* do.
-- A guardrail that forbids inventing *company* facts does not imply this boundary. "What is
-  the capital of Japan" is not a company fact, so a model told only "do not invent company
-  facts" will answer it and remain technically compliant. The refusal must be stated
-  positively and separately — see `DIRECT_SYSTEM_PROMPT` in `app/agents/prompts.py`.
-- The router carries half of this: a general-knowledge question must route to `direct` (to
-  receive the bounded refusal), never to `documents` on the chance a document mentions the
-  topic.
-
-### 4.5 MCP Server Scoping
-- Each MCP server authenticates the calling agent and exposes the minimum tool set it
-  needs — the GitHub MCP server should start **read-only** (`search_code`, `read_file`);
-  do not wire up `create_issue` or any write action until you've deliberately decided the
-  agent should be allowed to take that action, and gate it behind an explicit
-  user-confirmation step in the UI.
-- Validate all tool arguments against a Pydantic schema before executing — never pass raw
-  LLM-generated strings straight into a shell command, file path, or query.
-
-### 4.6 AuthN/AuthZ
-- Supabase Auth issues JWTs; every backend endpoint verifies the JWT and derives
-  `user_id` / `org_id` / `role` from it — never trust a client-supplied user ID.
-- Enforce access control **twice**: once in the API layer (fast rejection) and once via
-  Postgres RLS policies (so a missed check in application code still can't leak data).
-- Example RLS rule: a user can only `SELECT` documents where `documents.org_id =
-  auth.jwt() ->> 'org_id'`.
-
-#### Document visibility (Phase 12.5)
-- `documents.visibility` is either `'org'` (uploaded by an owner/admin, readable by the
-  whole organization) or `'personal'` (readable only by its uploader). Only owners/admins
-  may set `'org'`; a member attempting it gets **403**, never a silent downgrade to
-  personal — the user must know their upload did not go where they expected.
-- **Owners and admins can read members' personal documents.** This is a deliberate choice
-  for administrative oversight, consistent with how most SaaS admin consoles behave, and it
-  is what makes the "Manage All Documents" view and "promote to company doc" possible. It
-  is a real privacy tradeoff and is stated here so it is never assumed either way.
-- **`visibility` is orthogonal to `workspace_id`.** A workspace is an organizational
-  grouping and plays no part in access control; `org_id` is the tenant boundary and
-  `visibility` decides who within that tenant may read the row. Do not conflate them.
-- Verify role from the `users` table inside the policy, not from a JWT claim. Supabase
-  tokens carry a top-level `role` claim meaning the *database* role (`authenticated`), which
-  would collide with the org role this app keeps in `org_role`.
-- Mirror visibility onto `document_chunks` in the policy **and** filter at query time. A
-  query-time-only filter is one missed join away from leaking a colleague's document text.
-
-### 4.7 Transport & API Hygiene
-- HTTPS only in any deployed environment.
-- Explicit CORS allowlist (your Vercel frontend origin only — not `*`).
-- Rate limiting per user/IP on `/chat` and `/upload` (e.g. via `slowapi`).
-- Pydantic models validate every request body — no raw dict access to user input.
-
-### 4.8 Dependency Hygiene
-- Run `pip-audit` (backend) and `npm audit` (frontend) once, in Phase 14, alongside the
-  rest of the deferred verification pass.
-
----
-
-## 5. Phased Build Plan
-
-Each phase lists: **Goal → Tasks → Deliverable → Verification (this phase)**. "Verification"
-is static only (compile/lint/typecheck, targeted manual/stubbed sanity runs where they're
-cheap) — no automated test suite until Phase 14. Do not proceed past a phase until its
-deliverable is actually in place; "verification passes" is not the same bar as "acceptance
-criteria met," and that gap is intentional and closes in Phase 14.
-
-### Phase 0 — Scaffolding
-- Goal: an empty but correctly wired monorepo.
-- Tasks: create folder structure above; init FastAPI app with `/health`; init Next.js
-  app; docker-compose with postgres+redis; `.env.example`; `.gitignore`.
-- Verification: `docker compose up` starts postgres+redis; `GET /health` returns 200;
-  Next.js dev server renders a blank page.
-
-### Phase 1 — Backend Core & Config
-- Goal: settings, DB connection, base error handling, logging.
-- Tasks: `config.py` (Pydantic BaseSettings), async SQLAlchemy engine, Alembic setup,
-  Loguru structured logging, global exception handler that never leaks stack traces to
-  the client.
-- Verification: app boots with missing `.env` failing loudly and clearly, not silently.
-
-### Phase 2 — Database Schema & RLS
-- Goal: core tables + row-level security from day one, not bolted on later.
-- Tasks: `organizations`, `users`, `documents`, `document_chunks` (with vector column),
-  `chat_sessions`, `chat_messages`. Write RLS policies for org-scoped access. Alembic
-  migration. (`documents` later gains `visibility` and a non-null `uploaded_by` in Phase
-  12.5 — see Section 4.6.)
-- Verification: migration applies cleanly; manually confirm (e.g. via `psql`) that a
-  cross-org `SELECT` under the app's DB role returns nothing. Full automated proof of
-  this is part of the Phase 14 security suite.
-
-### Phase 3 — Document Ingestion Pipeline
-- Goal: upload → extract → chunk → embed → store, running as a background job.
-- Tasks: upload endpoint (validated, sandboxed), Celery task for extraction (PyMuPDF /
-  python-docx / pandas), `RecursiveCharacterTextSplitter`, bge-small embeddings, store
-  vectors + metadata in pgvector.
-- Verification: uploading a sample PDF results in queryable chunks in `document_chunks`
-  with correct `org_id` and `source`/`page` metadata (manual check).
-
-### Phase 4 — RAG Retrieval + Basic Chat
-- Goal: a working single-purpose RAG chat endpoint (no SQL/MCP yet), streaming to the
-  frontend.
-- Tasks: retrieval function (top-k vector search, org-scoped), prompt template with
-  injection-safe delimiters (Section 4.4), streaming response via SSE, source citations
-  returned alongside the answer.
-- Verification: asking about content from an uploaded doc returns a correct answer with
-  a citation; asking something not in any doc returns an honest "I don't have that
-  information" (manual/spot check — automated proof deferred to Phase 14).
-
-### Phase 5 — Guarded SQL Agent
-- Goal: natural-language → safe SQL → result, running directly against the real
-  application's structured business tables (see Section 4.3 — no separate demo dataset).
-- Tasks: `get_schema()`/`describe_table()`/`execute_query()` tools, sqlglot validation
-  layer, row limit + timeout, read-only DB role scoped to an explicit table allowlist,
-  full audit logging.
-- Verification: manually attempt a `DROP TABLE`/stacked-query prompt and confirm it's
-  rejected before reaching the database. This one check is worth doing live even though
-  the formal test is deferred — it's the highest-risk component in the system.
-
-### Phase 6 — MCP Servers
-- Goal: Document MCP and Database MCP wrapping Phases 3–5 behind the MCP protocol;
-  GitHub MCP (read-only) as the external-system example.
-- Tasks: implement MCP servers per Section 4.5 scoping rules; argument validation on
-  every tool.
-- Verification: an MCP client can discover and call each tool; manually confirm malformed
-  arguments are rejected with a clear error, not a crash.
-
-### Phase 7 — LangGraph Multi-Agent Orchestration
-- Goal: a supervisor agent that routes a question to RAG agent, SQL agent, or MCP agent
-  (or a combination), then synthesizes a final answer.
-- Tasks: intent-routing node, sub-agent nodes wrapping Phases 4–6, response synthesis
-  node, max-iteration guard to prevent infinite agent loops.
-- Verification: a mixed question ("what's our refund policy, and how many refunds did we
-  process last month") correctly triggers both RAG and SQL agents and merges the answer
-  (manual run).
-
-### Phase 8 — Frontend Chat UI
-- Goal: a polished chat interface (see Section 6 spec).
-- Tasks: streaming chat pane, file upload with progress, source citation display, chat
-  history sidebar, markdown rendering for answers.
-- Verification: a full round trip works end-to-end from the browser against the real
-  backend, with visible sources (manual click-through).
-
-### Phase 9 — Auth & RBAC Integration (Frontend)
-- Goal: login/signup via Supabase Auth, JWT attached to every API call, role-aware UI
-  (e.g. hide admin-only views).
-- Verification: manually confirm an unauthenticated request to a protected endpoint is
-  rejected, and a logged-in user only sees their org's data in the UI.
-
-### Phase 10 — Background Jobs Hardening
-- Goal: Celery/Redis handles all slow work; retries and dead-letter handling for failed
-  ingestion jobs.
-- Verification: a large (e.g. 100-page) PDF upload doesn't block the API and completes
-  asynchronously with a visible status in the UI.
-
-### Phase 11 — Observability
-- Goal: Sentry for errors, LangSmith for agent traces (non-prod only unless
-  data-handling is explicitly reviewed), structured logs correlated by request ID.
-- Verification: a deliberately triggered error shows up in Sentry with useful context and
-  no leaked secrets.
-
-### Phase 12 — MCP/Agent Hardening Review
-- Goal: a design-level pass over everything built so far against Section 4, before the
-  formal test suite is written.
-- Tasks: re-read Sections 4.3–4.6 against the actual code; fix anything found; note
-  anything ambiguous for the Phase 14 test suite to specifically target.
-- Verification: written summary of the review; no automated tests yet.
-
-### Phase 12.1 — Addendum Bug Fixes
-- Goal: three usability bugs found in Phase 12's logs, fixed before new scope lands.
-- Tasks:
-  - Uploads stuck at "Queued": `pending` is the state *before* a worker claims the job, so
-    the cause is that no Celery worker is running. Document the three-process dev workflow
-    (API + worker + beat) in the README; compose covers infrastructure only.
-  - `POST /documents` used `.returning(Document).one()`, yielding a SQLAlchemy `Row` rather
-    than the ORM object — corrected to `.scalar_one()` to match every other query in the
-    router.
-  - The assistant answered general trivia. Fixed in the prompts, per Section 4.4: an
-    explicit scope boundary on `DIRECT_SYSTEM_PROMPT` and out-of-scope routing rules plus
-    negative examples on `ROUTER_SYSTEM_PROMPT`.
-  - Chat pane did not scroll. The scroll logic was already correct; the layout defeated it
-    — flex children with the default `min-height: auto` grew past `h-dvh` so the outer
-    `overflow-hidden` clipped instead of scrolling. Fixed with `min-h-0` on the column chain.
-- Verification: worker running end-to-end takes an upload `Queued → Processing → Ready`;
-  a trivia question gets a bounded refusal while "hi" still works; a long conversation
-  scrolls with the composer fixed.
-
-### Phase 12.5 — Document Permission System
-- Goal: owner-uploaded documents are company-wide; members' uploads are private to them;
-  owners get a management view over all org documents. See Section 4.6.
-- Tasks, in this order (schema → RLS → API → retrieval → frontend):
-  - Migration: add `visibility`, make `uploaded_by` NOT NULL. **Backfill order is
-    load-bearing** — add the column nullable, set every pre-existing row to `'org'`, and
-    only then apply the `'personal'` default, or every existing company document silently
-    becomes invisible.
-  - RLS: per-command policies on `documents`; mirror visibility onto `document_chunks`.
-  - **The ingestion worker sets claims with `org_id` only**, so `app.current_user_id()` is
-    NULL inside it and a personal document matches no policy branch. Ingestion must be
-    granted an explicit, non-user-forgeable service claim or every personal upload hangs at
-    `pending` — and the reaper will re-queue it forever. See the risk register.
-  - API: `visibility` on upload (403 for a member requesting `'org'`), `?scope=` on list,
-    delete restricted to uploader or owner/admin, and a promote-to-org endpoint.
-  - Retrieval: scope the vector search to org-wide chunks plus the caller's own.
-  - The Document MCP server currently discards the `user_id` it fetches — it must pass it
-    through, or the assistant cannot see the caller's own personal documents.
-  - Frontend: split the Docs tab into Company Docs / My Docs, plus an owner-only manage view.
-- Verification: as member A upload a personal doc, then confirm as member B that it is
-  invisible in `documents` *and* `document_chunks` and unreachable via chat — this mirrors
-  the Phase 2 cross-org check and is worth running live even though the suite is Phase 14.
-  Confirm a *personal* upload still reaches `ready`, which is the path RLS breaks.
-
-### Phase 13 — Dockerize & Deploy
-- Goal: reproducible deployment.
-- Tasks: production Dockerfiles for frontend/backend, docker-compose for local
-  full-stack, deploy backend to Railway/Render, frontend to Vercel, confirm env vars are
-  set via each platform's secret manager (not committed anywhere).
-- Verification: a fresh clone + documented setup steps produces a working deployed
-  system.
-
-### Phase 14 — Full Test Pass (Testing happens here, once, for everything)
-- Goal: the single point where every phase's acceptance criteria gets a real automated
-  test, run against the fully assembled system.
-- Tasks:
-  - Backend: `pytest` covering unit + integration for Phases 1–11 (RLS cross-org
-    isolation, ingestion correctness, RAG citation/honesty behavior, SQL agent
-    injection rejection, MCP argument validation, agent routing/max-iteration guard).
-  - `tests/security/`: SQL injection attempts against the SQL agent, prompt-injection
-    documents fed into RAG, auth-bypass attempts (missing JWT, wrong org_id, expired
-    token), file-upload fuzzing (oversized files, disallowed types, zip bombs).
-  - Phase 12.5 specifically: a member cannot read another member's personal document
-    through `documents`, through `document_chunks`, through RAG retrieval, or through the
-    Document MCP server (four separate paths, all of which must fail); an owner *can*; a
-    member requesting `visibility='org'` gets 403 rather than a downgrade; a personal
-    document still ingests to `ready`; and the assistant refuses out-of-scope questions
-    while still answering greetings.
-  - Frontend: `vitest`/`playwright` for the chat UI round trip and auth-gated routes.
-  - `pip-audit` and `npm audit`.
-- Verification (this is the real acceptance bar for the whole project): every check
-  above passes, or every failure is triaged, fixed, and re-run. Anything not fixable
-  immediately goes into the Risk Register (Section 7) as a tracked, explicit gap — not a
-  silent TODO.
-
----
-
-## 6. Chat UI Spec (Phase 8 detail)
-
-- **Layout**: sidebar (chat history, new chat, document library) + main chat pane +
-  optional right panel for citations/sources on the active answer.
-- **Streaming**: tokens appear incrementally (Vercel AI SDK `useChat` or equivalent),
-  with a visible "thinking/routing" indicator when the agent is deciding which sub-agent
-  to use.
-- **Citations**: every RAG-sourced answer shows clickable source chips
-  (`refund_policy.pdf · page 4`); SQL-sourced answers show the executed query on request
-  (collapsed by default, expandable — transparency without clutter).
-- **Upload**: drag-and-drop, progress bar tied to the Celery job status, clear
-  error states for rejected file types/oversized files.
-- **Empty/error states**: honest "I don't know" is a first-class UI state, not an
-  afterthought — never let the UI imply confidence the answer doesn't have.
-
----
-
-## 7. Risk Register — Things That Commonly Go Wrong
-
-| Risk | Why it happens | Mitigation |
+| | Owner | Member |
 |---|---|---|
-| Vector search returns garbage after a model change | Query embedded with a different model than the stored chunks | Pin embedding model version in config; re-embed the whole index on any change, never mix |
-| SQL agent touches unintended tables | Schema tool exposes more than it should | Explicit table allowlist in `get_schema()`, never introspect the full DB automatically |
-| SQL agent runs against real data with no automated proof until Phase 14 | Testing deferred by design | Keep the allowlist as narrow as possible per phase; do the one manual injection check in Phase 5 even though the suite is deferred |
-| Free-tier LLM rate limits stall production | Single provider dependency | Gemini → Groq fallback wired from Phase 4, not bolted on later |
-| Large upload blocks the API | Synchronous processing in the request handler | All ingestion is a Celery task from Phase 3 onward |
-| Prompt injection via a malicious uploaded doc | Retrieved text treated as instructions | Delimiter + system-instruction pattern (4.4), formally tested in Phase 14 |
-| Agent loops forever | No termination condition in the LangGraph graph | Explicit max-iteration guard on the supervisor node |
-| Data leak across organizations | Missing or bypassed authz check | Enforce both API-layer checks and Postgres RLS (4.6); formally tested in Phase 14 |
-| Secrets committed to git | `.env` accidentally staged | `.gitignore` from commit #1, `.env.example` only, pre-commit secret scan |
-| Cost/quota overrun | Free-tier limits hit silently | Log token usage per request from Phase 4; alert threshold in Phase 11 |
-| Zip bomb / malformed file crashes a worker | No size/type validation before processing | Enforce limits in Phase 3 before the file reaches the extraction library |
-| A new RLS policy silently breaks the ingestion worker | The worker sets claims with `org_id` only, so `app.current_user_id()` is NULL — a user-scoped policy matches nothing, and a zero-row `UPDATE` does not raise | Grant ingestion an explicit service claim that no user token can produce; after any policy change, upload a *personal* document and confirm it reaches `ready` |
-| A stuck document is re-queued forever | The reaper runs with BYPASSRLS and re-queues anything `pending`, so a row the worker cannot see is retried every tick without `retry_count` climbing | Treat a document stuck at `pending` with `retry_count` 0 as an RLS problem, not a broker problem |
-| A colleague's personal document text leaks through chunks | `document_chunks` policies are org-scoped, and not every chunk query joins `documents` | Mirror visibility into the chunk policy *and* filter at query time (4.6) — the two must agree |
-| The assistant answers as a general chatbot | A prompt that forbids inventing *company* facts still permits general world knowledge | State the scope boundary positively and separately in the prompt, and route out-of-scope questions to `direct` (4.4) |
-| A visibility migration hides every existing document | `ADD COLUMN ... DEFAULT 'personal'` applies the default to existing rows too | Add nullable, backfill `'org'`, then apply the default — and verify the backfill before anything else |
-| A bug from an early phase isn't caught until Phase 14 | Per-phase testing deferred by design | Phase 12 hardening review exists specifically to catch design-level issues before the formal suite; keep phase summaries honest about uncertainty |
+| Create workspace | ✅ (becomes owner) | — |
+| Invite members | ✅ | ❌ |
+| Upload → published immediately | ✅ | ❌ |
+| Upload → pending approval | — | ✅ |
+| Approve/reject pending documents | ✅ | ❌ |
+| Delete any workspace document | ✅ | own uploads only |
+| Search approved knowledge / chat | ✅ | ✅ |
 
 ---
 
-## 8. Coding Standards
-
-- **Python**: `black` + `ruff`, full type hints, every API input/output is a Pydantic
-  model — no raw `dict` in request/response signatures.
-- **TypeScript**: strict mode on, `eslint` + `prettier`, no `any`.
-- **Tests**: written once, in Phase 14 — `pytest` (backend), `vitest`/`playwright`
-  (frontend). Each phase's deliverable maps to at least one Phase 14 test.
-- **Commits**: one logical change per commit; message states what changed and why. User
-  commits manually.
-- **No silent TODOs**: if something is deferred, it goes in this file's risk register or
-  a tracked issue, not a comment that gets forgotten.
-
----
-
-## 9. `.env.example`
+## 5. Document Lifecycle (Enforced Structurally, Not by Prompting)
 
 ```
-# Database
+OWNER upload  → validate → extract → chunk → embed → store  → READY  (immediate)
+
+MEMBER upload → validate → store document only               → PENDING
+                (no extraction, no chunking, no embedding yet)
+
+OWNER approves a PENDING doc → extract → chunk → embed → store → READY
+OWNER rejects a PENDING doc  → REJECTED (never ingested, permanent)
+
+Any ingestion failure → FAILED, with the error persisted on the row
+```
+
+**The rule that keeps this simple:** only `READY` documents are ever chunked or
+embedded. Retrieval doesn't need to filter by status at query time, because a
+`PENDING` or `REJECTED` document structurally has zero rows in `document_chunks` —
+there is nothing to accidentally leak. This must hold as an invariant, not an
+assumption: a document's status and the existence of its chunks are never allowed to
+disagree (see Section 7's transaction notes).
+
+---
+
+## 6. Document Storage
+
+`documents.file_data` is `BYTEA` — the raw file lives in Postgres, not on disk and not
+in S3. This is intentional: it demonstrates a genuinely single-database architecture,
+which is the whole point of the "database is the source of truth" requirement.
+
+**Honest limitation:** `BYTEA` is not built for large binary blobs at scale — every
+read pulls the full bytes through the connection, and Postgres row/page overhead
+matters more than with dedicated blob storage. For a portfolio project with a
+sensible per-file size cap this is a non-issue. **Enforce `MAX_UPLOAD_SIZE_MB` (default
+10MB) at the API layer, checked from `Content-Length` before the file is read into
+memory** — reject oversized uploads before any bytes are pulled off the wire. If this
+project ever needed to hold hundreds of large files per workspace in production,
+Supabase Storage (object storage, not a new service) would be the natural next step —
+noted here as a documented trade-off, not something to build now.
+
+`documents` also stores: filename, MIME type, file size, a SHA-256 checksum (used to
+detect duplicate uploads **within a workspace** — do not attempt cross-workspace
+deduplication, tenant boundaries matter more than saving a few embeddings), uploader,
+workspace, status, timestamps, and ingestion error text where relevant.
+
+---
+
+## 7. Database Schema
+
+```sql
+workspaces
+  id            uuid PK
+  name          text NOT NULL
+  owner_id      uuid NOT NULL REFERENCES auth.users(id)
+  created_at    timestamptz NOT NULL DEFAULT now()
+
+members
+  id            uuid PK
+  workspace_id  uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE
+  user_id       uuid NOT NULL REFERENCES auth.users(id)
+  role          text NOT NULL CHECK (role IN ('OWNER','MEMBER'))
+  status        text NOT NULL CHECK (status IN ('INVITED','ACTIVE','REMOVED'))
+  created_at    timestamptz NOT NULL DEFAULT now()
+  UNIQUE (workspace_id, user_id)
+  INDEX (workspace_id, user_id)          -- membership lookup on every request
+
+documents
+  id            uuid PK
+  workspace_id  uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE
+  uploaded_by   uuid NOT NULL REFERENCES auth.users(id)
+  filename      text NOT NULL
+  mime_type     text NOT NULL
+  file_size     integer NOT NULL
+  checksum      text NOT NULL            -- sha256, for in-workspace dedupe
+  file_data     bytea NOT NULL
+  status        text NOT NULL CHECK (status IN ('PENDING','READY','REJECTED','FAILED'))
+  error_message text
+  created_at    timestamptz NOT NULL DEFAULT now()
+  approved_at   timestamptz
+  INDEX (workspace_id, status)            -- "give me all READY docs" / approval queue
+  INDEX (workspace_id, uploaded_by)       -- "my documents" view
+  UNIQUE (workspace_id, checksum)         -- duplicate detection
+
+document_chunks
+  id              uuid PK
+  document_id     uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE
+  workspace_id    uuid NOT NULL            -- denormalized on purpose: every retrieval
+                                            -- query filters here directly, no join
+                                            -- required to enforce tenant isolation
+  chunk_index     integer NOT NULL
+  content         text NOT NULL
+  content_tsv     tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+  embedding       vector(384) NOT NULL     -- MUST match EMBEDDING_DIMENSION exactly
+  page_number     integer
+  section_title   text
+  metadata        jsonb
+  created_at      timestamptz NOT NULL DEFAULT now()
+  INDEX (workspace_id)
+  INDEX (document_id)
+  INDEX USING GIN (content_tsv)            -- full-text search
+  INDEX USING ivfflat (embedding vector_cosine_ops)  -- pgvector ANN index
+
+chat_sessions
+  id            uuid PK
+  workspace_id  uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE
+  user_id       uuid NOT NULL REFERENCES auth.users(id)
+  created_at    timestamptz NOT NULL DEFAULT now()
+  INDEX (workspace_id, user_id)
+
+chat_messages
+  id            uuid PK
+  session_id    uuid NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE
+  role          text NOT NULL CHECK (role IN ('user','assistant'))
+  content       text NOT NULL
+  sources       jsonb                      -- structured citations, see Section 8.4
+  created_at    timestamptz NOT NULL DEFAULT now()
+  INDEX (session_id)
+
+invitations                                 -- the one supporting table this needs
+  id            uuid PK
+  workspace_id  uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE
+  email         text NOT NULL
+  status        text NOT NULL CHECK (status IN ('PENDING','ACCEPTED','EXPIRED'))
+  invited_by    uuid NOT NULL REFERENCES auth.users(id)
+  created_at    timestamptz NOT NULL DEFAULT now()
+  UNIQUE (workspace_id, email)
+```
+
+That's six core tables plus `invitations`. Do not add tables that "look enterprise" —
+every table above maps to a specific requirement in Section 1.
+
+**Transaction boundary that matters most:** approval (Section 5) must be atomic —
+`documents.status = READY` and its `document_chunks` rows are written in the same
+transaction, or ingestion fails and the row goes to `FAILED` with nothing partially
+searchable. Never allow `status = READY` with zero chunks, or `status = PENDING/FAILED`
+with chunks present. On deletion, rely on the `ON DELETE CASCADE` from
+`document_chunks.document_id` — there must be no orphaned chunk left searchable after
+its parent document is gone.
+
+---
+
+## 8. RAG Pipeline
+
+```
+User question
+     │
+     ▼
+Authentication (Supabase Auth) + workspace authorization (membership check)
+     │
+     ▼
+Conversation context resolution (last 1–2 exchanges only, not full history)
+     │
+     ▼
+Hybrid retrieval
+  ├── pgvector cosine similarity search (semantic)
+  └── PostgreSQL full-text search on content_tsv (keyword)
+     │
+     ▼
+Merge + deduplicate → top ~10–15 candidates
+     │
+     ▼
+Local cross-encoder reranking (query, candidate) → relevance scores
+     │
+     ▼
+Top ~5–8 chunks
+     │
+     ▼
+Relevance/grounding threshold check
+     │
+     ├── below threshold → return honest refusal, DO NOT call the LLM
+     └── above threshold → continue
+     │
+     ▼
+LLM (strict "answer only from context" system prompt)
+     │
+     ▼
+Answer + backend-constructed citations
+```
+
+Deterministic, single pipeline. No LangGraph, no supervisor, no routing between
+specialized agents — there is exactly one kind of question this system answers.
+
+### 8.1 Hybrid retrieval and merge strategy
+Semantic-only search misses exact terms (`HR-004`, `POL-17`, `20 days`) because
+embeddings represent meaning, not tokens. Keyword-only search misses paraphrases
+(`vacation` vs. `annual leave`). Run both, then merge with **Reciprocal Rank Fusion
+(RRF)**: for each candidate, `score = 1/(k + rank_semantic) + 1/(k + rank_keyword)`
+with `k = 60` (a standard, well-documented default), and take the top ~15 by combined
+score before reranking. RRF is chosen over normalized-score blending because cosine
+similarity and `ts_rank` are on incomparable scales, and rank-based fusion sidesteps
+needing to normalize two dissimilar scoring functions correctly.
+
+### 8.2 Reranking
+The local cross-encoder scores `(query, chunk_text)` pairs directly — no separate
+embedding step needed for this stage. Cap candidates into the reranker at ~15; never
+rerank hundreds of chunks, both because it's unnecessary and because it's the slowest
+step in the pipeline on CPU. Final context passed to the LLM: top 5–8 by rerank score.
+
+### 8.3 Two-layer grounding
+Layer 1 — **retrieval-level**: if the top reranked chunk's score is below a configured
+threshold (`RETRIEVAL_RELEVANCE_THRESHOLD`), skip the LLM call entirely and return
+"I couldn't find that information in the approved company knowledge base." This is
+not just an optimization — it's what prevents the LLM from ever seeing a question with
+no real supporting evidence and being tempted to fill the gap.
+Layer 2 — **generation-level**: the system prompt requires the LLM to answer only from
+the supplied context and to say so explicitly if the context doesn't cover the
+question, as a backstop for cases that pass the threshold but are still a partial
+match. Neither layer alone is sufficient; both apply on every request.
+
+An out-of-scope question ("who won the World Cup", "write me a Python game") is not a
+special case needing its own agent — it's simply a question with no relevant
+retrieval results, and layer 1 handles it the same way it handles any ungrounded
+question.
+
+### 8.4 Citations
+The LLM is never trusted to invent citation metadata. The backend builds the citation
+list directly from the chunks that were actually sent to the LLM — `document_id`,
+`filename`, `page_number` (if available), `chunk_id` — and returns it as structured
+data alongside the generated text. The frontend renders it (`Employee Handbook — Page
+14`); the LLM's job is text generation only.
+
+### 8.5 Conversation context
+Follow-ups ("can I carry it over?") need the last 1–2 exchanges included when forming
+the retrieval query, so pronouns resolve. Send only that small window into the
+retrieval + generation step — never the full session history, both to keep prompts
+small (Section 10 free-tier constraint) and because older turns rarely help resolve a
+current pronoun.
+
+---
+
+## 9. Phased Build Plan
+
+### Phase 0 — Scaffolding
+FastAPI `/health`, Next.js blank app, docker-compose (app + postgres only),
+`.env.example`, `.gitignore`.
+Verify: `docker compose up` starts postgres; `GET /health` returns 200.
+
+### Phase 1 — Database & Config
+`config.py` (Pydantic BaseSettings, Section 13), async SQLAlchemy engine, Alembic, all
+tables from Section 7, pgvector extension enabled, `EMBEDDING_DIMENSION` wired through
+consistently.
+Verify: migration applies cleanly; app fails loudly on missing required env vars.
+
+### Phase 2 — Auth & Multi-Tenant Workspaces
+Supabase Auth integration, workspace creation (creator becomes OWNER), invitation
+flow (`invitations` table), member accept → `ACTIVE` membership row.
+Verify: create two separate workspaces as two different owners; confirm a member of
+Workspace A gets 403 on any Workspace B endpoint.
+
+### Phase 3 — Document Upload & Synchronous Ingestion
+Upload endpoint (size check before read, type allowlist, checksum computed),
+extraction (PyMuPDF/python-docx/pandas), chunking, local embedding model, inline
+storage. Owner upload → `READY`. Member upload → `PENDING`, not ingested.
+Verify: owner upload produces chunks with correct `workspace_id`, correct embedding
+dimension; member upload leaves `document_chunks` empty for that document.
+
+### Phase 4 — Approval Flow
+Owner's pending queue, approve (→ ingest → `READY`, atomic per Section 7) / reject
+(→ `REJECTED`, never ingested) endpoints, restricted to OWNER role server-side.
+Verify: a member calling the approve endpoint gets 403; approving produces chunks
+identical in shape to an owner upload; a `FAILED` ingestion leaves zero chunks and a
+persisted error message.
+
+### Phase 5 — Hybrid Retrieval + Reranking
+pgvector search, full-text search, RRF merge (Section 8.1), local cross-encoder
+rerank, relevance threshold (Section 8.3).
+Verify: a paraphrased query and an exact-code query both return the right chunk; a
+query about content only in a `PENDING` document returns nothing.
+
+### Phase 6 — Grounded Chat Endpoint
+LLM call (configured via env, Section 2) with strict system prompt, citations
+(Section 8.4), conversation context window (Section 8.5), streaming response.
+Verify: an in-scope question gets a correctly cited answer; an out-of-scope question
+is refused **without an LLM call** (check logs for retrieval-threshold short-circuit);
+a follow-up question resolves a pronoun correctly.
+
+### Phase 7 — Frontend
+Chat pane with streaming + citation chips, Company Docs / My Docs views, upload with
+status, owner approval queue, member invite UI, role-aware navigation.
+Verify: full browser round trip — owner uploads, asks a question, sees cited answer;
+member uploads, sees it pending, owner approves, member can now get an answer sourced
+from it.
+
+### Phase 8 — Deploy
+Dockerfiles, deploy backend to Railway/Render free tier, frontend to Vercel, Supabase
+free tier for the database, secrets via each platform's secret manager.
+Verify: fresh clone + documented setup produces a working deployed system on entirely
+free infrastructure.
+
+### Phase 9 — Evaluation
+Build the evaluation set and runner described in Section 15.
+Verify: metrics are computed and recorded, not just eyeballed.
+
+### Phase 10 — Full Test Pass (once, for everything)
+`pytest`: ingestion correctness, hybrid retrieval + fusion correctness, grounding/
+refusal behavior, approval-flow state transitions, workspace isolation (adversarial:
+member reads another workspace's doc; member calls approve; member fetches a
+`PENDING` document's chunks; user opens another user's chat session — all must fail).
+`vitest`/`playwright`: chat round trip, upload flow, approval flow.
+Verify: every check passes, or is triaged, fixed, and re-run — this is the real
+acceptance bar for the project, not "verification passes" at each earlier phase.
+
+---
+
+## 10. Free-Model Resource Constraints
+
+Assume limited hardware and API quota throughout:
+- Local embedding and reranker models must stay "small" class (e.g. MiniLM/bge-small
+  tier) — runnable on a normal laptop CPU without a GPU.
+- No simultaneous/parallel model calls per request — retrieval, rerank, and generation
+  run sequentially, one at a time.
+- Retrieval candidates capped at ~15 pre-rerank, ~5–8 post-rerank (Section 8.2) — this
+  isn't just quality, it's also what keeps prompts small enough for a free/rate-limited
+  LLM tier.
+- Use streaming only if the configured provider reliably supports it; if not,
+  synchronous responses are fine — don't build a fallback streaming shim.
+- No LLM fallback chain. One provider, one model, configured through env vars. If the
+  free tier rate-limits, that's a documented limitation (Section 14 risk register), not
+  a reason to add a second provider.
+
+---
+
+## 11. What NOT to Add (and why it's tempting)
+
+| Thing | Why it's tempting | Why it's still wrong here |
+|---|---|---|
+| Redis + Celery | "Production systems use async queues" | No document volume here justifies a background worker; synchronous ingestion with a size cap is simpler and just as correct |
+| MCP servers | Trendy protocol for tool-calling agents | There are no external tools to wrap — nothing for MCP to do |
+| LangGraph / multi-agent supervisor | Looks more sophisticated | One retrieval pipeline handles every question type this app has; a router adds a failure mode (misrouting) without adding capability |
+| SQL agent over structured data | Could answer "how many refunds last month" | Out of scope for a document knowledge base, and a much higher-risk feature (LLM-generated SQL against real data) this project doesn't need to demonstrate |
+| Paid LLM/embedding/reranker APIs | Slightly better quality | Violates the hard free-tier constraint; a free local model plus a good retrieval pipeline is more than enough to prove the architecture works |
+| Full JWT/RLS stack | "Enterprise auth is more impressive" | Supabase Auth + application-level membership checks demonstrate the same authorization understanding; RLS is a real, valid trade-off but is deliberately **not** auto-added here (Section 7) — the project intentionally shows application-level tenant isolation done correctly |
+| S3 / external file storage | Conventional for "real" apps | The explicit requirement is DB-as-source-of-truth; `BYTEA` with a size cap satisfies it directly |
+| Retrieving 30–50 chunks "to be safe" | Feels like it reduces missed answers | Slower, dilutes LLM attention, burns free-tier token quota — a good hybrid + rerank pipeline reliably finds the right 5–8 |
+| A third role (ADMIN, VIEWER, etc.) | "More flexible permission model" | Nothing in this product needs more than OWNER/MEMBER; adding one is unused surface area |
+
+---
+
+## 12. FREE MODEL / CLAUDE CODE OPERATING RULES
+
+This project is worked on by Claude Code running on **free/variable-quality models**
+(OpenRouter free routing). These rules govern *how work gets done*, independent of
+what gets built, and apply for the whole lifetime of the project — read them before
+every session, not just once.
+
+**Always:**
+- Work in small, clearly scoped steps within the current phase only.
+- Inspect the actual repository before proposing or making any change — read the
+  relevant files, don't assume from memory what they contain.
+- Prefer the simplest deterministic implementation that satisfies the requirement.
+- Make minimal diffs. Touch only the files the current task requires.
+- Explain the plan before a substantial change and wait for approval unless the user
+  has explicitly said "implement this."
+- Run the relevant static checks / tests after a change and report exact results.
+- Keep context usage efficient — read targeted sections of large files instead of
+  whole files when a targeted read is sufficient.
+- Break a large task into smaller steps rather than attempting it in one pass.
+- If a task is too large or ambiguous for reliable execution at the current model
+  quality, say so explicitly and propose how to split it, rather than attempting it
+  anyway and guessing.
+
+**Never:**
+- Never claim something works without having actually run it and observed the result.
+- Never fabricate test results, API responses, database state, or model capabilities.
+- Never assume a feature exists just because this file describes it — verify against
+  the actual code first.
+- Never make broad, uncontrolled changes across many files for one small task.
+- Never rewrite working code without a concrete, stated reason tied to the current
+  phase.
+- Never change architecture (add/remove a major component) without first explaining:
+  current behavior → the problem → the proposed change → why it's necessary → which
+  files change — and getting confirmation.
+- Never silently skip a failing check — report it as failing.
+- Never use a paid model or paid API "because it would be easier" — the free-tier
+  constraint in Section 2 is absolute.
+- Never install a new dependency without stating why the existing stack can't do it.
+- Never touch `.env`, secrets, or committed credentials casually.
+- Never move to the next phase automatically, and never run `git commit`.
+
+### Phase Workflow (for every requested task)
+1. Read the relevant section(s) of this file.
+2. Inspect the existing implementation for the files involved.
+3. State what is currently implemented (verified from code, not assumed).
+4. State what is actually missing or broken.
+5. Produce a short implementation plan.
+6. Wait for approval before large changes, unless the user explicitly asked for
+   implementation directly.
+7. Implement only the agreed scope — nothing adjacent, no "while I'm here" cleanups.
+8. Run the relevant static checks/tests.
+9. Review the diff for anything outside the intended scope.
+10. Report: what changed, files changed, checks run, results, remaining issues.
+11. Stop and wait for the next instruction.
+
+---
+
+## 13. Configuration — `.env.example`
+
+```
+# Database (Supabase / Postgres — the only datastore)
 DATABASE_URL=
 SUPABASE_URL=
 SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 
-# LLMs
-GEMINI_API_KEY=
-GROQ_API_KEY=
+# LLM — one provider, configured, never hardcoded
+LLM_PROVIDER=
+LLM_MODEL=
+LLM_API_KEY=
+LLM_BASE_URL=
 
-# Redis / Celery
-REDIS_URL=
+# Embeddings — local, free, pinned
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+EMBEDDING_DIMENSION=384
 
-# Auth
-JWT_SECRET=
+# Reranker — local, free
+RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 
-# Observability
-SENTRY_DSN=
-LANGSMITH_API_KEY=
+# Retrieval tuning
+RETRIEVAL_CANDIDATE_COUNT=15
+RETRIEVAL_FINAL_COUNT=8
+RETRIEVAL_RELEVANCE_THRESHOLD=0.3
 
-# GitHub MCP
-GITHUB_TOKEN=
+# Uploads
+MAX_UPLOAD_SIZE_MB=10
 ```
 
+Never commit `.env`. `.env.example` documents every variable with no real values.
+
 ---
+
+## 14. Risk Register
+
+| Risk | Mitigation |
+|---|---|
+| Embedding model swapped mid-project, old vectors incomparable to new queries | Pin `EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` from Phase 1; changing either requires re-embedding the whole index, never mixing |
+| Free-tier LLM rate limits stall the demo | Documented, expected limitation of a single free-tier provider — not a reason to add a fallback chain; log and surface a clear error to the user |
+| Large upload makes the request slow | `MAX_UPLOAD_SIZE_MB` enforced before the file is read into memory (Section 6) |
+| A member's pending document leaks into search results | Structurally impossible while the Section 5 invariant holds — `PENDING`/`REJECTED` documents have zero chunks; treat any violation as a Section 7 transaction bug |
+| Retrieval returns irrelevant/too many chunks | Bounded pre-rerank (~15) and post-rerank (~5–8) context, per Section 8 |
+| Assistant answers general trivia instead of refusing | Two-layer grounding (Section 8.3) — retrieval threshold plus an explicit, separately-stated scope boundary in the prompt |
+| Cross-workspace data leak | Every workspace-owned table filters on `workspace_id` server-side (Section 4); this is the #1 thing to check on any new endpoint |
+| A colleague's personal (pending) document text leaks through chunks | Enforced structurally by ingestion timing (Section 5), not by a query-time filter alone — verify both hold together |
+| Free/small local reranker gives noisier scores than a hosted one | Acceptable, documented trade-off for a free-tier project; the evaluation set (Section 15) quantifies this rather than assuming it's fine |
+| Secrets committed to git | `.gitignore` from commit #1, `.env.example` only |
+
+---
+
+## 15. Evaluation (Phase 9)
+
+Build a small, reproducible evaluation set of **30–50 questions** in `backend/eval/`,
+covering: semantic-paraphrase questions, exact-keyword/identifier questions, numeric
+facts, questions needing multiple chunks, genuinely out-of-scope questions,
+in-scope-but-unsupported questions, and follow-up questions needing conversation
+context.
+
+Compute and record, not just assert:
+- **Retrieval Recall@K** — did the right chunk make it into the candidate set.
+- **MRR** (or similar) — how highly the right chunk ranked after fusion + rerank.
+- **Citation correctness** — does the returned citation actually match the source of
+  the answer.
+- **Grounded-answer correctness** — is the answer actually supported by the cited
+  chunk(s).
+- **Refusal correctness** — does an out-of-scope/unsupported question get refused,
+  and does an in-scope question *not* get incorrectly refused.
+- **Workspace isolation** — a question scoped to Workspace A never returns a chunk from
+  Workspace B, run against the eval harness itself as a sanity check.
+
+This is what turns "the chatbot generates plausible answers" into "the RAG system
+measurably works" — the second is what should go on a resume and be defensible in an
+interview.
+
+---
+
+## 16. Coding Standards
+
+- **Python**: `ruff`, full type hints, every API input/output is a Pydantic model — no
+  raw `dict` in request/response signatures.
+- **TypeScript**: strict mode, `eslint` + `prettier`, no `any`.
+- **Commits**: one logical change per commit, message states what and why. User commits
+  manually.
+- **No silent TODOs**: anything deferred goes in Section 14's risk register or a
+  tracked issue, not a comment that gets forgotten.
+- **Logging**: structured logs with request ID, workspace ID, user ID (where safe),
+  document ID, and durations for ingestion/retrieval/rerank/LLM steps. Never log
+  passwords, API keys, raw file bytes, or full chat content unnecessarily. No paid
+  observability platform — plain structured logs are sufficient here.
+
+---
+
+## 17. Resume Pitch
+
+> I built a multi-tenant company knowledge assistant — many isolated company
+> workspaces in one deployment — where an owner invites members, uploads official
+> documents that publish immediately, and members contribute their own documents
+> pending owner approval. Documents are stored directly in Postgres with pgvector;
+> retrieval is hybrid (semantic + full-text, fused with RRF) with a local cross-encoder
+> reranker, two-layer grounding, and backend-verified citations. The entire stack runs
+> on free-tier and locally-hosted models, and I evaluated retrieval and grounding
+> quality against a hand-built question set rather than assuming it worked.

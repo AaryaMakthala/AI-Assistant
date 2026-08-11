@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from app.api.dependencies import require_role
-from app.db.models import Organization, User
+from app.db.legacy_models import Organization, User
 from app.security.auth import CurrentPrincipal, Principal
 from app.security.rls import tenant_session
 

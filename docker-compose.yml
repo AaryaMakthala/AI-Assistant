@@ -1,3 +1,7 @@
+# CLAUDE.md Section 2: Docker Compose locally = app + Postgres only.
+# Redis is explicitly excluded (Sections 2 and 11) — removed in Phase 0.
+# An `app` service is intentionally absent: the backend Dockerfile arrives in
+# Phase 8 (Deploy). Until then the API runs via `uvicorn` from the host.
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -15,18 +19,5 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
 volumes:
   pgdata:
-  redisdata:

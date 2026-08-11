@@ -33,7 +33,7 @@ from sqlalchemy import delete, func, insert, select, update
 
 from app.api.dependencies import require_role
 from app.api.workspace_deps import assert_workspace_role
-from app.db.models import TERMINAL_DOCUMENT_STATUSES, Document, DocumentChunk
+from app.db.legacy_models import TERMINAL_DOCUMENT_STATUSES, Document, DocumentChunk
 from app.security.auth import CurrentPrincipal, Principal
 from app.security.rate_limit import UPLOAD_RATE_LIMIT, limiter
 from app.security.rls import tenant_session

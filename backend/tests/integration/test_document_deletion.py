@@ -26,7 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
-from app.db.models import ORG_SCOPED_TABLES
+from app.db.legacy_models import ORG_SCOPED_TABLES
 
 pytestmark = pytest.mark.usefixtures("valid_env")
 
@@ -164,7 +164,7 @@ async def _delete_as(org_id: uuid.UUID, user_id: uuid.UUID, document_id: uuid.UU
     """Run the endpoint's delete through a tenant session, returning rows removed."""
     from sqlalchemy import delete as sql_delete
 
-    from app.db.models import Document, DocumentChunk
+    from app.db.legacy_models import Document, DocumentChunk
     from app.db.session import dispose_engine
     from app.security.rls import tenant_session
 
@@ -250,7 +250,7 @@ def test_one_org_cannot_see_another_orgs_chunks(delete_env: str) -> None:
     """Isolation of the vectors themselves, not just of the parent document."""
     from sqlalchemy import func, select
 
-    from app.db.models import DocumentChunk
+    from app.db.legacy_models import DocumentChunk
     from app.security.rls import tenant_session
 
     try:

@@ -26,7 +26,7 @@ from typing import Literal
 from loguru import logger
 from sqlalchemy import insert
 
-from app.db.models import SqlQueryAudit
+from app.db.legacy_models import SqlQueryAudit
 from app.observability import capture_exception
 from app.security.rls import tenant_session
 

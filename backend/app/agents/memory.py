@@ -9,7 +9,7 @@ from loguru import logger
 from sqlalchemy import case, desc, insert, select
 
 from app.config import get_settings
-from app.db.models import ChatMessage, ConversationSummary
+from app.db.legacy_models import ChatMessage, ConversationSummary
 from app.llm.base import Completion, LLMError, LLMRouterProtocol, Message
 from app.security.rls import tenant_session
 

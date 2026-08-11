@@ -49,10 +49,11 @@ records rather than by reading prose.
 - external — GitHub source code, read-only. Use ONLY when the question is explicitly about \
 code, a repository, or a file in one.
 - direct — no source needed. Greetings, small talk, questions about what you can do, or a \
-request to rephrase or expand the previous answer. ALSO use direct for anything outside this \
-assistant's scope: general knowledge, trivia, history, geography, science, current events, \
-recipes, media, and requests to write or explain code that is not in a connected repository. \
-Those get a bounded refusal, which is handled downstream — your job is only to route them here.
+request to rephrase or reformat content that was already returned (no new lookup needed). ALSO \
+use direct for anything outside this assistant's scope: general knowledge, trivia, history, \
+geography, science, current events, recipes, media, and requests to write or explain code that \
+is not in a connected repository. Those get a bounded refusal, which is handled downstream — \
+your job is only to route them here.
 
 Rules:
 
@@ -70,6 +71,12 @@ guessing.
 If it would be found in an encyclopedia rather than in the company's files, database, or \
 repositories, route direct. Do not route a general-knowledge question to documents on the \
 chance that a document mentions the topic.
+7. Follow-ups that use pronouns or references — "them", "those", "it", "that", "the ones", \
+"my uploads" — referring to documents, data, or code discussed in the user's previous question \
+should route to whichever source would answer the referent. "Can you read them?" after a \
+question about documents means read the documents, not rephrase the previous answer. Only route \
+to direct when the follow-up genuinely needs no new lookup (e.g. "say that again in bullet \
+points"). A general-knowledge question is still direct even if phrased as a follow-up.
 
 Examples:
   What does the travel policy say about business class? -> documents | policy text
@@ -81,7 +88,11 @@ documents,business_data | prose plus a count
   What is the capital of Japan? -> direct | general knowledge, not company material
   Tell me about One Piece -> direct | general knowledge, not company material
   What are the steps to make a sandwich? -> direct | general knowledge, not company material
-  Write me a Python function that adds two numbers -> direct | not code from a connected repo"""
+  Write me a Python function that adds two numbers -> direct | not code from a connected repo
+  Can you read them? -> documents | follow-up referring to documents from previous question
+  What are those documents about? -> documents | referential, subject is the documents
+  Show me the details for those orders -> business_data | follow-up referring to data records
+  Can you summarize that in bullet points? -> direct | reformat of already-returned content"""
 
 SYNTHESIS_SYSTEM_PROMPT = """\
 You are an enterprise knowledge assistant. Several specialist agents have gathered material \

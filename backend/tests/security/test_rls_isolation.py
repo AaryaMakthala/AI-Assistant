@@ -20,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from app.db.models import ORG_SCOPED_TABLES
+from app.db.legacy_models import ORG_SCOPED_TABLES
 from app.security.rls import set_tenant_claims
 
 _TEST_DATABASE_URL = "TEST_DATABASE_URL"

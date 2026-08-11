@@ -37,7 +37,7 @@ from app.agents.state import outcomes
 from app.api.dependencies import get_llm_router
 from app.api.workspace_deps import assert_workspace_role
 from app.config import get_settings
-from app.db.models import ChatMessage, ChatSession
+from app.db.legacy_models import ChatMessage, ChatSession
 from app.llm.base import Completion, LLMError, LLMRouterProtocol, Message
 from app.observability import capture_exception, record_token_usage
 from app.rag.pipeline import cited_numbers

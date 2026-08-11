@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config import get_settings
-from app.db.models import Document, DocumentChunk, IngestionFailure
+from app.db.legacy_models import Document, DocumentChunk, IngestionFailure
 from app.observability import capture_exception
 from app.observability.sentry import set_tag
 from app.rag.chunking import chunk_pages

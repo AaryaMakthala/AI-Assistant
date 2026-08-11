@@ -32,7 +32,7 @@ from app.api.workspace_deps import (
     WorkspaceMemberAny,
     WorkspaceOwner,
 )
-from app.db.models import (
+from app.db.legacy_models import (
     ChatMessage,
     ChatSession,
     Document,

@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
-from app.db.models import ORG_SCOPED_TABLES
+from app.db.legacy_models import ORG_SCOPED_TABLES
 
 pytestmark = pytest.mark.usefixtures("valid_env")
 
@@ -173,7 +173,7 @@ async def _read_back(url: str, ids: dict[str, uuid.UUID]):
     count characters instead of dimensions and the assertion would fail against perfectly
     valid data.
     """
-    from app.db.models import DocumentChunk
+    from app.db.legacy_models import DocumentChunk
     from app.security.rls import set_tenant_claims
 
     engine = create_async_engine(url, connect_args={"statement_cache_size": 0})

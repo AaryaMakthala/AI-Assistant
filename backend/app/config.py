@@ -5,12 +5,20 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, ValidationError, field_validator
+from pydantic import (
+    Field,
+    PostgresDsn,
+    RedisDsn,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV_EXAMPLE_HINT = (
     "Copy .env.example to .env at the repo root and fill in the values listed above.\n"
-    "See CLAUDE.md section 9 for the full variable list."
+    "See CLAUDE.md section 13 for the full variable list."
 )
 
 
@@ -30,10 +38,27 @@ class Settings(BaseSettings):
     supabase_anon_key: SecretStr
     supabase_service_role_key: SecretStr
 
-    gemini_api_key: SecretStr
-    groq_api_key: SecretStr
+    # --- LLM — ONE generic provider, configured entirely via env (CLAUDE.md 13) ---
+    # Provider-agnostic by design: the runtime treats it as a generic chat-completions
+    # endpoint. No provider names, no fallback chain, no provider-specific branches.
+    # `llm_base_url` is optional so a provider's default endpoint is used when unset.
+    llm_provider: str = Field(min_length=1)
+    llm_model: str = Field(min_length=1)
+    #: min_length so an empty value (e.g. `LLM_API_KEY=` in .env) fails at boot
+    #: rather than loading as an empty secret and failing at the first LLM call.
+    llm_api_key: SecretStr = Field(min_length=1)
+    llm_base_url: str | None = None
 
-    redis_url: RedisDsn
+    # --- Legacy provider-specific keys (compatibility only — do not extend) ---
+    # These fed the old Groq→Gemini failover chain (app/llm/*, app/workers/*) which the
+    # alignment is replacing. They are OPTIONAL now — a Section 13 environment must not
+    # need them — and are kept only so existing .env files keep loading until those
+    # legacy modules are removed. The legacy modules that dereference them will fail if
+    # instantiated without them; that is a known, reported gap of the transition, not a
+    # silent fallback to anything.
+    gemini_api_key: SecretStr | None = None
+    groq_api_key: SecretStr | None = None
+    redis_url: RedisDsn | None = None
 
     jwt_secret: SecretStr = Field(min_length=32)
 
@@ -84,9 +109,14 @@ class Settings(BaseSettings):
     max_extracted_bytes: int = 200 * 1024 * 1024
 
     #: Pinned. Changing this invalidates every stored vector and requires a full
-    #: re-embed — never a mix (CLAUDE.md section 7, Risk 1).
+    #: re-embed — never a mix (CLAUDE.md 14, risk register).
     embedding_model: str = "BAAI/bge-small-en-v1.5"
-    embedding_dim: int = 384
+    #: The env var is EMBEDDING_DIMENSION per CLAUDE.md 13; the Python attribute stays
+    #: `embedding_dim` because existing consumers (app/rag/embeddings.py) read it by
+    #: that name and are out of this phase's scope to rename.
+    embedding_dim: int = Field(
+        default=384, ge=1, validation_alias="EMBEDDING_DIMENSION"
+    )
 
     chunk_size: int = 1000
     chunk_overlap: int = 150
@@ -117,6 +147,30 @@ class Settings(BaseSettings):
     retrieval_max_distance: float = 0.75
     #: Ceiling on context assembled into one prompt, in characters.
     retrieval_max_context_chars: int = 12_000
+
+    # --- Retrieval tuning (CLAUDE.md 8, 13) ---
+
+    #: Hybrid-retrieval candidates merged by RRF and fed to the reranker (pre-rerank
+    #: cap, ~15). Must be >= retrieval_final_count; enforced by a model validator below.
+    retrieval_candidate_count: int = Field(default=15, ge=1)
+    #: Chunks actually passed to the LLM after reranking (post-rerank cap, 5–8).
+    retrieval_final_count: int = Field(default=8, ge=1)
+    #: Layer-1 grounding threshold (CLAUDE.md 8.3): if the top reranked chunk scores
+    #: below this, the LLM is never called and the question is refused honestly.
+    retrieval_relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+
+    # --- Reranker (CLAUDE.md 2) ---
+
+    #: Local cross-encoder, run via sentence-transformers. Pinned like the embedding
+    #: model: changing it changes the score scale the grounding threshold was tuned on.
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # --- Uploads (CLAUDE.md 6) ---
+
+    #: Per-file ceiling in MB, enforced from Content-Length before the file is read
+    #: into memory. (The legacy `max_upload_bytes` above still guards the current
+    #: upload module; the Phase 3 endpoint will use this one.)
+    max_upload_size_mb: int = Field(default=10, ge=1)
 
     #: Failover order, tried left to right. Groq leads: it is the faster of the two at
     #: this size and its free tier is the more generous, so Gemini is held in reserve for
@@ -185,6 +239,16 @@ class Settings(BaseSettings):
     #: How long a fetched signing key is trusted before it is re-fetched. Rotation is
     #: expected, so an unbounded cache would eventually reject every live token.
     jwks_cache_seconds: int = 600
+
+    @model_validator(mode="after")
+    def _retrieval_counts_are_consistent(self) -> "Settings":
+        """The pre-rerank candidate pool must be at least as large as the final set."""
+        if self.retrieval_candidate_count < self.retrieval_final_count:
+            raise ValueError(
+                "RETRIEVAL_CANDIDATE_COUNT must be >= RETRIEVAL_FINAL_COUNT "
+                f"(got {self.retrieval_candidate_count} < {self.retrieval_final_count})."
+            )
+        return self
 
     @property
     def jwks_url(self) -> str:
@@ -273,8 +337,12 @@ def _format_validation_error(exc: ValidationError) -> str:
         env_var = field.upper()
         if error["type"] == "missing":
             lines.append(f"  {env_var} is required but not set.")
-        else:
+        elif env_var:
             lines.append(f"  {env_var}: {error['msg']}")
+        else:
+            # A model-level error (e.g. the retrieval-count relationship) has no field
+            # location, so its message must stand alone.
+            lines.append(f"  {error['msg']}")
     lines.extend(["", _ENV_EXAMPLE_HINT, "=" * 72, ""])
     return "\n".join(lines)
 

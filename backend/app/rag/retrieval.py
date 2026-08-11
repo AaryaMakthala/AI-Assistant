@@ -19,7 +19,7 @@ from sqlalchemy import Float, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import Document, DocumentChunk
+from app.db.legacy_models import Document, DocumentChunk
 from app.rag.embeddings import embed_query
 
 

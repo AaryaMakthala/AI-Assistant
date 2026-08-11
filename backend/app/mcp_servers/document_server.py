@@ -30,7 +30,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 
-from app.db.models import Document, DocumentChunk
+from app.db.legacy_models import Document, DocumentChunk
 from app.mcp_servers.errors import internal_error, refusal
 from app.mcp_servers.identity import current_org_and_user
 from app.rag.retrieval import retrieve_chunks

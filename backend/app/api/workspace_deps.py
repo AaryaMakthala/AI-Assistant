@@ -10,7 +10,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 
-from app.db.models import WorkspaceMember
+from app.db.legacy_models import WorkspaceMember
 from app.security.auth import Principal, get_principal
 from app.security.rls import tenant_session
 

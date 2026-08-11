@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.api.documents import DocumentStatusResponse
-from app.db.models import DOCUMENT_STATUSES, TERMINAL_DOCUMENT_STATUSES
+from app.db.legacy_models import DOCUMENT_STATUSES, TERMINAL_DOCUMENT_STATUSES
 
 pytestmark = pytest.mark.usefixtures("valid_env")
 

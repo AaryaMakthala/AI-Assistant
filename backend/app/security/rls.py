@@ -9,6 +9,9 @@ providers hand out an administrative login role — Supabase's `postgres` has BY
 and such a role ignores every policy, FORCE included. So each tenant transaction also
 drops into `app_tenant`, which is NOBYPASSRLS. Setting claims without switching roles
 would produce a session that looks correctly scoped and is not scoped at all.
+
+Phase 2 change: scoped by ``workspace_id`` instead of ``org_id``, matching the Phase 1C
+canonical RLS policies (migration 0008).
 """
 
 import json
@@ -21,8 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session_factory
 
-# Matches Supabase's own claim setting, so the policies defined in the migration behave
-# identically whether a query arrives through this backend or Supabase's REST layer.
+# Matches the Phase 1C RLS policies, which read workspace_id from the JWT claims JSON.
 _CLAIMS_SETTING = "request.jwt.claims"
 
 # set_config(..., is_local => true) scopes the claims to the current transaction, so a
@@ -42,30 +44,27 @@ async def use_tenant_role(session: AsyncSession) -> None:
 async def set_tenant_claims(
     session: AsyncSession,
     *,
-    org_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     user_id: uuid.UUID | None = None,
-    role: str | None = None,
     svc: str | None = None,
 ) -> None:
     """Bind the caller's identity to the session's current transaction.
 
-    `user_id` may be omitted for background work that acts on behalf of an organization
-    rather than a person (document ingestion). Org-scoped policies still apply; the
+    `user_id` may be omitted for background work that acts on behalf of a workspace
+    rather than a person (document ingestion). Workspace-scoped policies still apply; the
     user-scoped ones (chat) then match nothing, which is the correct outcome — a worker
     has no business reading anyone's chat history.
 
     `svc` names a background service instead of a person, for the one case where omitting
-    `user_id` is not enough: since migration 0007 the document policies are scoped by
-    uploader, so a NULL `user_id` matches no branch and ingestion could neither read a
+    `user_id` is not enough: since the Phase 1C migration the document policies are scoped
+    by uploader, so a NULL `user_id` matches no branch and ingestion could neither read a
     personal document nor record its status. A user's token can never produce this claim —
     the dict below is built from typed parameters, and `principal_from_claims` reads only
-    `sub`, `org_id`, `org_role` and `email`.
+    `sub`, `workspace_id` and `email`.
     """
-    claims: dict[str, str] = {"org_id": str(org_id)}
+    claims: dict[str, str] = {"workspace_id": str(workspace_id)}
     if user_id is not None:
         claims["sub"] = str(user_id)
-    if role is not None:
-        claims["role"] = role
     if svc is not None:
         claims["svc"] = svc
     await session.execute(_SET_CLAIMS, {"claims": json.dumps(claims)})
@@ -74,17 +73,16 @@ async def set_tenant_claims(
 @asynccontextmanager
 async def tenant_session(
     *,
-    org_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     user_id: uuid.UUID | None = None,
-    role: str | None = None,
     svc: str | None = None,
 ) -> AsyncIterator[AsyncSession]:
-    """A session whose queries are already constrained to one user and org."""
+    """A session whose queries are already constrained to one workspace and user."""
     async with get_session_factory()() as session:
         await session.begin()
         # Order matters: claims are set while still privileged, because app_tenant is
         # granted with INHERIT FALSE and need not hold rights on the config function.
-        await set_tenant_claims(session, org_id=org_id, user_id=user_id, role=role, svc=svc)
+        await set_tenant_claims(session, workspace_id=workspace_id, user_id=user_id, svc=svc)
         await use_tenant_role(session)
         try:
             yield session

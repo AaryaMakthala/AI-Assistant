@@ -1,9 +1,9 @@
 """JWT verification and the request principal (CLAUDE.md 4.6).
 
-`org_id` and `user_id` are derived from a verified token and nowhere else. A client that
-sends its own org_id in a body or query string is ignored — that value is a request, not
-a fact. The same claims are then handed to Postgres for RLS, so the API check and the
-database check agree on who is asking.
+`user_id` and `workspace_id` are derived from a verified token and nowhere else. A client
+that sends its own workspace_id in a body or query string is ignored — that value is a
+request, not a fact. The same claims are then handed to Postgres for RLS, so the API check
+and the database check agree on who is asking.
 
 Two signing schemes are accepted. Supabase now signs session tokens with rotatable
 asymmetric keys (ES256/RS256) published at the project's JWKS endpoint; older projects
@@ -11,6 +11,11 @@ sign with a shared HS256 secret. The algorithm is chosen from the token's own he
 after the corresponding key has been located, never by trusting the header outright — that
 is what stops the classic confusion attack where a token declares `alg: HS256` and is
 verified against a public key that the attacker also holds.
+
+Phase 2 change: `Principal` carries `workspace_id` (from the auth-trigger-issued claim),
+not `org_id`. The workspace *role* (OWNER/MEMBER) is NOT extracted from the JWT — it is
+looked up from the canonical `members` table at each request, so the database remains the
+sole source of truth for authorization (CLAUDE.md section 4).
 """
 
 from __future__ import annotations
@@ -93,11 +98,16 @@ def reset_jwks_cache() -> None:
 
 @dataclass(frozen=True)
 class Principal:
-    """The authenticated caller. Every org-scoped query is built from these values."""
+    """The authenticated caller.
+
+    ``workspace_id`` is the default workspace from the JWT claim (set by the
+    Phase 1C auth provisioning trigger). It is the scope for RLS queries.
+    The workspace *role* is NOT stored here — it is looked up from the ``members``
+    table at each workspace-scoped request, so revocation is immediate.
+    """
 
     user_id: uuid.UUID
-    org_id: uuid.UUID
-    role: str
+    workspace_id: uuid.UUID
     email: str | None = None
 
 
@@ -118,16 +128,15 @@ def principal_from_claims(claims: dict[str, Any]) -> Principal:
     """Build a Principal from verified claims, rejecting anything malformed."""
     try:
         user_id = uuid.UUID(str(claims["sub"]))
-        org_id = uuid.UUID(str(_claim(claims, "org_id")))
+        workspace_id = uuid.UUID(str(_claim(claims, "workspace_id")))
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Token is missing a valid user or organization claim.",
+            detail="Token is missing a valid user or workspace claim.",
         ) from exc
 
-    role = _claim(claims, "org_role") or "member"
     email = claims.get("email")
-    return Principal(user_id=user_id, org_id=org_id, role=str(role), email=email)
+    return Principal(user_id=user_id, workspace_id=workspace_id, email=email)
 
 
 def _resolve_key(token: str, algorithm: str) -> Any:
@@ -190,7 +199,7 @@ async def get_principal(
     # Tag this request's error reports and traces with who made it — after verification, so
     # the tags reflect claims the server checked rather than ones the client asserted. Only
     # opaque ids travel; see app/observability/context.py.
-    bind_principal(user_id=principal.user_id, org_id=principal.org_id, role=principal.role)
+    bind_principal(user_id=principal.user_id, workspace_id=principal.workspace_id)
     return principal
 
 

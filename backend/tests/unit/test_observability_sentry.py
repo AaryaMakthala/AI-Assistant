@@ -132,15 +132,14 @@ def test_request_id_is_attached_as_a_tag(sentry_on: list[dict[str, Any]]) -> Non
 
 def test_principal_is_attached_as_opaque_ids(sentry_on: list[dict[str, Any]]) -> None:
     user_id = uuid.uuid4()
-    org_id = uuid.uuid4()
-    bind_principal(user_id=user_id, org_id=org_id, role="admin")
+    workspace_id = uuid.uuid4()
+    bind_principal(user_id=user_id, workspace_id=workspace_id)
     capture_exception(RuntimeError("boom"))
     sentry_sdk.flush()
 
     event = sentry_on[0]
     assert event["user"] == {"id": str(user_id)}
-    assert event["tags"]["org_id"] == str(org_id)
-    assert event["tags"]["org_role"] == "admin"
+    assert event["tags"]["workspace_id"] == str(workspace_id)
 
 
 def test_capture_exception_accepts_extra_tags(sentry_on: list[dict[str, Any]]) -> None:
@@ -177,12 +176,11 @@ def test_capture_exception_never_raises(
 
 
 def test_observability_tags_reflect_the_bound_principal(valid_env: None) -> None:
-    org_id = uuid.uuid4()
-    bind_principal(user_id=uuid.uuid4(), org_id=org_id, role="member")
+    workspace_id = uuid.uuid4()
+    bind_principal(user_id=uuid.uuid4(), workspace_id=workspace_id)
     try:
         tags = observability_tags()
-        assert tags["org_id"] == str(org_id)
-        assert tags["org_role"] == "member"
+        assert tags["workspace_id"] == str(workspace_id)
     finally:
         clear_observability_context()
 
@@ -192,16 +190,16 @@ def test_observability_tags_omit_unset_values(valid_env: None) -> None:
     tags = observability_tags()
 
     assert "user_id" not in tags
-    assert "org_id" not in tags
+    assert "workspace_id" not in tags
     # "-" is the log format's placeholder for "no request", and is not a real id.
     assert tags.get("request_id") != "-"
 
 
 def test_clear_forgets_the_principal(valid_env: None) -> None:
-    bind_principal(user_id=uuid.uuid4(), org_id=uuid.uuid4(), role="owner")
+    bind_principal(user_id=uuid.uuid4(), workspace_id=uuid.uuid4())
     clear_observability_context()
 
-    assert "org_id" not in observability_tags()
+    assert "workspace_id" not in observability_tags()
 
 
 def test_missing_sdk_disables_reporting_rather_than_crashing(

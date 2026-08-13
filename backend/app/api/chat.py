@@ -227,7 +227,7 @@ async def _persist_turn(
     truncated answer as finished.
     """
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         rows: list[dict[str, Any]] = [
             {
@@ -523,7 +523,7 @@ async def chat(
     # starts. Retrieval now happens inside the RAG sub-agent — under its own org-scoped
     # session — so no connection is held across the multi-second run.
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         session_id = await _ensure_session(
             session,
@@ -554,7 +554,7 @@ async def chat(
                 session=session_id,
             )
             async with tenant_session(
-                org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+                workspace_id=principal.workspace_id, user_id=principal.user_id
             ) as session:
                 history = await _load_history(
                     session, session_id=session_id, limit=settings.chat_history_limit
@@ -593,7 +593,7 @@ async def list_sessions(
         await assert_workspace_role(workspace_id, principal)
 
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         stmt = (
             select(ChatSession).order_by(desc(ChatSession.updated_at)).limit(limit).offset(offset)
@@ -616,7 +616,7 @@ async def list_messages(
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> ChatMessageListResponse:
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         owns = (
             await session.execute(select(ChatSession.id).where(ChatSession.id == session_id))
@@ -649,7 +649,7 @@ async def list_messages(
 async def delete_session(principal: CurrentPrincipal, session_id: uuid.UUID) -> None:
     """Remove a conversation and, by cascade, its messages."""
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         # RLS confines this to the caller's own sessions, so the rowcount doubles as the
         # existence check — no separate SELECT that another request could race against.
@@ -679,7 +679,7 @@ async def rename_session(
 ) -> ChatSessionResponse:
     """Update the title of an existing conversation."""
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         updated = (
             await session.execute(

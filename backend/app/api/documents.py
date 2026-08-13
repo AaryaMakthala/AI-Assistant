@@ -174,12 +174,14 @@ async def upload_document(
         # A rejected upload is a client error worth surfacing precisely — the user needs
         # to know whether the file was too big or simply the wrong type.
         logger.info(
-            "Upload rejected for org {org}: {reason}", org=principal.org_id, reason=exc.message
+            "Upload rejected for workspace {workspace}: {reason}",
+            workspace=principal.workspace_id,
+            reason=exc.message,
         )
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         row = (
             await session.execute(
@@ -221,7 +223,7 @@ async def upload_document(
         # this write costs a revoke, not correctness, so it must not fail the upload.
         try:
             async with tenant_session(
-                org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+                workspace_id=principal.workspace_id, user_id=principal.user_id
             ) as session:
                 await session.execute(
                     update(Document)
@@ -262,7 +264,7 @@ async def list_documents(
         await assert_workspace_role(workspace_id, principal)
 
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         stmt = select(Document).order_by(Document.created_at.desc())
         count_stmt = select(func.count()).select_from(Document)
@@ -289,7 +291,7 @@ async def list_documents(
 @router.get("/{document_id}", response_model=DocumentResponse, summary="Document detail")
 async def get_document(principal: CurrentPrincipal, document_id: uuid.UUID) -> DocumentResponse:
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         row = (
             await session.execute(select(Document).where(Document.id == document_id))
@@ -312,7 +314,7 @@ async def get_document_status(
 ) -> DocumentStatusResponse:
     """The polling endpoint. Cheap by design — one indexed lookup, no joins."""
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         row = (
             await session.execute(select(Document).where(Document.id == document_id))
@@ -370,7 +372,7 @@ async def delete_document(principal: CurrentPrincipal, document_id: uuid.UUID) -
     rather than what the database returns.
     """
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         # SELECT then DELETE in one transaction: the storage key is needed after the row is
         # gone, and RLS constrains both statements, so this cannot read another org's key.
@@ -404,9 +406,9 @@ async def delete_document(principal: CurrentPrincipal, document_id: uuid.UUID) -
 
     _unlink_stored_file(storage_key, document_id)
     logger.info(
-        "Deleted document {doc} for org {org} at the request of user {user}",
+        "Deleted document {doc} for workspace {workspace} at the request of user {user}",
         doc=document_id,
-        org=principal.org_id,
+        workspace=principal.workspace_id,
         user=principal.user_id,
     )
 
@@ -433,7 +435,7 @@ async def update_document_visibility(
     `uploaded_by`, so promoting a colleague's file never reassigns authorship.
     """
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         row = (
             await session.execute(
@@ -448,10 +450,11 @@ async def update_document_visibility(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
 
     logger.info(
-        "Set document {doc} visibility to {vis} for org {org} at the request of user {user}",
+        "Set document {doc} visibility to {vis} for workspace {workspace} "
+        "at the request of user {user}",
         doc=document_id,
         vis=body.visibility,
-        org=principal.org_id,
+        workspace=principal.workspace_id,
         user=principal.user_id,
     )
     return DocumentResponse.model_validate(row)
@@ -509,7 +512,7 @@ async def reprocess_document(
     race the first one's chunk delete-and-insert.
     """
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         row = (
             await session.execute(select(Document).where(Document.id == document_id))
@@ -544,7 +547,7 @@ async def reprocess_document(
         ) from exc
 
     async with tenant_session(
-        org_id=principal.org_id, user_id=principal.user_id, role=principal.role
+        workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
         await session.execute(
             update(Document)

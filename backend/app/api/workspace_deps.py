@@ -1,4 +1,18 @@
-"""Workspace-specific FastAPI dependencies for Phase 12."""
+"""Workspace-specific FastAPI dependencies (Phase 2).
+
+Workspace authorization is database-driven: the ``members`` table is the source of truth
+for whether a user belongs to a workspace and what role they hold. The JWT only provides
+the user's identity (``sub``) and default workspace (``workspace_id``); the *role* is
+never extracted from the token.
+
+Two authorization levels exist (CLAUDE.md section 4):
+* **OWNER**: full workspace control — approve documents, manage members, invite users.
+* **MEMBER**: read, upload (pending), chat — the default for invited users.
+
+Workspace isolation: a user requesting ``/workspaces/{workspace_id}/...`` must have an
+``ACTIVE`` membership row in that workspace. If not, the request is rejected with 404
+(to prevent workspace ID enumeration).
+"""
 
 from __future__ import annotations
 
@@ -10,7 +24,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 
-from app.db.legacy_models import WorkspaceMember
+from app.db.models import Member
 from app.security.auth import Principal, get_principal
 from app.security.rls import tenant_session
 
@@ -22,23 +36,23 @@ class WorkspaceContext:
     workspace_id: uuid.UUID
     workspace_role: str
     principal: Principal
-    org_id: uuid.UUID
 
 
-async def get_workspace_member(workspace_id: uuid.UUID, principal: Principal) -> WorkspaceMember:
-    """Fetch the caller's membership record for a workspace, or 404 if not found.
+async def get_workspace_member(workspace_id: uuid.UUID, principal: Principal) -> Member:
+    """Fetch the caller's ACTIVE membership record for a workspace, or 404 if not found.
 
-    Uses a tenant session to ensure data isolation. A missing record returns 404
+    Uses a tenant session scoped to the *requested* workspace — not the principal's
+    default workspace — so RLS enforces isolation. A missing record returns 404
     rather than 403 to prevent workspace ID enumeration.
     """
     async with tenant_session(
-        org_id=principal.org_id,
+        workspace_id=workspace_id,
         user_id=principal.user_id,
-        role=principal.role,
     ) as session:
-        stmt = select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == workspace_id,
-            WorkspaceMember.user_id == principal.user_id,
+        stmt = select(Member).where(
+            Member.workspace_id == workspace_id,
+            Member.user_id == principal.user_id,
+            Member.status == "ACTIVE",
         )
         result = await session.execute(stmt)
         member = result.scalar_one_or_none()
@@ -72,9 +86,8 @@ async def assert_workspace_role(
 def require_workspace_role(*allowed: str) -> Callable[..., Awaitable[WorkspaceContext]]:
     """Dependency factory admitting only the listed workspace roles.
 
-    Like `require_role`, but checks the caller's role within a specific workspace
-    rather than their org-level role. The workspace_id is automatically extracted
-    from the path parameters by FastAPI.
+    The workspace_id is automatically extracted from the path parameters by FastAPI.
+    Role is looked up from the canonical ``members`` table — never from the JWT.
     """
     permitted = frozenset(allowed)
 
@@ -94,25 +107,18 @@ def require_workspace_role(*allowed: str) -> Callable[..., Awaitable[WorkspaceCo
             workspace_id=workspace_id,
             workspace_role=member.role,
             principal=principal,
-            org_id=principal.org_id,
         )
 
     return dependency
 
 
-WorkspaceOwner = Annotated[WorkspaceContext, Depends(require_workspace_role("owner"))]
-WorkspaceAdmin = Annotated[WorkspaceContext, Depends(require_workspace_role("owner", "admin"))]
-WorkspaceEditor = Annotated[
-    WorkspaceContext, Depends(require_workspace_role("owner", "admin", "editor"))
-]
-WorkspaceMemberAny = Annotated[
-    WorkspaceContext, Depends(require_workspace_role("owner", "admin", "editor", "viewer"))
-]
+#: OWNER only — full workspace control (approve, invite, manage).
+WorkspaceOwner = Annotated[WorkspaceContext, Depends(require_workspace_role("OWNER"))]
+#: Any ACTIVE membership — read, upload, chat.
+WorkspaceMemberAny = Annotated[WorkspaceContext, Depends(require_workspace_role("OWNER", "MEMBER"))]
 
 __all__ = [
-    "WorkspaceAdmin",
     "WorkspaceContext",
-    "WorkspaceEditor",
     "WorkspaceMemberAny",
     "WorkspaceOwner",
     "assert_workspace_role",

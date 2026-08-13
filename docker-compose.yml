@@ -13,6 +13,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Dev/CI only: creates the Supabase-managed pieces (auth schema, auth.users,
+      # anon/authenticated roles) the canonical schema needs on a plain Postgres.
+      # Runs only when the volume is first initialized; apply manually to an existing
+      # volume via `psql -f backend/scripts/dev_auth_schema.sql`.
+      - ./backend/scripts/dev_auth_schema.sql:/docker-entrypoint-initdb.d/10-dev-auth.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app}"]
       interval: 5s

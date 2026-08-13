@@ -34,7 +34,8 @@ def _auth_header() -> dict[str, str]:
     payload = {
         "aud": JWT_AUDIENCE,
         "sub": str(uuid.uuid4()),
-        "org_id": str(uuid.uuid4()),
+        # Phase 2: the Principal requires a workspace_id claim (CLAUDE.md section 4).
+        "workspace_id": str(uuid.uuid4()),
         "exp": datetime.now(UTC) + timedelta(hours=1),
     }
     token = jwt.encode(payload, get_settings().jwt_secret.get_secret_value(), algorithm="HS256")

@@ -109,8 +109,10 @@ Reranking
   quota for no real benefit at this scale.
 
 Deployment
-  Docker Compose locally (app + Postgres only). Vercel (frontend) + Railway/Render free
-  tier (backend) + Supabase (database) for a hosted demo.
+  Vercel (frontend) + Railway/Render free tier (backend) + Supabase (database) for a
+  hosted demo. Local development runs the backend directly (uvicorn) against a local
+  Postgres — see the Infrastructure Constraint below: Docker is NOT used by this
+  project, and the Phase 0 docker-compose.yml is legacy and unused.
 ```
 
 **Explicitly excluded, and why it stays excluded:** Redis, Celery, Kafka, RabbitMQ,
@@ -130,7 +132,7 @@ knowledge-assistant/
 ├── CLAUDE.md
 ├── .env.example
 ├── .gitignore
-├── docker-compose.yml           # app + postgres only
+├── docker-compose.yml           # LEGACY / unused — this project does not use Docker (see Infrastructure Constraint)
 ├── backend/
 │   ├── pyproject.toml
 │   ├── app/
@@ -414,10 +416,19 @@ current pronoun.
 
 ## 9. Phased Build Plan
 
+**Phase status:**
+
+```
+Phase 2 — Auth & Multi-Tenant Workspaces: COMPLETE
+Phase 3 — Document Upload & Synchronous Ingestion: COMPLETE
+Phase 4 — Document Approval & Processing Lifecycle: COMPLETE
+```
+
 ### Phase 0 — Scaffolding
-FastAPI `/health`, Next.js blank app, docker-compose (app + postgres only),
-`.env.example`, `.gitignore`.
-Verify: `docker compose up` starts postgres; `GET /health` returns 200.
+FastAPI `/health`, Next.js blank app, `.env.example`, `.gitignore`.
+Verify: `GET /health` returns 200.
+(Original Phase 0 used docker-compose; that part is superseded by the
+Infrastructure Constraint — no Docker — and is not part of the accepted architecture.)
 
 ### Phase 1 — Database & Config
 `config.py` (Pydantic BaseSettings, Section 13), async SQLAlchemy engine, Alembic, all
@@ -438,12 +449,134 @@ storage. Owner upload → `READY`. Member upload → `PENDING`, not ingested.
 Verify: owner upload produces chunks with correct `workspace_id`, correct embedding
 dimension; member upload leaves `document_chunks` empty for that document.
 
+### Phase 3 Architecture (implemented)
+
+Phase 3 is **synchronous ingestion** — the section 11 rejection of Redis/Celery is
+architectural, not aspirational. The upload request itself performs extraction →
+chunking → embedding (the CPU-bound model work runs in a worker thread via
+`asyncio.to_thread` so the event loop stays responsive), then persists the document
+**and** its chunks in one transaction. There is no queue, no worker process, no broker:
+```
+Authenticated user (JWT) → workspace membership + role (members table)
+    → file validation (type allowlist + content sniff, size cap, sha256)
+    → owner: extract → normalize → chunk → embed (inline)
+        → insert document READY + insert chunks, one transaction
+    → member: insert document PENDING only (no chunks, not ingested)
+    → ingestion failure: insert document FAILED with error_message (zero chunks)
+```
+
+Key implementation points (see `backend/app/api/documents_v2.py`,
+`backend/app/ingestion/pipeline.py`):
+
+- **Workspace isolation.** The workspace is the caller's default workspace from the
+  verified JWT claim (Phase 2); membership and role are resolved from the canonical
+  `members` table at request time — never from the token. Every query filters on
+  `workspace_id` explicitly on top of RLS (which is itself workspace-scoped,
+  migration 0008). Cross-workspace reads return 404, not 403, so document IDs cannot
+  be enumerated.
+- **RLS ordering (migration 0008).** The `document_chunks_write` policy only permits
+  chunk writes for a **READY** document, evaluated with same-transaction visibility.
+  The owner-upload transaction therefore inserts the document with `status = READY`
+  *before* the chunk inserts — never after. A member upload never writes chunks at
+  all: the policies structurally forbid it, which is what keeps the section 5
+  invariant (non-READY documents have zero chunks) a database guarantee rather than
+  a code discipline.
+- **Transaction boundary (section 7).** Document row + chunks commit atomically.
+  A failure during extraction/embedding inserts the document as `FAILED` with a
+  user-safe `error_message` and zero chunks. There is no `PROCESSING` status — the
+  canonical status set is exactly `PENDING`, `READY`, `REJECTED`, `FAILED`, and this
+  phase never writes a value outside it.
+- **Storage.** Raw bytes live in `documents.file_data` (BYTEA). The client filename
+  is sanitized for display and never becomes a filesystem path; the bytes are stored
+  under the row's UUID. `MAX_UPLOAD_SIZE_MB` is enforced from `Content-Length` before
+  the body is read, then re-checked on the actual byte count.
+- **Deduplication.** SHA-256 checksum + `UNIQUE (workspace_id, checksum)` (migration
+  0008) — a second identical upload within the same workspace is rejected with 409.
+  Deduplication is deliberately per-workspace: tenant boundaries matter more than
+  saving embeddings.
+- **Idempotency.** A new upload always creates a new document row (a retry after a
+  crash re-uploads; the checksum guard prevents duplicates). Chunk inserts are
+  bounded by `UNIQUE (document_id, chunk_index)`.
+- **Extraction.** PDF → PyMuPDF (page numbers preserved), DOCX → python-docx
+  (paragraphs + tables), CSV → pandas-style parsing (header repeated per page block
+  so each chunk stands alone). `extract_pages` accepts raw bytes and stages a
+  temp file internally; extraction is separate from the API routes
+  (`app/rag/extraction.py`, `app/rag/chunking.py`, `app/rag/embeddings.py`).
+- **Config.** All tuning values come from `config.py` / `.env` — chunk size, chunk
+  overlap, embedding model, embedding dimension, upload cap. No hardcoded values.
+- **Not in this phase (deliberately).** Approval/rejection endpoints (Phase 4),
+  retrieval/reranking (Phase 5), chat (Phase 6), frontend (Phase 7). A member's
+  `PENDING` upload is stored but not ingestible until Phase 4 lands.
+
+**Phase 3 COMPLETE**
+- Upload API with workspace authorization (membership + role from the `members` table)
+- File validation (type allowlist + content sniff, size cap before read, SHA-256 checksum)
+- BYTEA storage in PostgreSQL — the database is the source of truth
+- Owner uploads: synchronous ingestion (extract → chunk → embed) → READY with chunks, one transaction
+- Member uploads: stored PENDING with no chunks, structurally unsearchable until Phase 4 approval
+- Ingestion failures → FAILED with a safe error_message, zero chunks (section 7 invariant)
+- Text extraction (PyMuPDF / python-docx / CSV) with page metadata preserved
+- Text normalization, chunking with RecursiveCharacterTextSplitter, local embedding (bge-small-en-v1.5, 384-dim)
+- Workspace isolation enforced via workspace_id on every query, on top of RLS
+
 ### Phase 4 — Approval Flow
 Owner's pending queue, approve (→ ingest → `READY`, atomic per Section 7) / reject
 (→ `REJECTED`, never ingested) endpoints, restricted to OWNER role server-side.
 Verify: a member calling the approve endpoint gets 403; approving produces chunks
 identical in shape to an owner upload; a `FAILED` ingestion leaves zero chunks and a
 persisted error message.
+
+### Phase 4 Architecture (implemented)
+
+The approval lifecycle is two OWNER-only endpoints on the Phase 3 router
+(`backend/app/api/documents_v2.py`): `POST /documents/{id}/approve` and
+`POST /documents/{id}/reject`. The pending queue is the existing
+`GET /documents?status=PENDING` list, whose RLS-scoped rows show the owner every
+pending upload in the workspace.
+
+```
+MEMBER upload → PENDING (Phase 3, no chunks)
+    │
+    ▼
+OWNER reviews (GET /documents?status=PENDING)
+    ├── approve → extract → chunk → embed (inline, Phase 3 pipeline)
+    │       ├── success → status READY + chunks, ONE transaction
+    │       └── failure → status FAILED + error_message, zero chunks
+    └── reject  → status REJECTED (never ingested, permanent)
+```
+
+- **Authorization.** Both endpoints call `assert_workspace_role(ws, principal,
+  "OWNER")` — a member gets 403 before any document lookup, matching section 4's
+  role model. Role comes from the `members` table at request time, never the token.
+- **State machine.** The only legal transition is `PENDING → READY/REJECTED/FAILED`.
+  `READY`, `REJECTED` and `FAILED` are terminal: re-approving or re-rejecting
+  returns 409, and the canonical status set (section 7 CHECK constraint) has no
+  "APPROVED" or "PROCESSING" state to leak through.
+- **Reuse, not duplication.** Approve calls the exact Phase 3
+  `prepare_document()` (extract → normalize → chunk → embed) in a worker thread;
+  an approved member upload produces chunks identical in shape to an owner upload.
+  No second ingestion path exists.
+- **Atomicity (section 7).** Approve flips `status = READY` *before* inserting
+  chunks in the same transaction — the `document_chunks_write` policy (migration
+  0008) requires a READY document with same-transaction visibility, the same
+  ordering Phase 3's owner upload uses. Ingestion failure updates the row to
+  `FAILED` with a user-safe `error_message` and zero chunks; the section 5
+  invariant (non-READY documents have zero chunks) holds as a database guarantee.
+- **Idempotency.** The transition is guarded with
+  `UPDATE ... WHERE status = 'PENDING'` inside the transaction: a concurrent or
+  repeated approve/reject returns 409 and writes nothing, so double-clicks cannot
+  duplicate chunks (`UNIQUE (document_id, chunk_index)` is the second line of
+  defense).
+- **Isolation.** Document resolution is workspace-scoped (explicit
+  `workspace_id` filter + RLS), and 404 is returned for anything not visible so
+  cross-workspace IDs stay non-enumerable — identical to the Phase 3 endpoints.
+
+**Phase 4 COMPLETE**
+- `POST /documents/{id}/approve` (OWNER): PENDING → ingest inline → READY + chunks atomically; ingestion failure → FAILED with persisted error
+- `POST /documents/{id}/reject` (OWNER): PENDING → REJECTED, never ingested
+- Pending queue via `GET /documents?status=PENDING` (RLS-scoped)
+- No schema change required: `approved_at` and the RLS policies needed for the
+  OWNER status flip already exist (migration 0008)
 
 ### Phase 5 — Hybrid Retrieval + Reranking
 pgvector search, full-text search, RRF merge (Section 8.1), local cross-encoder
@@ -466,8 +599,9 @@ member uploads, sees it pending, owner approves, member can now get an answer so
 from it.
 
 ### Phase 8 — Deploy
-Dockerfiles, deploy backend to Railway/Render free tier, frontend to Vercel, Supabase
-free tier for the database, secrets via each platform's secret manager.
+Deploy backend to Railway/Render free tier, frontend to Vercel, Supabase free tier for
+the database, secrets via each platform's secret manager — no Dockerfiles
+(Infrastructure Constraint).
 Verify: fresh clone + documented setup produces a working deployed system on entirely
 free infrastructure.
 
@@ -501,6 +635,21 @@ Assume limited hardware and API quota throughout:
 - No LLM fallback chain. One provider, one model, configured through env vars. If the
   free tier rate-limits, that's a documented limitation (Section 14 risk register), not
   a reason to add a second provider.
+
+---
+
+## Infrastructure Constraint — No Docker
+
+Docker is NOT used by this project.
+
+Docker Desktop is NOT required.
+
+Do not introduce Dockerfiles, docker-compose,
+containerized services, or Docker-dependent workflows.
+
+All development and application functionality must
+remain runnable without Docker unless explicitly
+approved by the project owner.
 
 ---
 

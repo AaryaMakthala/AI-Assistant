@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
+import tempfile
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -261,8 +263,11 @@ _EXTRACTORS = {
 }
 
 
-def extract_pages(path: Path, *, extension: str) -> list[ExtractedPage]:
+def extract_pages(source: Path | bytes, *, extension: str) -> list[ExtractedPage]:
     """Extract and normalize text from a stored upload, dispatching on its extension.
+
+    ``source`` may be a file path or raw bytes. When bytes are provided, a temporary
+    file is written so the existing extractors (which expect a Path) continue to work.
 
     The extension comes from the allowlist check at upload time, never from the
     filename at this point — by here the file is named after a UUID.
@@ -274,17 +279,38 @@ def extract_pages(path: Path, *, extension: str) -> list[ExtractedPage]:
     extractor = _EXTRACTORS.get(extension)
     if extractor is None:
         raise ExtractionError(f"No extractor is registered for '{extension}' files.")
-    if not path.exists():
-        raise ExtractionError("Stored file is missing.")
 
-    pages = [
-        ExtractedPage(page=page.page, text=normalized, label=page.label)
-        for page in extractor(path)
-        if (normalized := normalize_text(page.text))
-    ]
-    if not pages:
-        raise ExtractionError("No readable text was found in this document.")
-    return pages
+    tmp_path: Path | None = None
+    try:
+        if isinstance(source, bytes):
+            if not source:
+                raise ExtractionError("The uploaded file is empty.")
+            # The extractors below expect a path, so bytes are staged in a temporary
+            # file named with the canonical extension — never with a user-supplied
+            # name, so traversal is impossible by construction.
+            fd, raw_name = tempfile.mkstemp(suffix=f".{extension}")
+            os.close(fd)
+            tmp_path = Path(raw_name)
+            tmp_path.write_bytes(source)
+            path = tmp_path
+        else:
+            path = source
+
+        if not path.exists():
+            raise ExtractionError("Stored file is missing.")
+
+        pages = [
+            ExtractedPage(page=page.page, text=normalized, label=page.label)
+            for page in extractor(path)
+            if (normalized := normalize_text(page.text))
+        ]
+        if not pages:
+            raise ExtractionError("No readable text was found in this document.")
+        return pages
+    finally:
+        # A staged temporary file is ours to remove; a caller-supplied path is not.
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 __all__ = [

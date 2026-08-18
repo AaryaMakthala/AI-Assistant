@@ -1,39 +1,30 @@
 "use client";
 
 /**
- * The document library: listing, uploading, and following ingestion to completion.
+ * The document library: listing, uploading, and managing documents.
  *
- * Upload is two distinct phases and the UI has to tell them apart, because they fail
- * differently and take different amounts of time:
+ * Upload is synchronous (Phase 3) — the backend performs extraction, chunking and
+ * embedding inline. Owner uploads return READY immediately; member uploads return
+ * PENDING. There is no separate ingestion job to poll.
  *
- * 1. **Transfer** — bytes to the API. Progress is real (XHR reports it), and a failure
- *    here is the user's: wrong file type, too large, no connection.
- * 2. **Ingestion** — a Celery job that extracts, chunks and embeds. Starts after the 202
- *    and has no progress signal at all, only a status column that ends `ready` or
- *    `failed`. Showing a fake percentage for this would be a lie, so it gets an
- *    indeterminate state instead.
- *
- * Polling stops on a terminal status, when nothing is left in flight, or after
- * `MAX_POLLS` — a job wedged in `processing` must not have the browser querying it
- * forever.
+ * Owners can approve or reject PENDING member uploads (Phase 4), which triggers
+ * inline ingestion on approval.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
+  approveDocument,
   deleteDocument,
   getDocument,
   listDocuments,
-  reprocessDocument,
-  updateDocumentVisibility,
+  rejectDocument,
   uploadDocumentWithProgress,
   type DocumentSummary,
-  type DocumentVisibility,
 } from "@/lib/api";
 
-/** Extensions the backend accepts (CLAUDE.md 4.2, plus Markdown from Phase 10). Checked
- * client-side purely to fail fast with a clear message — the backend allowlist is the one
- * that actually enforces. */
+/** Extensions the backend accepts. Checked client-side purely to fail fast — the
+ * backend allowlist is the one that actually enforces. */
 export const ACCEPTED_EXTENSIONS = [
   "pdf",
   "docx",
@@ -44,14 +35,8 @@ export const ACCEPTED_EXTENSIONS = [
   "markdown",
 ] as const;
 
-/** Mirrors the backend's `max_upload_bytes`. Same reasoning: a local check saves a
- * 25 MB round trip that would only be rejected, but it is not the enforcement point. */
+/** Mirrors the backend's max upload size. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-
-const POLL_INTERVAL_MS = 2000;
-/** ~2 minutes of polling. A job still running past that is not stuck for a reason the
- * UI can help with; the user can refresh. */
-const MAX_POLLS = 60;
 
 export type UploadPhase = "transferring" | "processing" | "ready" | "failed";
 
@@ -97,8 +82,11 @@ export function useDocuments(token?: string) {
   const [error, setError] = useState<string | undefined>();
   /** Documents with a delete in flight, so their row can show it and block a second click. */
   const [deletingIds, setDeletingIds] = useState<ReadonlySet<string>>(new Set());
+  /** Documents with an approve in flight. */
+  const [approvingIds, setApprovingIds] = useState<ReadonlySet<string>>(new Set());
+  /** Documents with a reject in flight. */
+  const [rejectingIds, setRejectingIds] = useState<ReadonlySet<string>>(new Set());
 
-  const pollCountRef = useRef(0);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -131,22 +119,17 @@ export function useDocuments(token?: string) {
   }, [token]);
 
   useEffect(() => {
-    // Fetch-on-mount: `refresh` flips the loading flag before awaiting, which the rule
-    // reads as a cascading render. The cascade is the point here — one extra render to
-    // show the spinner, then one to show the rows.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 
   const upload = useCallback(
-    async (file: File, visibility: DocumentVisibility = "personal") => {
+    async (file: File) => {
       uploadCounter += 1;
       const id = `upload-${uploadCounter}`;
 
       const rejection = validateFile(file);
       if (rejection) {
-        // Surfaced as a failed upload row rather than a toast: it stays on screen next to
-        // the filename it refers to, which is what makes the reason actionable.
         setUploads((current) => [
           ...current,
           {
@@ -182,17 +165,24 @@ export function useDocuments(token?: string) {
       try {
         const accepted = await uploadDocumentWithProgress(file, {
           token,
-          visibility,
           onProgress: (fraction) => patch({ progress: fraction }),
         });
+        // Ingestion is synchronous — if the document is READY, it's done; if PENDING,
+        // it waits for owner approval. No polling needed.
+        const finalPhase: UploadPhase =
+          accepted.document.status === "READY"
+            ? "ready"
+            : accepted.document.status === "FAILED"
+              ? "failed"
+              : accepted.document.status === "PENDING"
+                ? "ready" // Show as "ready" in the upload list since the upload itself succeeded
+                : "processing";
         patch({
-          phase: "processing",
+          phase: finalPhase,
           progress: 1,
           documentId: accepted.document.id,
+          error: accepted.document.error_message ?? undefined,
         });
-        // Reset the budget: a new job deserves a full polling window even if an earlier
-        // one exhausted it.
-        pollCountRef.current = 0;
         setDocuments((current) => [accepted.document, ...current]);
       } catch (caught) {
         if ((caught as DOMException)?.name === "AbortError") return;
@@ -215,10 +205,6 @@ export function useDocuments(token?: string) {
 
   /**
    * Delete a document and everything derived from it.
-   *
-   * The row is removed from local state only after the server confirms, so a failed
-   * delete leaves the library showing what is actually still there. A 404 counts as
-   * success: the document is gone, which is what was asked for.
    */
   const remove = useCallback(
     async (documentId: string) => {
@@ -249,8 +235,6 @@ export function useDocuments(token?: string) {
 
       if (!mountedRef.current) return;
       setDocuments((current) => current.filter((row) => row.id !== documentId));
-      // Drop any upload row that was tracking it, so a deleted document does not linger
-      // in the in-flight list being polled for a status it no longer has.
       setUploads((current) =>
         current.filter((item) => item.documentId !== documentId),
       );
@@ -260,22 +244,21 @@ export function useDocuments(token?: string) {
   );
 
   /**
-   * Publish a document organization-wide, or return it to personal.
+   * Approve a pending document (owner only).
    *
-   * Owners and admins only. Local state is replaced with the row the server returns rather
-   * than patched optimistically, so a rejected change never leaves the library claiming a
-   * visibility the database does not have.
+   * PENDING → ingest inline → READY + chunks, atomically.
    */
-  const setVisibility = useCallback(
-    async (documentId: string, visibility: DocumentVisibility) => {
+  const approve = useCallback(
+    async (documentId: string) => {
       if (!token) return;
+      setApprovingIds((current) => new Set(current).add(documentId));
       try {
-        const updated = await updateDocumentVisibility(documentId, visibility, {
-          token,
-        });
+        const result = await approveDocument(documentId, { token });
         if (!mountedRef.current) return;
         setDocuments((current) =>
-          current.map((row) => (row.id === documentId ? updated : row)),
+          current.map((row) =>
+            row.id === documentId ? result.document : row,
+          ),
         );
         setError(undefined);
       } catch (caught) {
@@ -283,24 +266,38 @@ export function useDocuments(token?: string) {
           setError(
             caught instanceof ApiError
               ? caught.message
-              : "The document's visibility could not be changed.",
+              : "The document could not be approved.",
           );
+        }
+      } finally {
+        if (mountedRef.current) {
+          setApprovingIds((current) => {
+            const next = new Set(current);
+            next.delete(documentId);
+            return next;
+          });
         }
       }
     },
     [token],
   );
 
-  /** Re-run ingestion for a document that failed. */
-  const reprocess = useCallback(    async (documentId: string) => {
+  /**
+   * Reject a pending document (owner only).
+   *
+   * PENDING → REJECTED, never ingested.
+   */
+  const reject = useCallback(
+    async (documentId: string) => {
       if (!token) return;
+      setRejectingIds((current) => new Set(current).add(documentId));
       try {
-        const accepted = await reprocessDocument(documentId, { token });
+        const updated = await rejectDocument(documentId, { token });
         if (!mountedRef.current) return;
-        // Reset the polling budget so the new job gets a full window.
-        pollCountRef.current = 0;
         setDocuments((current) =>
-          current.map((row) => (row.id === documentId ? accepted.document : row)),
+          current.map((row) =>
+            row.id === documentId ? updated : row,
+          ),
         );
         setError(undefined);
       } catch (caught) {
@@ -308,74 +305,49 @@ export function useDocuments(token?: string) {
           setError(
             caught instanceof ApiError
               ? caught.message
-              : "Processing could not be restarted.",
+              : "The document could not be rejected.",
           );
+        }
+      } finally {
+        if (mountedRef.current) {
+          setRejectingIds((current) => {
+            const next = new Set(current);
+            next.delete(documentId);
+            return next;
+          });
         }
       }
     },
     [token],
   );
 
-  // Follow queued and in-flight ingestion jobs to a terminal status.
-  const pending = documents.filter(
-    (document) => document.status === "pending" || document.status === "processing",
-  );
-  const pendingKey = pending.map((document) => document.id).join(",");
-
-  useEffect(() => {
-    if (!token || !pendingKey) return;
-
-    const ids = pendingKey.split(",");
-    let cancelled = false;
-
-    const timer = setInterval(async () => {
-      if (pollCountRef.current >= MAX_POLLS) {
-        clearInterval(timer);
-        return;
+  /** Re-run ingestion for a document that failed. (Not supported by the current
+   * backend — the document would need to be re-uploaded. Included for forward
+   * compatibility.) */
+  const reprocess = useCallback(
+    async (documentId: string) => {
+      // The current backend does not have a reprocess endpoint for Phase 3/4.
+      // A failed document needs to be re-uploaded.
+      if (!token) return;
+      try {
+        const doc = await getDocument(documentId, { token });
+        if (!mountedRef.current) return;
+        setDocuments((current) =>
+          current.map((row) => (row.id === documentId ? doc : row)),
+        );
+        setError(undefined);
+      } catch (caught) {
+        if (mountedRef.current) {
+          setError(
+            caught instanceof ApiError
+              ? caught.message
+              : "Could not refresh the document status.",
+          );
+        }
       }
-      pollCountRef.current += 1;
-
-      const updated = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            return await getDocument(id, { token });
-          } catch {
-            // A transient failure must not clear a row from the library — the next tick
-            // tries again, and the stale status is closer to the truth than nothing.
-            return null;
-          }
-        }),
-      );
-      if (cancelled || !mountedRef.current) return;
-
-      const byId = new Map(
-        updated.filter((row): row is DocumentSummary => row !== null).map((row) => [row.id, row]),
-      );
-      if (!byId.size) return;
-
-      setDocuments((current) => current.map((row) => byId.get(row.id) ?? row));
-      setUploads((current) =>
-        current.map((item) => {
-          const row = item.documentId ? byId.get(item.documentId) : undefined;
-          if (!row) return item;
-          if (row.status === "ready") return { ...item, phase: "ready" };
-          if (row.status === "failed") {
-            return {
-              ...item,
-              phase: "failed",
-              error: row.error_message ?? "Processing failed.",
-            };
-          }
-          return item;
-        }),
-      );
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [token, pendingKey]);
+    },
+    [token],
+  );
 
   return {
     documents,
@@ -383,12 +355,15 @@ export function useDocuments(token?: string) {
     isLoading,
     error,
     deletingIds,
+    approvingIds,
+    rejectingIds,
     refresh,
     upload,
     dismissUpload,
     remove,
+    approve,
+    reject,
     reprocess,
-    setVisibility,
     clearError: useCallback(() => setError(undefined), []),
   };
 }

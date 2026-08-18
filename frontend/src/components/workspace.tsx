@@ -4,8 +4,8 @@
  * The workspace: sidebar, chat pane, and the citations panel.
  *
  * State lives here rather than in a store — three hooks and two selections is not enough
- * to justify one, and keeping the wiring visible in a single component is what makes the
- * data flow readable.
+ * to justify one, and keeping the wiring visible in a single component is what makes
+ * the data flow readable.
  */
 
 import { LogOut, PanelRightOpen } from "lucide-react";
@@ -19,8 +19,8 @@ import { useDocuments } from "@/lib/hooks/use-documents";
 import { useSessions } from "@/lib/hooks/use-sessions";
 import { cn } from "@/lib/utils";
 
-/** Roles allowed to see org administration. Mirrors ADMIN_ROLES in the backend router. */
-const ADMIN_ROLES = ["owner", "admin"];
+/** Roles allowed to see org administration. Mirrors the backend role model. */
+const ADMIN_ROLES = ["OWNER", "owner"];
 
 export function Workspace() {
   const { token, isAuthenticated, isLoading, me, role, signOut } = useAuth();
@@ -28,6 +28,7 @@ export function Workspace() {
   const [isPanelOpen, setIsPanelOpen] = useState(false);
 
   const canManageOrg = Boolean(role && ADMIN_ROLES.includes(role));
+  const workspaceId = me?.workspace_id;
 
   const sessions = useSessions(token);
   const documents = useDocuments(token);
@@ -63,10 +64,13 @@ export function Workspace() {
         documents={documents.documents}
         uploads={documents.uploads}
         deletingDocumentIds={documents.deletingIds}
+        approvingDocumentIds={documents.approvingIds}
+        rejectingDocumentIds={documents.rejectingIds}
         isDisabled={!isAuthenticated}
         canManageOrg={canManageOrg}
         currentUserId={me?.user_id}
         token={token}
+        workspaceId={workspaceId}
         onNewChat={() => {
           chat.reset();
           setActiveChunkId(undefined);
@@ -81,18 +85,20 @@ export function Workspace() {
           if (id === chat.sessionId) chat.reset();
           void sessions.remove(id);
         }}
-        onUpload={(file, visibility) => void documents.upload(file, visibility)}
+        onUpload={(file) => void documents.upload(file)}
         onDismissUpload={documents.dismissUpload}
         onDeleteDocument={(id) => void documents.remove(id)}
         onReprocessDocument={(id) => void documents.reprocess(id)}
+        onApproveDocument={(id) => void documents.approve(id)}
+        onRejectDocument={(id) => void documents.reject(id)}
       />
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border bg-surface px-4 py-2.5">
           <div className="flex min-w-0 items-baseline gap-2">
             <h1 className="text-sm font-semibold">Knowledge Assistant</h1>
-            {me?.org_name && (
-              <span className="truncate text-xs text-muted">{me.org_name}</span>
+            {me?.workspace_name && (
+              <span className="truncate text-xs text-muted">{me.workspace_name}</span>
             )}
           </div>
           <div className="flex items-center gap-1">

@@ -13,10 +13,8 @@ import type {
   ChatSessionListResponse,
   ChatStreamEvent,
   DocumentListResponse,
-  DocumentScope,
-  DocumentStatusDetail,
   DocumentSummary,
-  DocumentVisibility,
+  InvitationListResponse,
   MeResponse,
   OrgMemberListResponse,
   UploadAcceptedResponse,
@@ -153,15 +151,11 @@ export function listDocuments(
   options: RequestOptions & {
     limit?: number;
     offset?: number;
-    scope?: DocumentScope;
   } = {},
 ): Promise<DocumentListResponse> {
   const query = new URLSearchParams();
   if (options.limit !== undefined) query.set("limit", String(options.limit));
   if (options.offset !== undefined) query.set("offset", String(options.offset));
-  // Omitted when "all": that is the server's default, and sending it would only make the
-  // request URL noisier.
-  if (options.scope && options.scope !== "all") query.set("scope", options.scope);
   const suffix = query.size ? `?${query}` : "";
   return getJson<DocumentListResponse>(`/documents${suffix}`, options);
 }
@@ -172,17 +166,6 @@ export function getDocument(
 ): Promise<DocumentSummary> {
   return getJson<DocumentSummary>(
     `/documents/${encodeURIComponent(documentId)}`,
-    options,
-  );
-}
-
-/** Ingestion progress for one document. The endpoint the library polls. */
-export function getDocumentStatus(
-  documentId: string,
-  options: RequestOptions = {},
-): Promise<DocumentStatusDetail> {
-  return getJson<DocumentStatusDetail>(
-    `/documents/${encodeURIComponent(documentId)}/status`,
     options,
   );
 }
@@ -210,39 +193,16 @@ export async function deleteDocument(
 }
 
 /**
- * Publish a document organization-wide, or return it to personal.
+ * Approve a pending document (owner only).
  *
- * Owners and admins only; the backend answers 403 for anyone else. Promoting is what makes
- * a member's upload answerable for the whole organization.
+ * PENDING → ingest inline → READY + chunks, atomically on the backend.
  */
-export async function updateDocumentVisibility(
-  documentId: string,
-  visibility: DocumentVisibility,
-  options: RequestOptions = {},
-): Promise<DocumentSummary> {
-  const response = await fetch(
-    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/visibility`,
-    {
-      method: "PATCH",
-      headers: {
-        ...authHeaders(options.token),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ visibility }),
-      signal: options.signal,
-    },
-  );
-  if (!response.ok) throw await failure(response);
-  return (await response.json()) as DocumentSummary;
-}
-
-/** Re-run ingestion for a document whose bytes are already stored. */
-export async function reprocessDocument(
+export async function approveDocument(
   documentId: string,
   options: RequestOptions = {},
 ): Promise<UploadAcceptedResponse> {
   const response = await fetch(
-    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/reprocess`,
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/approve`,
     {
       method: "POST",
       headers: authHeaders(options.token),
@@ -253,13 +213,33 @@ export async function reprocessDocument(
   return (await response.json()) as UploadAcceptedResponse;
 }
 
+/**
+ * Reject a pending document (owner only).
+ *
+ * PENDING → REJECTED, never ingested.
+ */
+export async function rejectDocument(
+  documentId: string,
+  options: RequestOptions = {},
+): Promise<DocumentSummary> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/reject`,
+    {
+      method: "POST",
+      headers: authHeaders(options.token),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as DocumentSummary;
+}
+
 export async function uploadDocument(
   file: File,
-  options: RequestOptions & { visibility?: DocumentVisibility } = {},
+  options: RequestOptions = {},
 ): Promise<UploadAcceptedResponse> {
   const form = new FormData();
   form.append("file", file);
-  if (options.visibility) form.append("visibility", options.visibility);
 
   // No Content-Type header: the browser must set it so the multipart boundary matches.
   const response = await fetch(`${BASE_URL}/documents`, {
@@ -275,8 +255,6 @@ export async function uploadDocument(
 export interface UploadProgressOptions extends RequestOptions {
   /** Fraction of bytes sent, 0–1. Called repeatedly while the body uploads. */
   onProgress?: (fraction: number) => void;
-  /** Omitted means the server's default, `personal`. */
-  visibility?: DocumentVisibility;
 }
 
 /**
@@ -285,11 +263,11 @@ export interface UploadProgressOptions extends RequestOptions {
  * XMLHttpRequest rather than `fetch`, because `fetch` still has no upload-progress
  * event — the request-body stream is not observable, so a fetch-based upload can only
  * show an indeterminate spinner. For a 25 MB PDF on a slow connection that is the
- * difference between "working" and "frozen", which is exactly the state CLAUDE.md
- * section 6 asks to be visible.
+ * difference between "working" and "frozen".
  *
- * Note this reports only the *transfer*. Ingestion is a Celery job that starts after the
- * 202, and its progress is polled separately — see `useDocuments`.
+ * Note this reports only the *transfer*. Ingestion is synchronous on the backend
+ * (Phase 3), and the progress of extraction/embedding is not reported — the user
+ * sees a processing spinner after the upload completes.
  */
 export function uploadDocumentWithProgress(
   file: File,
@@ -298,7 +276,6 @@ export function uploadDocumentWithProgress(
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append("file", file);
-    if (options.visibility) form.append("visibility", options.visibility);
 
     const request = new XMLHttpRequest();
     request.open("POST", `${BASE_URL}/documents`);
@@ -359,9 +336,72 @@ export function getMe(options: RequestOptions = {}): Promise<MeResponse> {
   return getJson<MeResponse>("/me", options);
 }
 
-/** Members of the caller's organization. 403s for a non-admin — the gate is server-side. */
-export function listOrgMembers(
+/**
+ * Members of the caller's workspace. Requires workspace_id as a path parameter.
+ * 403s for anyone not in the workspace — the gate is server-side.
+ */
+export function listWorkspaceMembers(
+  workspaceId: string,
   options: RequestOptions = {},
 ): Promise<OrgMemberListResponse> {
-  return getJson<OrgMemberListResponse>("/org/members", options);
+  return getJson<OrgMemberListResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members`,
+    options,
+  );
+}
+
+/**
+ * Pending invitations for a workspace. Owner only — 403 for anyone else.
+ */
+export function listInvitations(
+  workspaceId: string,
+  options: RequestOptions = {},
+): Promise<InvitationListResponse> {
+  return getJson<InvitationListResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+    options,
+  );
+}
+
+/**
+ * Create an invitation. Owner only — 403 for anyone else.
+ */
+export async function createInvitation(
+  workspaceId: string,
+  email: string,
+  options: RequestOptions = {},
+): Promise<InvitationListResponse["invitations"][number]> {
+  const response = await fetch(
+    `${BASE_URL}/workspaces/${encodeURIComponent(workspaceId)}/invitations`,
+    {
+      method: "POST",
+      headers: {
+        ...authHeaders(options.token),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email }),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as InvitationListResponse["invitations"][number];
+}
+
+/**
+ * Accept an invitation. The user must be authenticated.
+ */
+export async function acceptInvitation(
+  invitationId: string,
+  options: RequestOptions = {},
+): Promise<OrgMemberListResponse["members"][number]> {
+  const response = await fetch(
+    `${BASE_URL}/invitations/${encodeURIComponent(invitationId)}/accept`,
+    {
+      method: "POST",
+      headers: authHeaders(options.token),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as OrgMemberListResponse["members"][number];
 }

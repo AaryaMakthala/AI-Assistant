@@ -12,7 +12,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { DocumentLibrary } from "./document-library";
 import { MembersPanel } from "./members-panel";
-import type { ChatSession, DocumentSummary, DocumentVisibility } from "@/lib/api";
+import type { ChatSession, DocumentSummary } from "@/lib/api";
 import type { UploadState } from "@/lib/hooks/use-documents";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
@@ -24,10 +24,13 @@ export function Sidebar({
   documents,
   uploads,
   deletingDocumentIds,
+  approvingDocumentIds,
+  rejectingDocumentIds,
   isDisabled,
   canManageOrg,
   currentUserId,
   token,
+  workspaceId,
   onNewChat,
   onSelectSession,
   onDeleteSession,
@@ -35,30 +38,35 @@ export function Sidebar({
   onDismissUpload,
   onDeleteDocument,
   onReprocessDocument,
+  onApproveDocument,
+  onRejectDocument,
 }: {
   sessions: ChatSession[];
   activeSessionId?: string;
   documents: DocumentSummary[];
   uploads: UploadState[];
   deletingDocumentIds?: ReadonlySet<string>;
+  approvingDocumentIds?: ReadonlySet<string>;
+  rejectingDocumentIds?: ReadonlySet<string>;
   isDisabled?: boolean;
   /** Owners and admins only. Presentation; the server gates the data independently. */
   canManageOrg?: boolean;
   /** Whose uploads count as personal in the library's "My Docs" section. */
   currentUserId?: string;
   token?: string;
+  workspaceId?: string;
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
-  onUpload: (file: File, visibility: DocumentVisibility) => void;
+  onUpload: (file: File) => void;
   onDismissUpload: (id: string) => void;
   onDeleteDocument: (id: string) => void;
   onReprocessDocument: (id: string) => void;
+  onApproveDocument: (id: string) => void;
+  onRejectDocument: (id: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("chats");
 
-  // A role can drop between renders (a sign-out, or a /me that resolves late). Falling back
-  // rather than rendering a hidden tab's content keeps the two in step.
   const activeTab: Tab = tab === "members" && !canManageOrg ? "chats" : tab;
 
   const tabs: ReadonlyArray<readonly [Tab, string]> = canManageOrg
@@ -143,16 +151,18 @@ export function Sidebar({
             documents={documents}
             uploads={uploads}
             deletingIds={deletingDocumentIds}
+            approvingIds={approvingDocumentIds}
+            rejectingIds={rejectingDocumentIds}
             currentUserId={currentUserId}
             canManageOrg={canManageOrg}
             onUpload={onUpload}
             onDismissUpload={onDismissUpload}
             onDelete={onDeleteDocument}
             onReprocess={onReprocessDocument}
+            onApprove={onApproveDocument}
+            onReject={onRejectDocument}
             disabled={isDisabled}
           />
-          {/* Owners and admins only: the page lists every member's uploads, which is an
-              oversight view rather than a personal one. The backend gates the data too. */}
           {canManageOrg && (
             <div className="border-t border-border px-3 py-2">
               <Link
@@ -173,7 +183,7 @@ export function Sidebar({
 
       {activeTab === "members" && (
         <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-          <MembersPanel token={token} />
+          <MembersPanel token={token} workspaceId={workspaceId} />
         </nav>
       )}
     </aside>

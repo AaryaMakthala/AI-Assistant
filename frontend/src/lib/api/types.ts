@@ -65,31 +65,24 @@ export interface ChatMessageListResponse {
   messages: ChatMessage[];
 }
 
-export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
+export type DocumentStatus = "PENDING" | "READY" | "REJECTED" | "FAILED";
 
-/** Who may read a document. `org` is organization-wide; `personal` is its uploader's own. */
+/** Who may read a document. Kept for UI compatibility. */
 export type DocumentVisibility = "org" | "personal";
 
-/** Which section of the library to list. `all` is everything the caller may see. */
-export type DocumentScope = "org" | "personal" | "all";
-
+/** Canonical document shape matching the backend `DocumentResponse`. */
 export interface DocumentSummary {
   id: string;
+  workspace_id: string;
+  uploaded_by: string;
   filename: string;
   mime_type: string;
-  size_bytes: number;
+  file_size: number;
+  checksum: string;
   status: DocumentStatus;
-  page_count: number | null;
-  chunk_count: number | null;
-  word_count: number | null;
   error_message: string | null;
-  org_id: string;
-  uploaded_by: string;
-  visibility: DocumentVisibility;
+  approved_at: string | null;
   created_at: string;
-  updated_at: string;
-  processing_started_at: string | null;
-  processing_completed_at: string | null;
 }
 
 export interface DocumentListResponse {
@@ -97,31 +90,14 @@ export interface DocumentListResponse {
   total: number;
 }
 
-/** The polling view of one document. Mirrors `DocumentStatusResponse`. */
-export interface DocumentStatusDetail {
-  id: string;
-  org_id: string;
-  filename: string;
-  upload_status: string;
-  processing_status: DocumentStatus;
-  /** Ingestion has finished, one way or the other; stop polling. */
-  is_terminal: boolean;
-  /** Chunks exist and are searchable. */
-  is_indexed: boolean;
-  chunk_count: number | null;
-  page_count: number | null;
-  word_count: number | null;
-  retry_count: number;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-  processing_started_at: string | null;
-  processing_completed_at: string | null;
-}
+/** Which section of the library to list. */
+export type DocumentScope = "org" | "personal" | "all";
 
+/** Response from POST /documents/{id}/approve */
 export interface UploadAcceptedResponse {
   document: DocumentSummary;
-  task_id: string | null;
+  /** Chunks stored for a READY document. None for a PENDING member upload. */
+  chunk_count: number | null;
 }
 
 /* --- SSE frames emitted by POST /chat --- */
@@ -151,15 +127,6 @@ export interface RoutingEvent {
   routes: AgentRoute[];
   /** The router's short justification. May be empty. */
   reason: string;
-}
-
-/**
- * One line of the agent trace, emitted as each node completes — "documents: retrieved 6
- * passage(s)". Progress detail, not part of the answer.
- */
-export interface StepEvent {
-  type: "step";
-  text: string;
 }
 
 /** Everything retrieved, sent before the first token so the UI can show what is being
@@ -202,6 +169,12 @@ export interface ErrorEvent {
   partial: boolean;
 }
 
+/** One line of the agent trace, emitted as each node completes. */
+export interface StepEvent {
+  type: "step";
+  text: string;
+}
+
 export type ChatStreamEvent =
   | SessionEvent
   | RoutingEvent
@@ -215,21 +188,36 @@ export type ChatStreamEvent =
 /** The authenticated caller, as the server understands them. Mirrors `MeResponse`. */
 export interface MeResponse {
   user_id: string;
-  org_id: string;
-  role: string;
+  workspace_id: string;
+  workspace_name: string | null;
+  role: string | null;
   email?: string | null;
-  org_name?: string | null;
 }
 
-/** A member of the caller's organization. Mirrors `MemberResponse`. */
+/** A workspace member. Mirrors the backend `MemberResponse`. */
 export interface OrgMember {
   id: string;
-  email: string;
-  full_name?: string | null;
+  workspace_id: string;
+  user_id: string;
   role: string;
+  status: string;
   created_at: string;
 }
 
 export interface OrgMemberListResponse {
   members: OrgMember[];
+}
+
+/** An invitation. Mirrors the backend `InvitationResponse`. */
+export interface Invitation {
+  id: string;
+  workspace_id: string;
+  email: string;
+  status: string;
+  invited_by: string;
+  created_at: string;
+}
+
+export interface InvitationListResponse {
+  invitations: Invitation[];
 }

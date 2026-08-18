@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import Depends
 
-from app.llm.base import LLMRouterProtocol
+from app.llm.base import LLMProvider, LLMRouterProtocol
 from app.security.auth import Principal, get_principal
 
 _router: LLMRouterProtocol | None = None
@@ -31,6 +31,19 @@ def reset_llm_router() -> None:
     """Drop the cached router. For tests and for a deliberate reconfiguration."""
     global _router
     _router = None
+
+
+def get_generic_llm() -> LLMProvider:
+    """The canonical Section 13 LLM provider (CLAUDE.md sections 2 and 13).
+
+    Built per request rather than cached: constructing it only reads settings, and
+    not caching means a reconfiguration takes effect without a process restart.
+    Returns the same :class:`LLMProvider` protocol the legacy router implements,
+    so tests can override it through FastAPI's normal dependency mechanism.
+    """
+    from app.llm.generic import GenericProvider
+
+    return GenericProvider()
 
 
 def require_role(*allowed: str) -> Callable[[Principal], Principal]:
@@ -54,4 +67,4 @@ def require_role(*allowed: str) -> Callable[[Principal], Principal]:
     return dependency
 
 
-__all__ = ["get_llm_router", "require_role", "reset_llm_router"]
+__all__ = ["get_generic_llm", "get_llm_router", "require_role", "reset_llm_router"]

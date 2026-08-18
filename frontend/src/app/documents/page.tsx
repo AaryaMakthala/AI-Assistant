@@ -1,31 +1,25 @@
 "use client";
 
 /**
- * The documents page: the owner's view of every document in the organization.
+ * The documents page: the owner's view of every document in the workspace.
  *
  * The sidebar's library is for glancing at while chatting; this is for managing. Same
  * hook, same data, different density — it has room for the timestamps, counts and errors
  * the rail has to leave out, and for a drop zone big enough to actually aim at.
  *
- * Owners and admins only, because it lists members' personal uploads as well as company
- * ones (CLAUDE.md 4.6). That is an oversight view, so a member is redirected rather than
- * shown an emptier version of it — and the backend gates the rows regardless of what this
- * page renders. Uploads made here are company-wide, which is the whole point of the view;
- * personal files belong in My Docs on the chat page.
+ * Owners and admins only, because it lists all documents (CLAUDE.md 4.6). That is an
+ * oversight view, so a member is redirected rather than shown an emptier version of it
+ * — and the backend gates the rows regardless of what this page renders.
  *
- * Auth is enforced by the backend on every call (CLAUDE.md 4.6). This page redirects an
- * anonymous visitor rather than rendering an empty table, because a table that is empty
- * because you are signed out looks identical to one that is empty because you have no
- * documents.
+ * Auth is enforced by the backend on every call (CLAUDE.md 4.6).
  */
 
-import { AlertCircle, ArrowLeft, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, FileText, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { StatusBadge } from "@/components/status-badge";
-import { VisibilityBadge } from "@/components/visibility-badge";
 import type { DocumentSummary } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
@@ -37,7 +31,7 @@ import {
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
-const ADMIN_ROLES = ["owner", "admin"];
+const ADMIN_ROLES = ["OWNER", "owner"];
 
 export default function DocumentsPage() {
   const router = useRouter();
@@ -56,19 +50,19 @@ export default function DocumentsPage() {
       router.replace("/login");
       return;
     }
-    // `role` arrives with /me, a little after the token. Redirecting only once auth has
-    // settled avoids bouncing an owner out during that gap.
     if (role && !canManageOrg) router.replace("/");
   }, [isAuthLoading, isAuthenticated, role, canManageOrg, router]);
 
   const handleFiles = (files: FileList | null) => {
     if (!files || !isAuthenticated || !canManageOrg) return;
-    for (const file of Array.from(files)) void library.upload(file, "org");
+    for (const file of Array.from(files)) void library.upload(file);
   };
 
   const activeUploads = library.uploads.filter(
     (upload) => upload.phase !== "ready" || !upload.documentId,
   );
+
+  const pending = library.documents.filter((row) => row.status === "PENDING");
 
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-4xl flex-col gap-4 p-4 sm:p-6">
@@ -89,7 +83,7 @@ export default function DocumentsPage() {
           <p className="text-xs text-muted">
             {library.documents.length === 0
               ? "Nothing uploaded yet."
-              : `${library.documents.length} document${library.documents.length === 1 ? "" : "s"} across your organization, including members' personal files.`}
+              : `${library.documents.length} document${library.documents.length === 1 ? "" : "s"} in your workspace.`}
           </p>
         </div>
         <button
@@ -177,8 +171,7 @@ export default function DocumentsPage() {
         </p>
         <p className="mt-1 text-xs text-muted">
           {ACCEPTED_EXTENSIONS.join(", ")} · up to{" "}
-          {Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB · visible to everyone in your
-          organization
+          {Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB
         </p>
         <input
           ref={inputRef}
@@ -192,6 +185,31 @@ export default function DocumentsPage() {
           }}
         />
       </div>
+
+      {/* Pending approval queue */}
+      {canManageOrg && pending.length > 0 && (
+        <div className="rounded-xl border border-warning/30 bg-warning-subtle p-4">
+          <h2 className="text-sm font-semibold text-warning">
+            Pending approval ({pending.length})
+          </h2>
+          <p className="mt-1 text-xs text-muted">
+            Member uploads that need your review before they become searchable.
+          </p>
+          <ul className="mt-3 space-y-2">
+            {pending.map((row) => (
+              <li key={row.id}>
+                <PendingDocumentRow
+                  row={row}
+                  isApproving={library.approvingIds.has(row.id)}
+                  isRejecting={library.rejectingIds.has(row.id)}
+                  onApprove={() => void library.approve(row.id)}
+                  onReject={() => void library.reject(row.id)}
+                />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {activeUploads.length > 0 && (
         <ul className="space-y-2">
@@ -219,12 +237,6 @@ export default function DocumentsPage() {
                   isDeleting={library.deletingIds.has(row.id)}
                   onRequestDelete={() => setPendingDelete(row)}
                   onReprocess={() => void library.reprocess(row.id)}
-                  onToggleVisibility={() =>
-                    void library.setVisibility(
-                      row.id,
-                      row.visibility === "org" ? "personal" : "org",
-                    )
-                  }
                 />
               </li>
             ))}
@@ -252,6 +264,72 @@ export default function DocumentsPage() {
         }}
         onCancel={() => setPendingDelete(null)}
       />
+    </div>
+  );
+}
+
+function PendingDocumentRow({
+  row,
+  isApproving,
+  isRejecting,
+  onApprove,
+  onReject,
+}: {
+  row: DocumentSummary;
+  isApproving: boolean;
+  isRejecting: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-border bg-background px-4 py-3">
+      <FileText className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium" title={row.filename}>
+          {row.filename}
+        </p>
+        <p className="mt-0.5 text-xs text-muted">
+          {formatBytes(row.file_size)} · Uploaded {formatRelativeTime(row.created_at)}
+        </p>
+      </div>
+      <div className="flex shrink-0 gap-1.5">
+        <button
+          type="button"
+          onClick={onApprove}
+          disabled={isApproving || isRejecting}
+          className={cn(
+            "flex items-center gap-1 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-white",
+            "transition-opacity hover:opacity-90",
+            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+        >
+          {isApproving ? (
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <CheckCircle2 className="size-3" aria-hidden />
+          )}
+          Approve
+        </button>
+        <button
+          type="button"
+          onClick={onReject}
+          disabled={isApproving || isRejecting}
+          className={cn(
+            "flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted",
+            "transition-colors hover:text-foreground",
+            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+        >
+          {isRejecting ? (
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <X className="size-3" aria-hidden />
+          )}
+          Reject
+        </button>
+      </div>
     </div>
   );
 }
@@ -313,7 +391,6 @@ function UploadCard({
         </div>
       )}
 
-      {/* Indeterminate on purpose: ingestion reports no progress, only an outcome. */}
       {upload.phase === "processing" && (
         <p className="mt-2 flex items-center gap-1.5 text-[0.6875rem] text-muted">
           <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -336,20 +413,14 @@ function DocumentCard({
   isDeleting,
   onRequestDelete,
   onReprocess,
-  onToggleVisibility,
 }: {
   row: DocumentSummary;
   isDeleting: boolean;
   onRequestDelete: () => void;
   onReprocess: () => void;
-  onToggleVisibility: () => void;
 }) {
-  const isCompany = row.visibility === "org";
   const details = [
-    row.page_count ? `${row.page_count} pages` : null,
-    row.chunk_count ? `${row.chunk_count} chunks` : null,
-    row.word_count ? `${row.word_count.toLocaleString()} words` : null,
-    formatBytes(row.size_bytes),
+    formatBytes(row.file_size),
     formatRelativeTime(row.created_at),
   ].filter(Boolean);
 
@@ -360,40 +431,22 @@ function DocumentCard({
         isDeleting && "opacity-50",
       )}
     >
+      <FileText className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate text-sm font-medium" title={row.filename}>
             {row.filename}
           </span>
-          <StatusBadge status={row.status} chunkCount={row.chunk_count} />
-          <VisibilityBadge visibility={row.visibility} />
+          <StatusBadge status={row.status.toLowerCase() as "pending" | "ready" | "failed"} />
         </div>
         <p className="mt-1 text-xs text-muted">{details.join(" · ")}</p>
-        {row.status === "failed" && row.error_message && (
+        {row.status === "FAILED" && row.error_message && (
           <p className="mt-1 text-xs break-words text-danger">{row.error_message}</p>
         )}
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        <button
-          type="button"
-          onClick={onToggleVisibility}
-          disabled={isDeleting}
-          title={
-            isCompany
-              ? "Make this personal to its uploader again"
-              : "Publish to the whole organization"
-          }
-          className={cn(
-            "rounded-md border border-border px-2 py-1 text-[0.6875rem] text-muted",
-            "transition-colors hover:text-foreground",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
-        >
-          {isCompany ? "Make personal" : "Promote to company"}
-        </button>
-        {row.status === "failed" && (
+        {row.status === "FAILED" && (
           <button
             type="button"
             onClick={onReprocess}

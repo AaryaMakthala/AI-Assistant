@@ -17,24 +17,24 @@ import type { DocumentStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const STYLES: Record<DocumentStatus, string> = {
-  pending: "bg-surface-raised text-muted",
-  processing: "bg-warning-subtle text-warning",
-  ready: "bg-accent-subtle text-accent",
-  failed: "bg-danger-subtle text-danger",
+  PENDING: "bg-surface-raised text-muted",
+  PROCESSING: "bg-warning-subtle text-warning",
+  READY: "bg-accent-subtle text-accent",
+  FAILED: "bg-danger-subtle text-danger",
 };
 
 const LABELS: Record<DocumentStatus, string> = {
-  pending: "Queued",
-  processing: "Processing",
-  ready: "Ready",
-  failed: "Failed",
+  PENDING: "Queued",
+  PROCESSING: "Processing",
+  READY: "Ready",
+  FAILED: "Failed",
 };
 
 const ICONS: Record<DocumentStatus, typeof Clock> = {
-  pending: Clock,
-  processing: Loader2,
-  ready: CheckCircle2,
-  failed: AlertCircle,
+  PENDING: Clock,
+  PROCESSING: Loader2,
+  READY: CheckCircle2,
+  FAILED: AlertCircle,
 };
 
 export function StatusBadge({
@@ -47,7 +47,7 @@ export function StatusBadge({
   chunkCount?: number | null;
   className?: string;
 }) {
-  const isEmpty = status === "ready" && chunkCount === 0;
+  const isEmpty = status === "READY" && chunkCount === 0;
   const Icon = isEmpty ? AlertCircle : ICONS[status];
 
   return (
@@ -65,7 +65,7 @@ export function StatusBadge({
       }
     >
       <Icon
-        className={cn("size-2.5", status === "processing" && "animate-spin")}
+        className={cn("size-2.5", status === "PROCESSING" && "animate-spin")}
         aria-hidden
       />
       {isEmpty ? "No text" : LABELS[status]}

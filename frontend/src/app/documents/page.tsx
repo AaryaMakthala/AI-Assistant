@@ -437,7 +437,7 @@ function DocumentCard({
           <span className="truncate text-sm font-medium" title={row.filename}>
             {row.filename}
           </span>
-          <StatusBadge status={row.status.toLowerCase() as "pending" | "ready" | "failed"} />
+          <StatusBadge status={row.status} />
         </div>
         <p className="mt-1 text-xs text-muted">{details.join(" · ")}</p>
         {row.status === "FAILED" && row.error_message && (

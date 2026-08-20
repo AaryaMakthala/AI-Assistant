@@ -18,22 +18,22 @@ import { cn } from "@/lib/utils";
 
 const STYLES: Record<DocumentStatus, string> = {
   PENDING: "bg-surface-raised text-muted",
-  PROCESSING: "bg-warning-subtle text-warning",
   READY: "bg-accent-subtle text-accent",
+  REJECTED: "bg-danger-subtle text-danger",
   FAILED: "bg-danger-subtle text-danger",
 };
 
 const LABELS: Record<DocumentStatus, string> = {
   PENDING: "Queued",
-  PROCESSING: "Processing",
   READY: "Ready",
+  REJECTED: "Rejected",
   FAILED: "Failed",
 };
 
 const ICONS: Record<DocumentStatus, typeof Clock> = {
   PENDING: Clock,
-  PROCESSING: Loader2,
   READY: CheckCircle2,
+  REJECTED: AlertCircle,
   FAILED: AlertCircle,
 };
 
@@ -65,7 +65,7 @@ export function StatusBadge({
       }
     >
       <Icon
-        className={cn("size-2.5", status === "PROCESSING" && "animate-spin")}
+        className="size-2.5"
         aria-hidden
       />
       {isEmpty ? "No text" : LABELS[status]}

@@ -200,3 +200,67 @@ def test_unknown_environment_is_rejected(monkeypatch: pytest.MonkeyPatch, valid_
 
     with pytest.raises(SystemExit):
         get_settings()
+
+
+# ── CORS origins parsing ────────────────────────────────────────────────
+
+
+def test_cors_default_is_localhost(valid_env: None) -> None:
+    """Without CORS_ALLOW_ORIGINS set, the default covers local dev."""
+    settings = get_settings()
+    assert settings.cors_allow_origins == ["http://localhost:3000"]
+
+
+def test_cors_comma_separated_string_parses_correctly(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """The .env.example documents comma-separated origins; the parser must
+    accept that format without requiring JSON.
+    """
+    monkeypatch.setenv(
+        "CORS_ALLOW_ORIGINS",
+        "https://app.vercel.app, https://staging.vercel.app",
+    )
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.cors_allow_origins == [
+        "https://app.vercel.app",
+        "https://staging.vercel.app",
+    ]
+
+
+def test_cors_json_array_still_works(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """A JSON array (the Pydantic v2 native format) must also parse."""
+    monkeypatch.setenv(
+        "CORS_ALLOW_ORIGINS",
+        '["https://a.com","https://b.com"]',
+    )
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.cors_allow_origins == ["https://a.com", "https://b.com"]
+
+
+def test_cors_single_origin(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """A single origin without a comma should work."""
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://myapp.vercel.app")
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.cors_allow_origins == ["https://myapp.vercel.app"]
+
+
+def test_cors_empty_string_yields_empty_list(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """An explicitly empty CORS_ALLOW_ORIGINS results in no origins."""
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "")
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.cors_allow_origins == []

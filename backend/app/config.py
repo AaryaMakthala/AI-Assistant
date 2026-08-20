@@ -1,9 +1,10 @@
 """Application settings. All secrets come from .env — never hardcoded (CLAUDE.md 4.1)."""
 
 import sys
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import (
     Field,
@@ -15,11 +16,45 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import EnvSettingsSource
 
 _ENV_EXAMPLE_HINT = (
     "Copy .env.example to .env at the repo root and fill in the values listed above.\n"
     "See CLAUDE.md section 13 for the full variable list."
 )
+
+
+class _CorsEnvSettingsSource(EnvSettingsSource):
+    """Env source that accepts comma-separated CORS origins from .env files.
+
+    Pydantic v2 ``BaseSettings`` calls ``json.loads()`` on every ``list[str]``
+    env value, which breaks the comma-separated format documented in
+    ``.env.example``.  This override intercepts that single field before
+    JSON decoding and splits on commas instead.
+    """
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: Any,
+        field_value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        if field_name == "cors_allow_origins" and isinstance(field_value, str):
+            if field_value.startswith("["):
+                # Already a JSON array — let the default handler parse it.
+                return super().prepare_field_value(
+                    field_name, field, field_value, value_is_complex
+                )
+            # Comma-separated format (the .env.example convention).
+            return [
+                origin.strip()
+                for origin in field_value.split(",")
+                if origin.strip()
+            ]
+        return super().prepare_field_value(
+            field_name, field, field_value, value_is_complex
+        )
 
 
 class Settings(BaseSettings):
@@ -97,7 +132,7 @@ class Settings(BaseSettings):
     #: (CLAUDE.md section 7, cost/quota overrun). 0 disables the check.
     token_usage_alert_threshold: int = Field(default=0, ge=0)
 
-    cors_allow_origins: list[str] = ["http://localhost:3000"]
+    cors_allow_origins: list[str] = Field(default=["http://localhost:3000"])
 
     # --- Document ingestion (CLAUDE.md 4.2, Phase 3) ---
 
@@ -320,6 +355,29 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+asyncpg://", 1)
         return value
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: Any,
+        env_settings: EnvSettingsSource,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> tuple[Any, ...]:
+        """Replace the default env source with one that handles comma-separated
+        CORS origins, which is the format documented in .env.example.
+        """
+        cors_source = _CorsEnvSettingsSource(
+            settings_cls,
+            env_prefix=env_settings.env_prefix,
+        )
+        return (
+            init_settings,
+            cors_source,
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     @property
     def celery_broker_url(self) -> str:

@@ -36,7 +36,7 @@ interface AuthValue {
   /** Server-confirmed identity. Undefined until `/me` answers. */
   me?: MeResponse;
   /** Server-confirmed role, or undefined while unknown. */
-  role?: string;
+  role?: string | null;
   /** True when the deployment has no Supabase credentials — sign-in is impossible. */
   isConfigured: boolean;
   signOut: () => Promise<void>;

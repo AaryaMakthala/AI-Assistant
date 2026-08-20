@@ -422,6 +422,7 @@ current pronoun.
 Phase 2 — Auth & Multi-Tenant Workspaces: COMPLETE
 Phase 3 — Document Upload & Synchronous Ingestion: COMPLETE
 Phase 4 — Document Approval & Processing Lifecycle: COMPLETE
+Phase 8 — Deploy: COMPLETE
 ```
 
 ### Phase 0 — Scaffolding

@@ -447,7 +447,7 @@ function DocumentRow({
           {row.filename}
         </p>
         <p className="mt-0.5 flex flex-wrap items-center gap-1 text-[0.6875rem] text-muted">
-          <StatusBadge status={row.status.toLowerCase() as "pending" | "ready" | "failed"} />
+          <StatusBadge status={row.status} />
           {details.join(" · ")}
         </p>
         {isFailed && row.error_message && (

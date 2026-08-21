@@ -62,11 +62,9 @@ _EXTRA_DENYLIST = [
     "groq_api_key",
     "jwt",
     "jwt_secret",
-    "langsmith_api_key",
     "message",
     "passage",
     "question",
-    "redis_url",
     "refresh_token",
     "secret_key",
     "sentry_dsn",
@@ -156,8 +154,7 @@ def _before_send(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] 
 def configure_sentry(settings: Settings | None = None, *, component: str = "api") -> bool:
     """Initialise Sentry for this process. Returns whether it was enabled.
 
-    `component` distinguishes the API process from a Celery worker in the Sentry UI; they
-    fail in different ways and are usually being investigated separately.
+    `component` identifies this process in the Sentry UI.
 
     Called once per process, at startup. Safe to call again — the SDK replaces the client
     rather than stacking clients — but the integrations it installs are global, which is why
@@ -173,7 +170,6 @@ def configure_sentry(settings: Settings | None = None, *, component: str = "api"
 
     try:
         import sentry_sdk
-        from sentry_sdk.integrations.celery import CeleryIntegration
         from sentry_sdk.integrations.fastapi import FastApiIntegration
         from sentry_sdk.integrations.loguru import LoggingLevels, LoguruIntegration
         from sentry_sdk.integrations.starlette import StarletteIntegration
@@ -210,7 +206,6 @@ def configure_sentry(settings: Settings | None = None, *, component: str = "api"
         integrations=[
             StarletteIntegration(),
             FastApiIntegration(),
-            CeleryIntegration(),
             LoguruIntegration(
                 # Below `event_level`, log lines attach as breadcrumbs — the trail of what
                 # the request did before it failed, which is most of an error's usefulness.

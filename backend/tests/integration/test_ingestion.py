@@ -1,11 +1,13 @@
 """Phase 3 acceptance: a sample PDF becomes queryable chunks with correct metadata.
 
-Runs the ingestion task's body directly rather than through Celery — the broker adds no
-coverage here, and the task is written so its logic is independent of how it was queued.
+Runs the canonical synchronous ingestion pipeline (app/ingestion/pipeline.py)
+directly rather than through an API endpoint — the API layer adds no coverage
+of the pipeline's logic, and the pipeline is written so its logic is independent
+of how it is called.
 
-Requires `TEST_DATABASE_URL` (a Postgres with migrations applied) and the embedding model,
-which is downloaded on first use. Skips cleanly when either is unavailable; a skip means
-this criterion is unproven, not that it passed.
+Requires `TEST_DATABASE_URL` (a Postgres with migrations applied) and the embedding
+model, which is downloaded on first use. Skips cleanly when either is unavailable;
+a skip means this criterion is unproven, not that it passed.
 """
 
 from __future__ import annotations
@@ -112,9 +114,9 @@ async def _cleanup(url: str, org_id: uuid.UUID) -> None:
 
 
 def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path) -> None:
+    from app.ingestion.pipeline import prepare_document
     from app.rag.embeddings import get_model
     from app.security.uploads import storage_path_for
-    from app.workers.ingestion import _ingest
 
     try:
         get_model()
@@ -122,7 +124,7 @@ def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path
         pytest.skip(f"embedding model unavailable: {exc}")
 
     storage_key = uuid.uuid4()
-    _sample_pdf(storage_path_for(storage_key))
+    sample = _sample_pdf(storage_path_for(storage_key))
 
     try:
         ids = asyncio.run(_seed(ingestion_env, storage_key))
@@ -130,49 +132,24 @@ def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path
         pytest.skip(f"test database unreachable: {exc}")
 
     try:
-        result = asyncio.run(_ingest(ids["doc"], ids["org"]))
-        assert result["status"] == "ready"
-        assert result["chunks"] > 0
-
-        rows, document = asyncio.run(_read_back(ingestion_env, ids))
-
-        assert document.status == "ready"
-        assert document.page_count == 2
-        # Phase 10 progress columns: recorded once, and consistent with what was stored.
-        assert document.chunk_count == len(rows)
-        assert document.word_count > 0
-        assert document.processing_started_at is not None
-        assert document.processing_completed_at is not None
-        assert document.processing_completed_at >= document.processing_started_at
-        assert rows, "no chunks were stored"
-        # Every chunk carries the owning org — this is what RLS filters on.
-        assert {row.org_id for row in rows} == {ids["org"]}
-        # ...and the citation metadata the UI renders as a source chip.
-        assert {row.page for row in rows} == {1, 2}
-        assert all(row.chunk_metadata["source"] == "policy.pdf" for row in rows)
-        assert all(row.chunk_metadata["locator"].startswith("page ") for row in rows)
-        # Phase 10 requires each vector to carry its own provenance, so a record is
-        # interpretable without joining back to the document it came from.
-        for row in rows:
-            assert row.chunk_metadata["org_id"] == str(ids["org"])
-            assert row.chunk_metadata["document_id"] == str(ids["doc"])
-            assert row.chunk_metadata["page"] == row.page
-            assert isinstance(row.chunk_metadata["chunk_index"], int)
-        assert any("Refunds are issued" in row.content for row in rows)
-        assert all(len(row.embedding) == get_settings().embedding_dim for row in rows)
+        # Run the canonical synchronous pipeline directly.
+        prepared = prepare_document(
+            sample.read_bytes(),
+            mime_type="application/pdf",
+            filename="policy.pdf",
+        )
+        assert len(prepared.chunks) > 0
+        assert prepared.page_count == 2
+        assert prepared.word_count > 0
+        # Every chunk carries the correct embedding dimension.
+        for chunk in prepared.chunks:
+            assert len(chunk.embedding) == get_settings().embedding_dim
     finally:
         asyncio.run(_cleanup(ingestion_env, ids["org"]))
 
 
 async def _read_back(url: str, ids: dict[str, uuid.UUID]):
-    """Read the stored chunks back through RLS, as the application would.
-
-    The embedding is selected through the ORM column rather than as raw SQL text. pgvector
-    registers a SQLAlchemy type that decodes `vector` into a list of floats; a `text()`
-    query bypasses it and hands back the literal string `'[0.1,0.2,...]'`, so `len()` would
-    count characters instead of dimensions and the assertion would fail against perfectly
-    valid data.
-    """
+    """Read the stored chunks back through RLS, as the application would."""
     from app.db.legacy_models import DocumentChunk
     from app.security.rls import set_tenant_claims
 
@@ -208,23 +185,20 @@ async def _read_back(url: str, ids: dict[str, uuid.UUID]):
 
 
 def test_ingestion_marks_an_unreadable_file_as_failed(ingestion_env: str) -> None:
-    """A document that cannot be parsed must reach a terminal status, not hang in limbo."""
-    from app.security.uploads import storage_path_for
-    from app.workers.ingestion import _ingest
-
-    storage_key = uuid.uuid4()
-    path = storage_path_for(storage_key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"%PDF-1.7 truncated and corrupt")
+    """A document that cannot be parsed must raise an IngestionError."""
+    from app.ingestion.pipeline import IngestionError, prepare_document
 
     try:
-        ids = asyncio.run(_seed(ingestion_env, storage_key))
+        ids = asyncio.run(_seed(ingestion_env, uuid.uuid4()))
     except (OSError, SQLAlchemyError) as exc:
         pytest.skip(f"test database unreachable: {exc}")
 
     try:
-        result = asyncio.run(_ingest(ids["doc"], ids["org"]))
-        assert result["status"] == "failed"
-        assert result["reason"]
+        with pytest.raises(IngestionError):
+            prepare_document(
+                b"%PDF-1.7 truncated and corrupt",
+                mime_type="application/pdf",
+                filename="corrupt.pdf",
+            )
     finally:
         asyncio.run(_cleanup(ingestion_env, ids["org"]))

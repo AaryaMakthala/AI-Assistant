@@ -2,10 +2,13 @@
 
 Deletion is the requirement most likely to be *nearly* right — a row disappears, the UI
 looks correct, and the vectors stay behind and keep surfacing in retrieval. So these tests
-assert on what is left in the database and on disk afterwards, not on the response code.
+assert on what is left in the database afterwards, not on the response code.
 
-The other half is isolation: one org must not be able to delete, or even confirm the
-existence of, another org's document. That is enforced by RLS rather than by application
+Documents are stored as BYTEA in PostgreSQL (CLAUDE.md section 6) — the database IS
+the source of truth, so there is no separate file to unlink.
+
+The other half is isolation: one workspace must not be able to delete, or even confirm the
+existence of, another workspace's document. That is enforced by RLS rather than by application
 code, which is exactly why it is worth testing through a real database.
 
 Requires `TEST_DATABASE_URL` with migrations applied. Skips cleanly when absent — a skip
@@ -202,29 +205,6 @@ def test_delete_removes_the_row_its_chunks_and_its_failures(delete_env: str) -> 
         assert after == {"documents": 0, "chunks": 0, "failures": 0}
     finally:
         asyncio.run(_cleanup(delete_env, ids["org"]))
-
-
-def test_delete_removes_the_stored_file(delete_env: str) -> None:
-    """The bytes on disk are the fourth resource, and the one a cascade cannot reach."""
-    from app.api.documents import _unlink_stored_file
-    from app.security.uploads import storage_path_for
-
-    storage_key = uuid.uuid4()
-    path = storage_path_for(storage_key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"%PDF-1.7 stored bytes")
-    assert path.exists()
-
-    _unlink_stored_file(storage_key, uuid.uuid4())
-
-    assert not path.exists()
-
-
-def test_unlinking_an_already_missing_file_is_not_an_error(delete_env: str) -> None:
-    """A retried delete must not fail on the file it already removed."""
-    from app.api.documents import _unlink_stored_file
-
-    _unlink_stored_file(uuid.uuid4(), uuid.uuid4())
 
 
 def test_one_org_cannot_delete_another_orgs_document(delete_env: str) -> None:

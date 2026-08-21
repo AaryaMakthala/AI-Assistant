@@ -77,31 +77,6 @@ def test_secrets_are_not_exposed_in_repr(valid_env: None) -> None:
     assert "test-jwt-secret-that-is-long-enough-to-pass-validation" not in dumped
 
 
-def test_legacy_provider_variables_are_not_required(valid_env: None) -> None:
-    """A Section 13 environment must load without any legacy provider variables."""
-    settings = get_settings()
-
-    assert settings.gemini_api_key is None
-    assert settings.groq_api_key is None
-    assert settings.redis_url is None
-    assert settings.llm_base_url is None
-
-
-def test_legacy_provider_variables_still_accepted(
-    monkeypatch: pytest.MonkeyPatch, valid_env: None
-) -> None:
-    """Backwards compatibility: an old .env that sets them keeps loading unchanged."""
-    monkeypatch.setenv("GEMINI_API_KEY", "legacy-gemini-key")
-    monkeypatch.setenv("GROQ_API_KEY", "legacy-groq-key")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
-
-    settings = get_settings()
-
-    assert settings.gemini_api_key.get_secret_value() == "legacy-gemini-key"
-    assert settings.groq_api_key.get_secret_value() == "legacy-groq-key"
-    assert str(settings.redis_url) == "redis://localhost:6379/0"
-
-
 def test_section13_defaults(valid_env: None) -> None:
     settings = get_settings()
 

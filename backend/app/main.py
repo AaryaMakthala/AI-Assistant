@@ -7,7 +7,6 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.api.auth import router as auth_router
-from app.api.chat import router as chat_router
 from app.api.chat_v2 import router as grounded_chat_router
 from app.api.documents_v2 import router as documents_router
 from app.api.workspaces import accept_router
@@ -87,7 +86,6 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(documents_router)
-    app.include_router(chat_router)
     app.include_router(grounded_chat_router)
     app.include_router(workspaces_router)
     app.include_router(accept_router)

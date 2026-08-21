@@ -5,7 +5,8 @@ so it is deliberately narrow: it returns text and page numbers, nothing else. It
 evaluates a formula, never resolves an external reference, and never runs a macro —
 DOCX/XLSX active content is simply not read (CLAUDE.md 4.2).
 
-It runs inside a Celery worker, never in a request handler, so a file that manages to
+It runs in a worker thread (asyncio.to_thread), never blocking the event loop,
+so a file that manages to
 hang or crash a parser takes down a replaceable worker instead of the API.
 """
 

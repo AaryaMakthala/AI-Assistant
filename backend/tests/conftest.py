@@ -25,10 +25,6 @@ _TEST_ENV = {
 _LEGACY_ENV_KEYS = (
     "GEMINI_API_KEY",
     "GROQ_API_KEY",
-    "REDIS_URL",
-    "LLM_PROVIDER_ORDER",
-    "LLM_GROQ_MODEL",
-    "LLM_GEMINI_MODEL",
 )
 
 

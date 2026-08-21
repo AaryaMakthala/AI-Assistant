@@ -58,8 +58,7 @@ def bind_principal(*, user_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
 def clear_observability_context() -> None:
     """Forget the current request's identity.
 
-    ContextVars are per-task, so this is belt-and-braces for the paths that reuse a task —
-    a Celery worker thread handling job after job, most of all.
+    ContextVars are per-task, so this is belt-and-braces for the paths that reuse a task.
     """
     _user_id_var.set(None)
     _workspace_id_var.set(None)

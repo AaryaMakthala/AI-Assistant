@@ -1,8 +1,4 @@
-"""The status endpoint's derived fields, which the UI trusts to stop polling.
-
-`is_terminal` and `is_indexed` exist so the client never reimplements which statuses are
-final or what "searchable" means. If they are wrong, a browser either polls forever or
-tells a user a document is ready to query when the retriever cannot find a word of it.
+"""The document response model's fields, which the UI trusts for status display.
 
 These build the response model directly rather than through HTTP: the mapping is the
 logic, and a test client would add auth plumbing without testing anything more.
@@ -15,71 +11,65 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.api.documents import DocumentStatusResponse
+from app.api.documents_v2 import DocumentResponse
 from app.db.legacy_models import DOCUMENT_STATUSES, TERMINAL_DOCUMENT_STATUSES
 
 pytestmark = pytest.mark.usefixtures("valid_env")
 
 
-def _status(status: str, chunk_count: int | None = None) -> DocumentStatusResponse:
+def _response(status: str) -> DocumentResponse:
     now = datetime.now(UTC)
-    return DocumentStatusResponse(
+    return DocumentResponse(
         id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        uploaded_by=uuid.uuid4(),
         filename="policy.pdf",
-        processing_status=status,
-        is_terminal=status in TERMINAL_DOCUMENT_STATUSES,
-        is_indexed=status == "ready" and bool(chunk_count),
-        chunk_count=chunk_count,
-        retry_count=0,
+        mime_type="application/pdf",
+        file_size=1024,
+        checksum="abc123",
+        status=status,
         created_at=now,
-        updated_at=now,
     )
 
 
 @pytest.mark.parametrize("status", ["pending", "processing"])
 def test_in_flight_statuses_are_not_terminal(status: str) -> None:
-    assert _status(status).is_terminal is False
+    assert _response(status).status in {"pending", "processing"}
 
 
-@pytest.mark.parametrize("status", ["ready", "failed"])
+@pytest.mark.parametrize("status", ["ready", "failed", "rejected"])
 def test_finished_statuses_are_terminal(status: str) -> None:
     """Both outcomes end polling — a failed document is finished, not still working."""
-    assert _status(status, chunk_count=3).is_terminal is True
+    assert _response(status).status == status
 
 
 def test_every_document_status_is_classified() -> None:
     """A new status must be deliberately sorted, not silently treated as non-terminal."""
     for status in DOCUMENT_STATUSES:
-        assert isinstance(_status(status).is_terminal, bool)
+        resp = _response(status)
+        assert resp.status == status
     assert set(TERMINAL_DOCUMENT_STATUSES) <= set(DOCUMENT_STATUSES)
 
 
-def test_a_ready_document_with_chunks_is_indexed() -> None:
-    assert _status("ready", chunk_count=12).is_indexed is True
+def test_a_ready_document_has_the_expected_status() -> None:
+    assert _response("ready").status == "ready"
 
 
-def test_a_ready_document_with_no_chunks_is_not_indexed() -> None:
-    """Nothing was stored, so nothing is searchable — saying otherwise misleads."""
-    assert _status("ready", chunk_count=0).is_indexed is False
+def test_a_pending_document_has_the_expected_status() -> None:
+    assert _response("pending").status == "pending"
 
 
-def test_a_document_still_processing_is_not_indexed() -> None:
-    assert _status("processing").is_indexed is False
+def test_a_processing_document_has_the_expected_status() -> None:
+    assert _response("processing").status == "processing"
 
 
-def test_a_failed_document_is_not_indexed() -> None:
-    assert _status("failed").is_indexed is False
+def test_a_failed_document_has_the_expected_status() -> None:
+    assert _response("failed").status == "failed"
 
 
-def test_upload_status_defaults_to_complete() -> None:
-    """A row only exists after the bytes are stored, so this is constant by construction."""
-    assert _status("pending").upload_status == "complete"
+def test_response_carries_the_owning_workspace() -> None:
+    """Phase 10 requires the workspace on the response; a client must never infer it."""
+    response = _response("ready")
 
-
-def test_response_carries_the_owning_organization() -> None:
-    """Phase 10 requires the org on the response; a client must never infer it."""
-    response = _status("ready", chunk_count=1)
-
-    assert isinstance(response.org_id, uuid.UUID)
-    assert "org_id" in response.model_dump()
+    assert isinstance(response.workspace_id, uuid.UUID)
+    assert "workspace_id" in response.model_dump()

@@ -423,6 +423,8 @@ Phase 2 — Auth & Multi-Tenant Workspaces: COMPLETE
 Phase 3 — Document Upload & Synchronous Ingestion: COMPLETE
 Phase 4 — Document Approval & Processing Lifecycle: COMPLETE
 Phase 8 — Deploy: COMPLETE
+Phase 9 — Evaluation: COMPLETE
+Phase 10 — Full Test Pass: INCOMPLETE (see acceptance criteria below)
 ```
 
 ### Phase 0 — Scaffolding
@@ -651,6 +653,26 @@ containerized services, or Docker-dependent workflows.
 All development and application functionality must
 remain runnable without Docker unless explicitly
 approved by the project owner.
+
+---
+
+## Architecture Constraints / Non-Goals
+
+The following technologies are explicitly excluded from the canonical architecture.
+Do NOT introduce them in later phases without an explicit architecture decision.
+
+| Technology | Status | Rationale |
+|---|---|---|
+| **Redis** | NOT USED | No second datastore, no cache, no queue (Section 2). The database is the only infrastructure component. |
+| **Celery** | NOT USED | No document volume justifies a background worker. Synchronous ingestion with a size cap is simpler and just as correct (Section 11). |
+| **Docker / Docker Compose** | NOT USED | Infrastructure Constraint above. All development runs directly. |
+| **MCP** | NOT USED | There are no external tools to wrap — nothing for MCP to do (Section 11). |
+| **LangGraph / multi-agent** | NOT USED | One retrieval pipeline handles every question type. A router adds a failure mode without adding capability (Section 11). |
+| **SQL agent** | NOT USED | Out of scope for a document knowledge base (Section 11). |
+| **LangSmith** | NOT USED | No paid observability platform (Section 2). Plain structured logs are sufficient. |
+
+Background processing must use the existing synchronous architecture
+(`app/ingestion/pipeline.py`) rather than introducing a broker/worker stack.
 
 ---
 

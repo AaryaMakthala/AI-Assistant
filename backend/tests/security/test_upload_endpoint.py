@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import jwt
 import pytest
@@ -23,11 +24,30 @@ pytestmark = pytest.mark.usefixtures("valid_env")
 
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    import app.api.documents_v2 as docs_module
+
     monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
     get_settings.cache_clear()
-    with TestClient(create_app(), raise_server_exceptions=False) as test_client:
-        yield test_client
-    get_settings.cache_clear()
+
+    async def _fake_role(
+        workspace_id: uuid.UUID,
+        principal: Any,
+        *allowed: str,
+    ) -> str:
+        return "OWNER"
+
+    monkeypatch.setattr(docs_module, "assert_workspace_role", _fake_role)
+
+    import app.api.workspace_deps as ws_deps
+
+    original = ws_deps.assert_workspace_role
+    ws_deps.assert_workspace_role = _fake_role  # type: ignore[assignment]
+    try:
+        with TestClient(create_app(), raise_server_exceptions=False) as test_client:
+            yield test_client
+    finally:
+        ws_deps.assert_workspace_role = original
+        get_settings.cache_clear()
 
 
 def _auth_header() -> dict[str, str]:
@@ -82,8 +102,9 @@ def test_declared_content_type_does_not_override_the_bytes(client: TestClient) -
 
 
 def test_oversized_file_is_refused(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAX_UPLOAD_BYTES", "1024")
-    get_settings.cache_clear()
+    # Override max_upload_size_mb to 0 so any non-empty file exceeds the cap
+    original = get_settings()
+    monkeypatch.setattr(original, "max_upload_size_mb", 0)
 
     response = client.post(
         "/documents",

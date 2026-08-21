@@ -1,8 +1,7 @@
 """LEGACY ORM models — org-centric architecture, isolated on their own metadata.
 
 This module exists only to keep the retired architecture importable while its consumers
-(``app/api/*``, ``app/rag/*``, ``app/workers/*``, ``app/agents/memory.py``,
-``app/sql_agent/*``, ``app/mcp_servers/*`` and the legacy tests) are rebuilt against the
+(``app/api/*``, ``app/rag/*``, and the legacy tests) are rebuilt against the
 canonical schema in later phases. It is mapped to :class:`LegacyBase`, which is separate
 from :class:`app.db.base.Base` — the canonical metadata (CLAUDE.md section 7) must never
 contain these tables, because five table names collide with the target schema and two
@@ -179,9 +178,6 @@ class Document(LegacyBase):
     chunk_count: Mapped[int | None] = mapped_column(Integer)
     #: Words in the extracted text, recorded once during ingestion.
     word_count: Mapped[int | None] = mapped_column(Integer)
-    #: The Celery task currently responsible for this document. Kept so a delete can
-    #: revoke work that is queued but not yet started.
-    task_id: Mapped[str | None] = mapped_column(String(155))
     #: Attempts made so far. Surfaced to the UI because "still retrying" and "failed for
     #: good" look identical otherwise.
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))

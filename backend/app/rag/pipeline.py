@@ -1,7 +1,7 @@
 """The RAG answer pipeline: retrieve → prompt → stream → cite.
 
-Kept separate from the API layer so the same pipeline can be driven by the LangGraph RAG
-sub-agent in Phase 7 without going through HTTP.
+Kept separate from the API layer so the same pipeline is testable independently
+of HTTP routing.
 
 Citations are derived from what was *retrieved and sent*, not from what the model claims.
 A model can emit "[7]" when six sources were supplied; resolving citations against the

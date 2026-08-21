@@ -1,4 +1,4 @@
-"""LLM provider abstraction with configurable failover (default: Groq → Gemini)."""
+"""LLM provider abstraction — one generic provider, configured via env (CLAUDE.md 2, 13)."""
 
 from app.llm.base import (
     Completion,
@@ -9,16 +9,13 @@ from app.llm.base import (
     Role,
     TokenUsage,
 )
-from app.llm.router import LLMRouter, build_default_router
 
 __all__ = [
     "Completion",
     "LLMError",
     "LLMProvider",
-    "LLMRouter",
     "LLMRouterProtocol",
     "Message",
     "Role",
     "TokenUsage",
-    "build_default_router",
 ]

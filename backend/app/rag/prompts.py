@@ -23,7 +23,7 @@ import re
 import secrets
 
 from app.llm.base import Message
-from app.rag.retrieval import RetrievedChunk
+from app.retrieval.pipeline import RetrievedChunk
 
 #: Marker text used to fence untrusted content. The nonce is appended per request.
 _FENCE_PREFIX = "BEGIN_UNTRUSTED_DOCUMENT_CONTEXT"

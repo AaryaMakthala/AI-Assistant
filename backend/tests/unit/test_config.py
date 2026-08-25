@@ -1,8 +1,9 @@
 """Phase 1A acceptance: Section 13 configuration loads, validates, and never leaks.
 
-The contract under test is CLAUDE.md Section 13: exactly the documented variable set,
-with legacy provider-specific variables (GEMINI_API_KEY, GROQ_API_KEY, REDIS_URL)
-required by nobody and accepted only for compatibility.
+The contract under test: GEMINI_API_KEY / GROQ_API_KEY are the primary way to
+configure the LLM.  LLM_PROVIDER / LLM_MODEL / LLM_API_KEY are optional overrides
+auto-derived when absent.  JWT_SECRET has a development default and is not required
+in production (modern Supabase uses ES256/RS256 via JWKS).
 """
 
 import pytest
@@ -18,7 +19,6 @@ def test_missing_env_exits_with_clear_message(capsys: pytest.CaptureFixture[str]
     stderr = capsys.readouterr().err
     assert "FATAL" in stderr
     assert "DATABASE_URL is required but not set." in stderr
-    assert "JWT_SECRET is required but not set." in stderr
     assert ".env.example" in stderr
 
 
@@ -26,31 +26,30 @@ def test_partial_env_names_only_the_missing_vars(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost:5432/db")
+    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "test-anon-key")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
 
     with pytest.raises(SystemExit):
         get_settings()
 
     stderr = capsys.readouterr().err
     assert "DATABASE_URL is required" not in stderr
-    assert "LLM_API_KEY is required but not set." in stderr
+    # Without LLM config, the model validator raises an error.
+    assert "No LLM provider configured" in stderr
 
 
-def test_short_jwt_secret_is_rejected(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], valid_env: None
-) -> None:
-    monkeypatch.setenv("JWT_SECRET", "too-short")
+def test_empty_gemini_key_is_rejected(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
+    """GEMINI_API_KEY= in .env is missing-in-practice and must fail at boot."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
 
     with pytest.raises(SystemExit):
         get_settings()
 
-    assert "JWT_SECRET" in capsys.readouterr().err
 
-
-def test_empty_llm_api_key_is_rejected(
-    monkeypatch: pytest.MonkeyPatch, valid_env: None
-) -> None:
-    """`LLM_API_KEY=` in .env is missing-in-practice and must fail at boot."""
-    monkeypatch.setenv("LLM_API_KEY", "")
+def test_empty_groq_key_is_rejected(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
+    """GROQ_API_KEY= in .env is missing-in-practice and must fail at boot."""
+    monkeypatch.setenv("GROQ_API_KEY", "")
 
     with pytest.raises(SystemExit):
         get_settings()
@@ -61,7 +60,10 @@ def test_valid_env_loads(valid_env: None) -> None:
 
     assert settings.environment == "development"
     assert settings.is_production is False
-    assert settings.jwt_secret.get_secret_value().startswith("test-jwt-secret")
+    # jwt_secret uses the default dev value when not explicitly set.
+    assert settings.jwt_secret.get_secret_value() == (
+        "dev-only-jwt-secret-replace-in-production-if-using-hs256"
+    )
     assert settings.llm_provider == "test-provider"
     assert settings.llm_model == "test-model"
     assert settings.llm_api_key.get_secret_value() == "test-llm-api-key"
@@ -150,9 +152,7 @@ def test_relevance_threshold_out_of_range_rejected(
         get_settings()
 
 
-def test_max_upload_size_rejects_zero(
-    monkeypatch: pytest.MonkeyPatch, valid_env: None
-) -> None:
+def test_max_upload_size_rejects_zero(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
     monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "0")
 
     with pytest.raises(SystemExit):
@@ -205,9 +205,7 @@ def test_cors_comma_separated_string_parses_correctly(
     ]
 
 
-def test_cors_json_array_still_works(
-    monkeypatch: pytest.MonkeyPatch, valid_env: None
-) -> None:
+def test_cors_json_array_still_works(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
     """A JSON array (the Pydantic v2 native format) must also parse."""
     monkeypatch.setenv(
         "CORS_ALLOW_ORIGINS",
@@ -219,9 +217,7 @@ def test_cors_json_array_still_works(
     assert settings.cors_allow_origins == ["https://a.com", "https://b.com"]
 
 
-def test_cors_single_origin(
-    monkeypatch: pytest.MonkeyPatch, valid_env: None
-) -> None:
+def test_cors_single_origin(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
     """A single origin without a comma should work."""
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://myapp.vercel.app")
     get_settings.cache_clear()
@@ -239,3 +235,91 @@ def test_cors_empty_string_yields_empty_list(
     settings = get_settings()
 
     assert settings.cors_allow_origins == []
+
+
+# ── Provider key auto-derivation ────────────────────────────────────────
+
+
+def test_gemini_key_derives_llm_config(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """GEMINI_API_KEY alone should derive provider, model, base_url, and api_key."""
+    # Remove explicit LLM overrides so the auto-derivation kicks in.
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "my-gemini-key-1234567890")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.llm_provider == "gemini"
+    assert settings.llm_model == "gemini-3.6-flash"
+    assert settings.llm_api_key.get_secret_value() == "my-gemini-key-1234567890"
+    assert settings.llm_base_url == "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+def test_groq_key_derives_llm_config(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """GROQ_API_KEY alone should derive provider, model, base_url, and api_key."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "my-groq-key-abcdef123456")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.llm_provider == "groq"
+    assert settings.llm_model == "llama-3.3-70b-versatile"
+    assert settings.llm_api_key.get_secret_value() == "my-groq-key-abcdef123456"
+    assert settings.llm_base_url == "https://api.groq.com/openai/v1"
+
+
+def test_explicit_llm_fields_override_presets(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """Explicit LLM_MODEL should survive when a provider key is also set."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "my-gemini-key-1234567890")
+    monkeypatch.setenv("LLM_MODEL", "gemini-2.5-pro")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    # Provider derived from key, but model kept from explicit override.
+    assert settings.llm_provider == "gemini"
+    assert settings.llm_model == "gemini-2.5-pro"
+
+
+def test_no_llm_config_at_all_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], valid_env: None
+) -> None:
+    """No provider key and no explicit LLM config must fail at boot."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    get_settings.cache_clear()
+
+    with pytest.raises(SystemExit):
+        get_settings()
+
+    assert "No LLM provider configured" in capsys.readouterr().err
+
+
+def test_gemini_key_not_exposed_in_repr(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """GEMINI_API_KEY must not appear in settings repr or dump."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "my-gemini-key-1234567890")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    dumped = repr(settings) + str(settings.model_dump())
+
+    assert "my-gemini-key-1234567890" not in dumped

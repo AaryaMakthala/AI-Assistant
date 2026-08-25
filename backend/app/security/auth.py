@@ -53,15 +53,24 @@ _jwks_client: PyJWKClient | None = None
 _jwks_url: str | None = None
 _jwks_lock = threading.Lock()
 _jwks_failed_until: float = 0.0
+#: True once the JWKS client has been successfully created at least once.  When False
+#: (cold start), failed initialisations use a short retry window so the first few
+#: requests after startup don't all fail for 30 seconds while a slow DNS or TLS
+#: handshake finishes in the background.
+_jwks_ever_succeeded: bool = False
 
-#: After a JWKS fetch fails, wait this long before trying again, so every request during
-#: an auth-service outage does not add its own outbound call to the pile.
+#: After a JWKS fetch fails *after* a successful init, wait this long before retrying
+#: so every request during a genuine auth-service outage doesn't pile onto the failing
+#: endpoint.
 _JWKS_RETRY_COOLDOWN = 30.0
+#: Shorter window used only before the first successful init — keeps cold-start
+#: retries fast (≈2 s apart) instead of blocking all requests for half a minute.
+_JWKS_COLDSTART_COOLDOWN = 2.0
 
 
 def _get_jwks_client() -> PyJWKClient | None:
     """The signing-key client for this project, or None if keys cannot be fetched."""
-    global _jwks_client, _jwks_url, _jwks_failed_until
+    global _jwks_client, _jwks_url, _jwks_failed_until, _jwks_ever_succeeded
 
     settings = get_settings()
     url = settings.jwks_url
@@ -80,30 +89,38 @@ def _get_jwks_client() -> PyJWKClient | None:
             )
             _jwks_client = client
             _jwks_url = url
+            _jwks_ever_succeeded = True
             return client
         except Exception as exc:
-            _jwks_failed_until = time.monotonic() + _JWKS_RETRY_COOLDOWN
-            logger.warning("Could not initialise JWKS client for {url}: {err}", url=url, err=exc)
+            cooldown = _JWKS_RETRY_COOLDOWN if _jwks_ever_succeeded else _JWKS_COLDSTART_COOLDOWN
+            _jwks_failed_until = time.monotonic() + cooldown
+            logger.warning(
+                "Could not initialise JWKS client for {url} (cooldown {cooldown}s): {err}",
+                url=url, cooldown=cooldown, err=exc,
+            )
             return None
 
 
 def reset_jwks_cache() -> None:
     """Drop the cached signing keys. For tests and for a deliberate reconfiguration."""
-    global _jwks_client, _jwks_url, _jwks_failed_until
+    global _jwks_client, _jwks_url, _jwks_failed_until, _jwks_ever_succeeded
     with _jwks_lock:
         _jwks_client = None
         _jwks_url = None
         _jwks_failed_until = 0.0
+        _jwks_ever_succeeded = False
 
 
 @dataclass(frozen=True)
 class Principal:
     """The authenticated caller.
 
-    ``workspace_id`` is the default workspace from the JWT claim (set by the
-    Phase 1C auth provisioning trigger). It is the scope for RLS queries.
-    The workspace *role* is NOT stored here — it is looked up from the ``members``
-    table at each workspace-scoped request, so revocation is immediate.
+    ``workspace_id`` is resolved from the JWT claim when present, or looked up
+    from the ``members`` table when the claim is absent (e.g. when the Supabase
+    provisioning trigger has not written ``workspace_id`` into ``raw_app_meta_data``).
+    It is the scope for RLS queries. The workspace *role* is NOT stored here —
+    it is looked up from the ``members`` table at each workspace-scoped request,
+    so revocation is immediate.
     """
 
     user_id: uuid.UUID
@@ -124,11 +141,48 @@ def _claim(claims: dict[str, Any], name: str) -> Any:
     return metadata.get(name) if isinstance(metadata, dict) else None
 
 
+def _try_workspace_id(claims: dict[str, Any]) -> uuid.UUID | None:
+    """Extract workspace_id from JWT claims, returning None if missing or invalid."""
+    raw = _claim(claims, "workspace_id")
+    if raw is None:
+        return None
+    try:
+        return uuid.UUID(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _resolve_workspace_id(user_id: uuid.UUID) -> uuid.UUID | None:
+    """Look up the user's default workspace from the ``members`` table.
+
+    Used when the JWT does not carry a ``workspace_id`` claim (e.g. the Supabase
+    provisioning trigger has not written ``workspace_id`` into ``raw_app_meta_data``).
+    Queries across all workspaces — no tenant claims are set — so the connection
+    must have BYPASSRLS (Supabase ``postgres`` role) or equivalent privileges.
+    """
+    from sqlalchemy import select
+
+    from app.db.models import Member
+    from app.db.session import get_session_factory
+
+    async with get_session_factory()() as session:
+        result = await session.execute(
+            select(Member.workspace_id)
+            .where(Member.user_id == user_id, Member.status == "ACTIVE")
+            .order_by(Member.created_at)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
 def principal_from_claims(claims: dict[str, Any]) -> Principal:
-    """Build a Principal from verified claims, rejecting anything malformed."""
+    """Build a Principal from verified claims, rejecting anything malformed.
+
+    Requires ``sub`` (user id). ``workspace_id`` may be absent — callers that
+    need it (``get_principal``) fall back to a database lookup.
+    """
     try:
         user_id = uuid.UUID(str(claims["sub"]))
-        workspace_id = uuid.UUID(str(_claim(claims, "workspace_id")))
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -136,7 +190,22 @@ def principal_from_claims(claims: dict[str, Any]) -> Principal:
         ) from exc
 
     email = claims.get("email")
+    workspace_id = _try_workspace_id(claims)
+    if workspace_id is None:
+        # workspace_id will be resolved from the DB by get_principal().
+        # Return a sentinel — this function never performs I/O.
+        # We use a temporary None and let the caller resolve it.
+        # However, Principal.workspace_id is required, so we raise here
+        # and let get_principal() handle the fallback directly.
+        raise _MISSING_WORKSPACE
+
     return Principal(user_id=user_id, workspace_id=workspace_id, email=email)
+
+
+_MISSING_WORKSPACE = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="Token is missing a valid user or workspace claim.",
+)
 
 
 def _resolve_key(token: str, algorithm: str) -> Any:
@@ -192,10 +261,37 @@ def decode_token(token: str) -> dict[str, Any]:
 async def get_principal(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> Principal:
-    """FastAPI dependency: the verified caller, or 401."""
+    """FastAPI dependency: the verified caller, or 401/403.
+
+    Extracts ``user_id`` from the verified JWT ``sub`` claim (always present on
+    valid Supabase tokens), then resolves ``workspace_id`` either from the JWT
+    ``app_metadata`` or, when absent, from the ``members`` table.
+    """
     if credentials is None or not credentials.credentials:
         raise _INVALID
-    principal = principal_from_claims(decode_token(credentials.credentials))
+    claims = decode_token(credentials.credentials)
+
+    # Extract user_id — always present in a valid Supabase token.
+    try:
+        user_id = uuid.UUID(str(claims["sub"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise _INVALID from exc
+
+    email = claims.get("email")
+
+    # Try workspace_id from JWT claim (the happy path — no DB round-trip).
+    workspace_id = _try_workspace_id(claims)
+
+    # Fall back to the members table when the claim is absent.
+    if workspace_id is None:
+        workspace_id = await _resolve_workspace_id(user_id)
+        if workspace_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Token is missing a valid user or workspace claim.",
+            )
+
+    principal = Principal(user_id=user_id, workspace_id=workspace_id, email=email)
     # Tag this request's error reports and traces with who made it — after verification, so
     # the tags reflect claims the server checked rather than ones the client asserted. Only
     # opaque ids travel; see app/observability/context.py.
@@ -213,4 +309,6 @@ __all__ = [
     "get_principal",
     "principal_from_claims",
     "reset_jwks_cache",
+    "_resolve_workspace_id",
+    "_try_workspace_id",
 ]

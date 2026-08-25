@@ -7,7 +7,7 @@ live database. That path is covered by tests/integration/test_ingestion.py.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ def _auth_header() -> dict[str, str]:
         "sub": str(uuid.uuid4()),
         # Phase 2: the Principal requires a workspace_id claim (CLAUDE.md section 4).
         "workspace_id": str(uuid.uuid4()),
-        "exp": datetime.now(UTC) + timedelta(hours=1),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
     }
     token = jwt.encode(payload, get_settings().jwt_secret.get_secret_value(), algorithm="HS256")
     return {"Authorization": f"Bearer {token}"}

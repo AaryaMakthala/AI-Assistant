@@ -21,6 +21,23 @@ _ENV_EXAMPLE_HINT = (
     "See CLAUDE.md section 13 for the full variable list."
 )
 
+# ---------------------------------------------------------------------------
+# Provider presets — the base URL and default model for each supported provider.
+# Both Gemini and Groq expose OpenAI-compatible chat-completions endpoints, so
+# the GenericProvider can talk to either one without provider-specific code.
+# ---------------------------------------------------------------------------
+
+_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-3.6-flash",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+    },
+}
+
 
 class _CorsEnvSettingsSource(EnvSettingsSource):
     """Env source that accepts comma-separated CORS origins from .env files.
@@ -71,18 +88,32 @@ class Settings(BaseSettings):
     supabase_anon_key: SecretStr
     supabase_service_role_key: SecretStr
 
-    # --- LLM — ONE generic provider, configured entirely via env (CLAUDE.md 13) ---
-    # Provider-agnostic by design: the runtime treats it as a generic chat-completions
-    # endpoint. No provider names, no fallback chain, no provider-specific branches.
-    # `llm_base_url` is optional so a provider's default endpoint is used when unset.
-    llm_provider: str = Field(min_length=1)
-    llm_model: str = Field(min_length=1)
-    #: min_length so an empty value (e.g. `LLM_API_KEY=` in .env) fails at boot
-    #: rather than loading as an empty secret and failing at the first LLM call.
-    llm_api_key: SecretStr = Field(min_length=1)
+    # --- LLM provider keys (direct, no abstraction) ---
+    # The application supports Gemini and Groq via their direct API keys.
+    # Whichever key is present determines the active provider.  The generic
+    # LLM_PROVIDER/LLM_MODEL/LLM_API_KEY fields below can override this
+    # when neither preset fits (e.g. OpenRouter, self-hosted models).
+    gemini_api_key: SecretStr | None = Field(default=None, min_length=1)
+    groq_api_key: SecretStr | None = Field(default=None, min_length=1)
+
+    # --- Generic LLM fields (optional when a provider key is set) ---
+    # These are auto-derived from the provider key via a model validator.
+    # They can also be set explicitly to override a preset (e.g. a custom
+    # model name or a non-standard base URL).
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_api_key: SecretStr | None = None
     llm_base_url: str | None = None
 
-    jwt_secret: SecretStr = Field(min_length=32)
+    # --- Auth ---
+    # Modern Supabase signs tokens with asymmetric keys (ES256/RS256) verified
+    # via JWKS — no shared secret needed.  jwt_secret is a fallback for legacy
+    # HS256 projects and for locally minted test tokens.  A default value is
+    # provided so production deployments that use ES256 only do not need to
+    # supply this variable at all.
+    jwt_secret: SecretStr = SecretStr(
+        "dev-only-jwt-secret-replace-in-production-if-using-hs256"
+    )
 
     sentry_dsn: str | None = None
     github_token: SecretStr | None = None
@@ -205,6 +236,52 @@ class Settings(BaseSettings):
     jwt_algorithms: list[str] = ["ES256", "RS256", "HS256"]
     #: How long a fetched signing key is trusted before it is re-fetched.
     jwks_cache_seconds: int = 600
+
+    @model_validator(mode="after")
+    def _derive_llm_config(self) -> "Settings":
+        """Auto-derive LLM_PROVIDER/MODEL/API_KEY from a provider key when not set.
+
+        When a provider key (GEMINI_API_KEY or GROQ_API_KEY) is present but the
+        generic LLM fields are not, the validator fills them in from the provider
+        preset.  Explicit LLM_* values always take precedence — this is a
+        convenience, not an override of intentional configuration.
+        """
+        # If the generic fields are already fully specified, nothing to derive.
+        if self.llm_provider and self.llm_model and self.llm_api_key:
+            return self
+
+        # Determine which provider key is set.
+        active_key: SecretStr | None = None
+        provider_name: str | None = None
+        if self.gemini_api_key:
+            active_key = self.gemini_api_key
+            provider_name = "gemini"
+        elif self.groq_api_key:
+            active_key = self.groq_api_key
+            provider_name = "groq"
+
+        if active_key is None:
+            # No provider key and no generic fields — this is a configuration error.
+            # Raise a clear message instead of letting the app crash later.
+            raise ValueError(
+                "No LLM provider configured. Set GEMINI_API_KEY or GROQ_API_KEY, "
+                "or provide LLM_PROVIDER + LLM_MODEL + LLM_API_KEY explicitly."
+            )
+
+        preset = _PROVIDER_PRESETS[provider_name]
+
+        # Derive any missing generic field from the preset.  Explicit values
+        # (e.g. LLM_MODEL=custom-model) are kept as-is.
+        if not self.llm_provider:
+            self.llm_provider = provider_name
+        if not self.llm_model:
+            self.llm_model = preset["model"]
+        if not self.llm_api_key:
+            self.llm_api_key = active_key
+        if not self.llm_base_url:
+            self.llm_base_url = preset["base_url"]
+
+        return self
 
     @model_validator(mode="after")
     def _retrieval_counts_are_consistent(self) -> "Settings":

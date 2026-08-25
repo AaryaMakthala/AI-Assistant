@@ -58,11 +58,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [fetchedMe, setFetchedMe] = useState<
     { token: string; me?: MeResponse } | undefined
   >();
-  // With no Supabase configured there is no session to wait for, so loading is already over.
-  const [isLoading, setIsLoading] = useState(configured);
+  // Tracks whether the Supabase session has been resolved.  Separate from isLoading
+  // because isLoading also covers the getMe phase (below).
+  const [sessionChecked, setSessionChecked] = useState(false);
 
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase) {
+      setSessionChecked(true);
+      return;
+    }
     let active = true;
 
     // getSession() first: onAuthStateChange does not replay the session that already
@@ -70,13 +74,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void supabase.auth.getSession().then(({ data }) => {
       if (!active) return;
       setToken(data.session?.access_token);
-      setIsLoading(false);
+      setSessionChecked(true);
     });
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!active) return;
       setToken(session?.access_token);
-      setIsLoading(false);
+      setSessionChecked(true);
     });
 
     return () => {
@@ -88,8 +92,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!token) return;
     let active = true;
-    // A failure here leaves `me` unresolved, which reads as "no elevated role" — the safe
-    // direction for a value that only ever unhides UI.
+    // A failure here leaves `me` as undefined, which means the user is not
+    // authenticated from the backend's perspective — even though they hold a
+    // valid Supabase session.  The downstream `isAuthenticated` flag reflects
+    // this, so protected pages redirect to /login rather than hammering the
+    // backend with requests that will all be 403.
     void getMe({ token })
       .then((value) => {
         if (active) setFetchedMe({ token, me: value });
@@ -118,10 +125,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.assign("/login");
   }, [supabase]);
 
+  // isLoading: true until the full auth state is known.
+  // 1. Supabase session has not been checked yet → loading.
+  // 2. Token exists but getMe has not resolved for it yet → loading.
+  //    (getMe resolves quickly; this prevents a flash-redirect to /login
+  //    between session resolution and getMe resolution.)
+  const isLoading =
+    configured &&
+    (!sessionChecked ||
+      (token !== undefined && (!fetchedMe || fetchedMe.token !== token)));
+
   const value = useMemo<AuthValue>(
     () => ({
       token,
-      isAuthenticated: Boolean(token),
+      // Authenticated only when BOTH the Supabase session exists AND the backend
+      // confirmed the identity via /me.  If /me fails (403), the user has a
+      // Supabase session but no valid workspace — they are redirected to /login.
+      isAuthenticated: Boolean(token) && me !== undefined,
       isLoading,
       me,
       role: me?.role,

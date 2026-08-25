@@ -7,7 +7,7 @@ logic, and a test client would add auth plumbing without testing anything more.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -18,7 +18,8 @@ pytestmark = pytest.mark.usefixtures("valid_env")
 
 
 def _response(status: str) -> DocumentResponse:
-    now = datetime.now(UTC)
+    # datetime.UTC is 3.11+; timezone.utc is compatible with both.
+    now = datetime.now(timezone.utc)
     return DocumentResponse(
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),

@@ -9,7 +9,7 @@ claims -> Principal) and the second half (a role claim in the token is ignored).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
@@ -25,7 +25,7 @@ pytestmark = pytest.mark.usefixtures("valid_env")
 def _token(claims: dict[str, Any], *, secret: str | None = None, expires_in: int = 3600) -> str:
     payload = {
         "aud": JWT_AUDIENCE,
-        "exp": datetime.now(UTC) + timedelta(seconds=expires_in),
+        "exp": datetime.now(timezone.utc) + timedelta(seconds=expires_in),
         **claims,
     }
     key = secret if secret is not None else get_settings().jwt_secret.get_secret_value()
@@ -129,7 +129,7 @@ def test_token_for_another_audience_is_rejected() -> None:
         "aud": "some-other-service",
         "sub": str(uuid.uuid4()),
         "workspace_id": str(uuid.uuid4()),
-        "exp": datetime.now(UTC) + timedelta(hours=1),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
     }
 
     with pytest.raises(HTTPException):
@@ -142,7 +142,7 @@ def test_unsigned_token_is_rejected() -> None:
         "aud": JWT_AUDIENCE,
         "sub": str(uuid.uuid4()),
         "workspace_id": str(uuid.uuid4()),
-        "exp": datetime.now(UTC) + timedelta(hours=1),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
     }
     forged = jwt.encode(payload, key="", algorithm="none")
 

@@ -34,6 +34,7 @@ uploads/
 *.db
 *.sqlite3
 faiss_index/
+test-results/
 
 # Editors / OS
 .vscode/

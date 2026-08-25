@@ -17,13 +17,9 @@ services:
         sync: false
       - key: JWT_SECRET
         generateValue: true
-      - key: LLM_PROVIDER
+      - key: GEMINI_API_KEY
         sync: false
-      - key: LLM_MODEL
-        sync: false
-      - key: LLM_API_KEY
-        sync: false
-      - key: LLM_BASE_URL
+      - key: GROQ_API_KEY
         sync: false
       - key: CORS_ALLOW_ORIGINS
         sync: false

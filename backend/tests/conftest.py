@@ -16,27 +16,21 @@ _TEST_ENV = {
     "LLM_PROVIDER": "test-provider",
     "LLM_MODEL": "test-model",
     "LLM_API_KEY": "test-llm-api-key",
-    "JWT_SECRET": "test-jwt-secret-that-is-long-enough-to-pass-validation",
 }
-
-#: Legacy variables that a developer's shell or .env may still export. They are not
-#: part of the Section 13 contract: they must be absent so the tests can prove the new
-#: configuration does not need them (and that their presence is inert).
-_LEGACY_ENV_KEYS = (
-    "GEMINI_API_KEY",
-    "GROQ_API_KEY",
-)
 
 
 @pytest.fixture(autouse=True)
 def _ignore_dotenv(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Ignore any developer .env so results don't vary by machine."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)
-    for key in (*_TEST_ENV, *_LEGACY_ENV_KEYS):
+    for key in _TEST_ENV:
+        monkeypatch.delenv(key, raising=False)
+    # Provider keys that may leak from a developer's shell or .env.
+    for key in ("GEMINI_API_KEY", "GROQ_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     # Clear every remaining config-affecting variable (GITHUB_TOKEN, SENTRY_DSN, ...)
     # so results cannot vary with a developer's shell or user environment. The field's
-    # env name may come from a validation_alias (e.g. embedding_dim ← EMBEDDING_DIMENSION)
+    # env name may come from a validation_alias (e.g. embedding_dim <- EMBEDDING_DIMENSION)
     # rather than the uppercased field name, so clear the alias too.
     for field_name, field_info in Settings.model_fields.items():
         monkeypatch.delenv(field_name.upper(), raising=False)

@@ -1,43 +1,44 @@
-"""Grounded chat endpoint (Phase 6) — CLAUDE.md section 8.
+"""Chat endpoints — grounded retrieval + streaming and session management.
 
-One question, answered from the workspace's approved documents and nothing else.
-The endpoint is a thin, deterministic wrapper around the Phase 5 retrieval
-pipeline (``app/retrieval/pipeline.py``):
+Two interfaces to the same retrieval pipeline:
+
+1. ``POST /chat`` — SSE streaming endpoint the frontend calls.  Returns a typed
+   event stream (``session``, ``sources``, ``token``, ``citations``, ``done``,
+   ``error``) matching the contract in ``frontend/src/lib/api/types.ts``.  Creates
+   or reuses a chat session and persists every turn.
+
+2. ``POST /chat/grounded`` — synchronous JSON endpoint used by the test suite and
+   for programmatic access.  Returns the complete answer in one response.
+
+Both endpoints share the same pipeline:
 
     authenticate → workspace membership → Phase 5 retrieval (hybrid → RRF → rerank)
         → Layer-1 grounding check
             ├── grounded    → build prompt from the final chunks → LLM → cited answer
             └── ungrounded  → honest refusal, NO LLM call (CLAUDE.md 8.3)
 
-It never bypasses the pipeline, never duplicates its logic, and never lets the
-client choose the workspace: the tenant is the caller's default workspace from the
-verified JWT claim, and membership is resolved from the ``members`` table at
-request time (CLAUDE.md section 4) — the same contract the Phase 3 document
-endpoints use. A client-supplied ``workspace_id`` is rejected outright
-(``extra="forbid"``), so a tenant can never be asserted from the wire.
-
-The response is synchronous JSON rather than SSE. The provider's token stream is
-consumed internally; the returned contract is the complete answer plus the
-backend-constructed citations, which is what the frontend needs to render the
-turn (CLAUDE.md section 10: synchronous responses are fine when the provider
-supports streaming only as a transport detail).
-
-Citations are built by the backend from the chunks that were actually sent to the
-LLM (CLAUDE.md 8.4) — the model never invents citation metadata, because it never
-receives any.
+Session management:
+  - ``GET  /chat/sessions``                    — list the user's sessions
+  - ``GET  /chat/sessions/{id}/messages``       — load a session's transcript
+  - ``DELETE /chat/sessions/{id}``              — delete a session and its messages
 """
 
 from __future__ import annotations
 
+import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, insert, select
 
 from app.api.dependencies import get_generic_llm
 from app.api.workspace_deps import assert_workspace_role
+from app.db.models import ChatMessage, ChatSession
 from app.llm.base import Completion, LLMError, LLMProvider
 from app.rag.prompts import build_messages
 from app.retrieval.pipeline import RetrievedChunk, retrieve
@@ -52,16 +53,26 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 REFUSAL_ANSWER = "I couldn't find that information in the approved company knowledge base."
 
 
-class GroundedChatRequest(BaseModel):
-    """A question for the workspace's knowledge base.
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
 
-    Only the message travels from the client. The workspace is the caller's
-    authenticated default workspace — never a field on this request.
-    """
+
+class GroundedChatRequest(BaseModel):
+    """A question for the workspace's knowledge base (synchronous endpoint)."""
 
     model_config = ConfigDict(extra="forbid")
 
     message: str = Field(min_length=1, max_length=8000)
+
+
+class ChatStreamRequest(BaseModel):
+    """The SSE streaming chat request body (what the frontend sends)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=8000)
+    session_id: uuid.UUID | None = None
 
 
 class Source(BaseModel):
@@ -85,14 +96,46 @@ class GroundedChatResponse(BaseModel):
     """The answer plus enough metadata to audit how it was grounded."""
 
     answer: str
-    #: Whether the answer is grounded in retrieved evidence (CLAUDE.md 8.3).
     grounded: bool
-    #: True when retrieval produced no acceptable evidence and the LLM was never
-    #: called — the machine-readable refusal the frontend can branch on.
     insufficient_evidence: bool
     sources: list[Source]
     provider: str = ""
     model: str = ""
+
+
+class ChatSessionResponse(BaseModel):
+    """Session as the frontend renders it in the sidebar."""
+
+    id: str
+    title: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ChatSessionListResponse(BaseModel):
+    sessions: list[ChatSessionResponse]
+
+
+class ChatMessageResponse(BaseModel):
+    """One persisted turn, matching the frontend ``ChatMessage`` type."""
+
+    id: str
+    role: str
+    content: str
+    citations: list[dict] = Field(default_factory=list)
+    created_at: str
+    incomplete: bool = False
+    routes: list[str] = Field(default_factory=list)
+    sql_query: str = ""
+
+
+class ChatMessageListResponse(BaseModel):
+    messages: list[ChatMessageResponse]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _source(chunk: RetrievedChunk) -> Source:
@@ -107,17 +150,264 @@ def _source(chunk: RetrievedChunk) -> Source:
     )
 
 
+def _source_dict(chunk: RetrievedChunk, *, number: int) -> dict:
+    """Flat citation dict matching the frontend ``Source`` / ``Citation`` type."""
+    return {
+        "number": number,
+        "document_id": str(chunk.document_id),
+        "chunk_id": str(chunk.chunk_id),
+        "filename": chunk.filename,
+        "page": chunk.page_number,
+        "label": chunk.citation_label,
+        "excerpt": chunk.content[:240] if chunk.content else "",
+        "score": round(chunk.rerank_score, 4),
+    }
+
+
+async def _sse_event(name: str, data: object) -> str:
+    """Format one SSE ``event:`` / ``data:`` frame."""
+    payload = json.dumps(data, default=str)
+    return f"event: {name}\ndata: {payload}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming chat endpoint  (POST /chat)
+# ---------------------------------------------------------------------------
+
+
+async def _stream_chat(
+    principal: CurrentPrincipal,
+    payload: ChatStreamRequest,
+    llm: LLMProvider,
+) -> AsyncIterator[str]:
+    """SSE generator: retrieval → grounding → LLM stream → persist."""
+
+    workspace_id = principal.workspace_id
+    question = payload.message.strip()
+
+    # 1. Workspace membership check (before any DB write).
+    await assert_workspace_role(workspace_id, principal)
+
+    # 2. Create or verify session.
+    session_id: uuid.UUID | None = None
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        if payload.session_id is not None:
+            existing = (
+                await db.execute(
+                    select(ChatSession.id).where(
+                        ChatSession.id == payload.session_id,
+                        ChatSession.workspace_id == workspace_id,
+                        ChatSession.user_id == principal.user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                session_id = existing
+            else:
+                row = (
+                    await db.execute(
+                        insert(ChatSession)
+                        .values(
+                            workspace_id=workspace_id,
+                            user_id=principal.user_id,
+                        )
+                        .returning(ChatSession.id)
+                    )
+                ).scalar_one()
+                session_id = row
+        else:
+            row = (
+                await db.execute(
+                    insert(ChatSession)
+                    .values(
+                        workspace_id=workspace_id,
+                        user_id=principal.user_id,
+                    )
+                    .returning(ChatSession.id)
+                )
+            ).scalar_one()
+            session_id = row
+
+    assert session_id is not None
+    yield await _sse_event("session", {"session_id": str(session_id)})
+
+    # 3. Persist user message.
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        await db.execute(
+            insert(ChatMessage).values(
+                session_id=session_id,
+                role="user",
+                content=question,
+            )
+        )
+
+    # 4. Retrieve evidence (session closes before the LLM call).
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        result = await retrieve(db, query=question, workspace_id=workspace_id)
+
+    if not result.grounded:
+        logger.info(
+            "Refused ungrounded question for workspace {ws} (top_score={score})",
+            ws=workspace_id,
+            score=result.top_score,
+        )
+        # Emit empty sources, the refusal text as a token, and done.
+        yield await _sse_event("sources", {"sources": []})
+        yield await _sse_event("token", {"text": REFUSAL_ANSWER})
+        yield await _sse_event("citations", {"citations": []})
+
+        # Persist refusal.
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=session_id,
+                    role="assistant",
+                    content=REFUSAL_ANSWER,
+                    sources=[],
+                )
+            )
+
+        yield await _sse_event(
+            "done",
+            {
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "provider": "",
+                "model": "",
+                "grounded": False,
+                "routes": [],
+                "sql_query": "",
+            },
+        )
+        return
+
+    # 5. Emit sources.
+    sources_list = [
+        _source_dict(chunk, number=i + 1)
+        for i, chunk in enumerate(result.chunks)
+    ]
+    yield await _sse_event("sources", {"sources": sources_list})
+
+    # 6. Stream LLM tokens.
+    messages = build_messages(question=question, chunks=result.chunks)
+    completion = Completion()
+    full_text = ""
+    try:
+        async for token in llm.stream(messages, completion=completion):
+            full_text += token
+            yield await _sse_event("token", {"text": token})
+    except LLMError as exc:
+        logger.error(
+            "Generation failed for user {user} in workspace {ws}: {error}",
+            user=principal.user_id,
+            ws=workspace_id,
+            error=exc,
+        )
+        yield await _sse_event(
+            "error",
+            {
+                "detail": "The language model is currently unavailable. Please try again.",
+                "partial": bool(full_text),
+            },
+        )
+        return
+
+    if not full_text.strip():
+        yield await _sse_event(
+            "error",
+            {
+                "detail": "The language model returned an empty response. Please try again.",
+                "partial": False,
+            },
+        )
+        return
+
+    # 7. Emit citations.
+    yield await _sse_event("citations", {"citations": sources_list})
+
+    # 8. Persist assistant message.
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        await db.execute(
+            insert(ChatMessage).values(
+                session_id=session_id,
+                role="assistant",
+                content=full_text,
+                sources=sources_list,
+            )
+        )
+
+    # 9. Emit done.
+    yield await _sse_event(
+        "done",
+        {
+            "usage": completion.usage.as_dict(),
+            "provider": completion.provider or llm.name,
+            "model": completion.model or llm.model,
+            "grounded": True,
+            "routes": [],
+            "sql_query": "",
+        },
+    )
+
+    logger.info(
+        "Streamed answer for workspace {ws}: {n} sources, {tokens} tokens",
+        ws=workspace_id,
+        n=len(sources_list),
+        tokens=completion.usage.completion_tokens,
+    )
+
+
+@router.post(
+    "",
+    response_class=StreamingResponse,
+    summary="SSE streaming chat — what the frontend calls",
+)
+async def chat_stream(
+    principal: CurrentPrincipal,
+    payload: ChatStreamRequest,
+    llm: Annotated[LLMProvider, Depends(get_generic_llm)],
+) -> StreamingResponse:
+    """SSE streaming chat: retrieval → grounding → LLM stream → persist.
+
+    The frontend calls ``POST /chat`` with ``Accept: text/event-stream`` and
+    receives a typed event stream matching the protocol in
+    ``frontend/src/lib/api/types.ts``.
+
+    Session management is transparent: if ``session_id`` is omitted, a new
+    session is created.  If it refers to a session the user owns, the message
+    is appended.  If it refers to a session that no longer exists, a new one
+    is created.
+    """
+    return StreamingResponse(
+        _stream_chat(principal, payload, llm),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Synchronous JSON chat endpoint  (POST /chat/grounded)  — test suite & API
+# ---------------------------------------------------------------------------
+
+
 @router.post(
     "/grounded",
     response_model=GroundedChatResponse,
-    summary="Ask a question grounded in the workspace's approved documents",
+    summary="Ask a question grounded in the workspace's approved documents (sync JSON)",
 )
 async def grounded_chat(
     principal: CurrentPrincipal,
     payload: GroundedChatRequest,
     llm: Annotated[LLMProvider, Depends(get_generic_llm)],
 ) -> GroundedChatResponse:
-    """Answer `payload.message` from the caller's workspace's approved documents.
+    """Answer ``payload.message`` from the caller's workspace's approved documents.
 
     Fail-closed contract: if retrieval finds no acceptable evidence the request
     returns a refusal *without calling the LLM*, and no answer is ever fabricated
@@ -130,15 +420,9 @@ async def grounded_chat(
             detail="Message cannot be empty.",
         )
 
-    # The workspace is the caller's default workspace from the verified JWT claim;
-    # membership is resolved from the canonical members table at request time and
-    # never from the token (CLAUDE.md section 4). Both OWNER and MEMBER may chat.
     workspace_id = principal.workspace_id
     await assert_workspace_role(workspace_id, principal)
 
-    # Phase 5 pipeline: hybrid search → RRF fusion → rerank → Layer-1 grounding.
-    # The retrieval session closes before the LLM call, so no pooled connection is
-    # pinned across a multi-second generation.
     async with tenant_session(
         workspace_id=workspace_id, user_id=principal.user_id
     ) as session:
@@ -157,8 +441,6 @@ async def grounded_chat(
             sources=[],
         )
 
-    # Layer-1 passed: build the prompt from the final reranked chunks only. The
-    # prompt treats retrieved text as untrusted quoted data (CLAUDE.md 4.4).
     messages = build_messages(question=question, chunks=result.chunks)
     completion = Completion()
     try:
@@ -201,6 +483,210 @@ async def grounded_chat(
         sources=sources,
         provider=completion.provider or llm.name,
         model=completion.model or llm.model,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session management
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/sessions",
+    response_model=ChatSessionListResponse,
+    summary="List the user's chat sessions",
+)
+async def list_chat_sessions(
+    principal: CurrentPrincipal,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ChatSessionListResponse:
+    """Sessions the caller owns in their workspace, most recently active first.
+
+    ``title`` is derived from the first user message; ``updated_at`` from the
+    most recent message (or the session's ``created_at`` when no messages exist).
+    """
+    workspace_id = principal.workspace_id
+
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        sessions = (
+            await db.execute(
+                select(ChatSession)
+                .where(
+                    ChatSession.workspace_id == workspace_id,
+                    ChatSession.user_id == principal.user_id,
+                )
+                .order_by(ChatSession.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        ).scalars().all()
+
+        if not sessions:
+            return ChatSessionListResponse(sessions=[])
+
+        session_ids = [s.id for s in sessions]
+
+        # First user message per session → title.
+        title_sq = (
+            select(
+                ChatMessage.session_id,
+                ChatMessage.content.label("title"),
+                func.row_number()
+                .over(
+                    partition_by=ChatMessage.session_id,
+                    order_by=ChatMessage.created_at,
+                )
+                .label("rn"),
+            )
+            .where(
+                ChatMessage.session_id.in_(session_ids),
+                ChatMessage.role == "user",
+            )
+            .subquery()
+        )
+        title_rows = await db.execute(
+            select(title_sq.c.session_id, title_sq.c.title).where(
+                title_sq.c.rn == 1
+            )
+        )
+        titles: dict[uuid.UUID, str] = {
+            row.session_id: row.title for row in title_rows
+        }
+
+        # Most recent message timestamp per session → updated_at.
+        updated_rows = await db.execute(
+            select(
+                ChatMessage.session_id,
+                func.max(ChatMessage.created_at).label("updated_at"),
+            )
+            .where(ChatMessage.session_id.in_(session_ids))
+            .group_by(ChatMessage.session_id)
+        )
+        updated_at: dict[uuid.UUID, object] = {
+            row.session_id: row.updated_at for row in updated_rows
+        }
+
+    result = [
+        ChatSessionResponse(
+            id=str(s.id),
+            title=(titles[s.id][:100] if s.id in titles else None),
+            created_at=s.created_at.isoformat(),
+            updated_at=(
+                updated_at[s.id].isoformat()  # type: ignore[union-attr]
+                if s.id in updated_at
+                else s.created_at.isoformat()
+            ),
+        )
+        for s in sessions
+    ]
+    return ChatSessionListResponse(sessions=result)
+
+
+@router.get(
+    "/sessions/{session_id}/messages",
+    response_model=ChatMessageListResponse,
+    summary="Load a session's transcript",
+)
+async def get_chat_messages(
+    principal: CurrentPrincipal,
+    session_id: uuid.UUID,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> ChatMessageListResponse:
+    """Messages in a session, oldest first.  Scoped to the caller's workspace."""
+    workspace_id = principal.workspace_id
+
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        # Verify the session belongs to this user in this workspace.
+        session_exists = (
+            await db.execute(
+                select(ChatSession.id).where(
+                    ChatSession.id == session_id,
+                    ChatSession.workspace_id == workspace_id,
+                    ChatSession.user_id == principal.user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if session_exists is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found.",
+            )
+
+        rows = (
+            await db.execute(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.created_at.asc())
+                .limit(limit)
+            )
+        ).scalars().all()
+
+    messages = [
+        ChatMessageResponse(
+            id=str(m.id),
+            role=m.role,
+            content=m.content,
+            citations=m.sources if isinstance(m.sources, list) else [],
+            created_at=m.created_at.isoformat(),
+        )
+        for m in rows
+    ]
+    return ChatMessageListResponse(messages=messages)
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a session and its messages",
+)
+async def delete_chat_session(
+    principal: CurrentPrincipal,
+    session_id: uuid.UUID,
+) -> None:
+    """Delete a session and all its messages.  Messages cascade-delete via FK."""
+    workspace_id = principal.workspace_id
+
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        existing = (
+            await db.execute(
+                select(ChatSession.id).where(
+                    ChatSession.id == session_id,
+                    ChatSession.workspace_id == workspace_id,
+                    ChatSession.user_id == principal.user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found.",
+            )
+        await db.execute(
+            select(ChatSession)
+            .where(
+                ChatSession.id == session_id,
+                ChatSession.workspace_id == workspace_id,
+            )
+        )
+        # Explicit delete rather than relying solely on cascade — makes the
+        # intent visible and survives a future FK change.
+        from sqlalchemy import delete
+
+        await db.execute(
+            delete(ChatMessage).where(ChatMessage.session_id == session_id)
+        )
+        await db.execute(
+            delete(ChatSession).where(
+                ChatSession.id == session_id,
+                ChatSession.workspace_id == workspace_id,
+            )
+        )
+
+    logger.info(
+        "Deleted chat session {sid} for workspace {ws}",
+        sid=session_id,
+        ws=workspace_id,
     )
 
 

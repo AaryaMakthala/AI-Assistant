@@ -73,6 +73,7 @@ async def semantic_search(
     query_embedding: list[float],
     workspace_id: uuid.UUID,
     limit: int,
+    document_id: uuid.UUID | None = None,
 ) -> list[Match]:
     """Chunks nearest to `query_embedding` by cosine distance, one workspace only.
 
@@ -82,21 +83,25 @@ async def semantic_search(
     """
     distance = DocumentChunk.embedding.cosine_distance(query_embedding)
 
+    stmt = (
+        select(
+            DocumentChunk.id,
+            DocumentChunk.document_id,
+            DocumentChunk.content,
+            DocumentChunk.page_number,
+            DocumentChunk.section_title,
+            DocumentChunk.chunk_index,
+            Document.filename,
+        )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(DocumentChunk.workspace_id == workspace_id)
+    )
+    if document_id is not None:
+        stmt = stmt.where(DocumentChunk.document_id == document_id)
+
     rows = (
         await session.execute(
-            select(
-                DocumentChunk.id,
-                DocumentChunk.document_id,
-                DocumentChunk.content,
-                DocumentChunk.page_number,
-                DocumentChunk.section_title,
-                DocumentChunk.chunk_index,
-                Document.filename,
-            )
-            .join(Document, Document.id == DocumentChunk.document_id)
-            .where(DocumentChunk.workspace_id == workspace_id)
-            .order_by(distance)
-            .limit(limit)
+            stmt.order_by(distance).limit(limit)
         )
     ).all()
 
@@ -121,6 +126,7 @@ async def keyword_search(
     query: str,
     workspace_id: uuid.UUID,
     limit: int,
+    document_id: uuid.UUID | None = None,
 ) -> list[Match]:
     """Chunks matching `query` by PostgreSQL full-text search, one workspace only.
 
@@ -132,24 +138,28 @@ async def keyword_search(
     ts_query = func.websearch_to_tsquery("english", query)
     rank = func.ts_rank(DocumentChunk.content_tsv, ts_query)
 
+    stmt = (
+        select(
+            DocumentChunk.id,
+            DocumentChunk.document_id,
+            DocumentChunk.content,
+            DocumentChunk.page_number,
+            DocumentChunk.section_title,
+            DocumentChunk.chunk_index,
+            Document.filename,
+        )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(
+            DocumentChunk.workspace_id == workspace_id,
+            DocumentChunk.content_tsv.op("@@")(ts_query),
+        )
+    )
+    if document_id is not None:
+        stmt = stmt.where(DocumentChunk.document_id == document_id)
+
     rows = (
         await session.execute(
-            select(
-                DocumentChunk.id,
-                DocumentChunk.document_id,
-                DocumentChunk.content,
-                DocumentChunk.page_number,
-                DocumentChunk.section_title,
-                DocumentChunk.chunk_index,
-                Document.filename,
-            )
-            .join(Document, Document.id == DocumentChunk.document_id)
-            .where(
-                DocumentChunk.workspace_id == workspace_id,
-                DocumentChunk.content_tsv.op("@@")(ts_query),
-            )
-            .order_by(rank.desc())
-            .limit(limit)
+            stmt.order_by(rank.desc()).limit(limit)
         )
     ).all()
 

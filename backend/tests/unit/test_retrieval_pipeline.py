@@ -70,11 +70,11 @@ async def test_retrieve_threads_workspace_into_searches(
     ws = uuid.uuid4()
     seen: list[uuid.UUID] = []
 
-    async def _semantic(session, *, query_embedding, workspace_id, limit) -> list[Match]:  # noqa: ANN001
+    async def _semantic(session, *, query_embedding, workspace_id, limit, document_id=None) -> list[Match]:  # noqa: ANN001
         seen.append(workspace_id)
         return []
 
-    async def _keyword(session, *, query, workspace_id, limit) -> list[Match]:  # noqa: ANN001
+    async def _keyword(session, *, query, workspace_id, limit, document_id=None) -> list[Match]:  # noqa: ANN001
         seen.append(workspace_id)
         return []
 

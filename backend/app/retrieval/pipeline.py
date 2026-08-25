@@ -167,6 +167,26 @@ async def retrieve(
         layer=relevance.layer,
     )
 
+    # --- Document targeting (Part 4) ---
+    # Check if the user explicitly named a document in their question.
+    from app.retrieval.doc_targeting import resolve_document_target
+
+    doc_target = await resolve_document_target(
+        session=session,
+        question=text,
+        workspace_id=workspace_id,
+    )
+    target_doc_id = doc_target.matched_document_id
+    if target_doc_id is not None:
+        logger.info(
+            "Document targeting: resolved '{name}' to doc {doc_id} ({filename}, "
+            "confidence={confidence:.2f})",
+            name=doc_target.detected_name,
+            doc_id=target_doc_id,
+            filename=doc_target.matched_filename,
+            confidence=doc_target.confidence,
+        )
+
     # --- Hybrid retrieval ---
     # Embed the query in a worker thread: sentence-transformers on CPU is the
     # slowest step before the reranker, and the event loop should not pay for it.
@@ -177,12 +197,14 @@ async def retrieve(
         query_embedding=query_embedding,
         workspace_id=workspace_id,
         limit=candidate_count,
+        document_id=target_doc_id,
     )
     keyword = await keyword_search(
         session,
         query=text,
         workspace_id=workspace_id,
         limit=candidate_count,
+        document_id=target_doc_id,
     )
 
     # Fuse the two ranked lists; the merged pool is capped at the pre-rerank count

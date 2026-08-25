@@ -222,17 +222,23 @@ _MEMBER_COUNT_PATTERN = re.compile(
 )
 
 _MEMBER_LIST_PATTERN = re.compile(
-    r"(?:list|show|what|which|name|who)\s+"
+    r"(?:list|show|what|which|name)\s+"
     r"(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?"
     r"(?:the\s+|this\s+|our\s+)?(?:workspace\s+)?"
-    r"(?:people|members?|users?|employees?|team\s*members?|contributors?)",
+    r"(?:people|members?|users?|employees?|team\s*members?|contributors?)"
+    r"|"
+    r"(?:who(?:'?s|\s+is|\s+are))\s+"
+    r"(?:in|of|on|at)\s+"
+    r"(?:the\s+|this\s+|our\s+)?(?:workspace|company|team)?",
     re.IGNORECASE,
 )
 
 _ROLE_PATTERN = re.compile(
-    r"(?:what\s+is\s+my|my\s+current|what\s+role\s+(?:do\s+i|am\s+i))"
+    r"(?:what(?:'?s|\s+is)\s+my|my\s+current|what\s+role\s+(?:do\s+i|am\s+i))"
     r"\s+"
-    r"(?:role|access|permission|level)",
+    r"(?:role|access|permission|level)"
+    r"|"
+    r"what(?:'?s|\s+is)\s+my\s+(?:role|access|permission|level)",
     re.IGNORECASE,
 )
 

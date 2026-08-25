@@ -173,18 +173,30 @@ export function Workspace() {
  * another tab. Every backend endpoint requires a verified JWT (CLAUDE.md 4.6), so without
  * one the app can render but cannot do anything — saying so plainly beats letting every
  * action fail with a 401 the user has to interpret.
+ *
+ * The button calls `signOut()` — the same proper flow as the header's Sign-out button —
+ * which clears Supabase cookies/session, resets local state, and navigates to /login.
+ * A plain `<a href="/login">` would leave stale cookies behind, causing proxy.ts to
+ * see a stale session and potentially redirect the user away from the login page before
+ * they can sign in.
  */
 function AuthNotice() {
+  const { signOut } = useAuth();
+
   return (
     <div
       role="status"
-      className="border-b border-warning/30 bg-warning-subtle px-4 py-2 text-xs text-warning"
+      className="flex items-center gap-2 border-b border-warning/30 bg-warning-subtle px-4 py-2 text-xs text-warning"
     >
-      Your session has ended.{" "}
-      <a href="/login" className="underline hover:text-foreground">
-        Sign in again
-      </a>{" "}
-      to reach your organization&apos;s data.
+      <span>Your session has ended.</span>
+      <button
+        type="button"
+        onClick={() => void signOut()}
+        className="font-medium underline transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+      >
+        Sign out
+      </button>
+      <span>to clear your session, then sign in again.</span>
     </div>
   );
 }

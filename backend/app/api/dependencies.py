@@ -20,9 +20,30 @@ def get_generic_llm() -> LLMProvider:
 
     Built per request rather than cached: constructing it only reads settings, and
     not caching means a reconfiguration takes effect without a process restart.
-    Returns the same :class:`LLMProvider` protocol the legacy router implemented,
-    so tests can override it through FastAPI's normal dependency mechanism.
+
+    When multiple provider API keys are configured, returns a
+    :class:`~app.llm.fallback.FallbackChainProvider` that implements sequential
+    failover (Gemini → Grok → OpenRouter).  When only one key is present,
+    returns a plain :class:`~app.llm.generic.GenericProvider`.
     """
+    from app.config import get_settings
+
+    settings = get_settings()
+    chain_count = sum(
+        1
+        for key in (
+            settings.gemini_api_key,
+            settings.xai_api_key,
+            settings.openrouter_api_key,
+        )
+        if key is not None
+    )
+
+    if chain_count > 1:
+        from app.llm.fallback import FallbackChainProvider
+
+        return FallbackChainProvider()
+
     from app.llm.generic import GenericProvider
 
     return GenericProvider()

@@ -89,11 +89,14 @@ Auth
   the backend verifies it and looks up membership from the database.
 
 LLM
-  ONE model, configured entirely through environment variables (LLM_PROVIDER,
-  LLM_MODEL, LLM_API_KEY, LLM_BASE_URL). No hardcoded provider, no fallback chain.
-  Must run against free-tier or free-routed models (e.g. OpenRouter's free model
-  routing). The code must not assume any specific provider's quirks — treat it as a
-  generic chat-completions endpoint.
+  Sequential fallback chain: Gemini (primary) → Grok/xAI (fallback) → OpenRouter
+  (final fail-safe). Providers are tried strictly sequentially, never in parallel.
+  Configured through environment variables (GEMINI_API_KEY, XAI_API_KEY,
+  OPENROUTER_API_KEY, or the generic LLM_PROVIDER/LLM_MODEL/LLM_API_KEY/LLM_BASE_URL).
+  Only providers whose API key is present are included in the chain.  Fallback triggers
+  on HTTP 429/5xx, timeout, or connection error — not on invalid requests.  The code
+  treats every provider as a generic chat-completions endpoint; no provider-specific
+  quirks are assumed.
 
 Embeddings
   Exactly ONE local, free embedding model via sentence-transformers
@@ -357,14 +360,19 @@ Relevance/grounding threshold check
      └── above threshold → continue
      │
      ▼
-LLM (strict "answer only from context" system prompt)
+LLM with strict "answer only from context" prompt (Layer 2 grounding)
      │
      ▼
 Answer + backend-constructed citations
 ```
 
-Deterministic, single pipeline. No LangGraph, no supervisor, no routing between
-specialized agents — there is exactly one kind of question this system answers.
+Three separate decisions in the RAG pipeline:
+1. **Query/company relevance** -- is this about this workspace at all? (relevance gate)
+2. **Retrieval relevance** -- did we get any reasonably on-top chunks? (grounding threshold)
+3. **Answer grounding** -- do the top chunks support an answer? (system prompt)
+
+The reranker's raw score is NOT a relevance signal by itself -- cross-encoder scores
+are unbounded logits, not probabilities. — there is exactly one kind of question this system answers.
 
 ### 8.1 Hybrid retrieval and merge strategy
 Semantic-only search misses exact terms (`HR-004`, `POL-17`, `20 days`) because
@@ -393,10 +401,15 @@ the supplied context and to say so explicitly if the context doesn't cover the
 question, as a backstop for cases that pass the threshold but are still a partial
 match. Neither layer alone is sufficient; both apply on every request.
 
+Note: a reranker’s raw score sign is not a relevance signal by itself — cross-encoder
+scores are unbounded logits, not probabilities.  Query-relevance (is this about this
+workspace?), retrieval-relevance (did we find good chunks?), and answer-grounding (do
+the chunks support an answer?) are three separate decisions implemented independently.
+
 An out-of-scope question ("who won the World Cup", "write me a Python game") is not a
-special case needing its own agent — it's simply a question with no relevant
-retrieval results, and layer 1 handles it the same way it handles any ungrounded
-question.
+special case needing its own agent — it’s simply a question with no relevant
+retrieval results, and the relevance gate + layer 1 handle it the same way they
+handle any ungrounded question.
 
 ### 8.4 Citations
 The LLM is never trusted to invent citation metadata. The backend builds the citation
@@ -635,9 +648,12 @@ Assume limited hardware and API quota throughout:
   LLM tier.
 - Use streaming only if the configured provider reliably supports it; if not,
   synchronous responses are fine — don't build a fallback streaming shim.
-- No LLM fallback chain. One provider, one model, configured through env vars. If the
-  free tier rate-limits, that's a documented limitation (Section 14 risk register), not
-  a reason to add a second provider.
+- Sequential multi-provider LLM fallback chain (Gemini -> Grok -> OpenRouter). Providers
+  tried strictly sequentially, never in parallel, bounded by an overall per-request
+  timeout. If all configured providers fail, the request surfaces a clear
+  "LLM unavailable" error. The free-tier constraint (no parallel model calls per request)
+  is preserved; the overall timeout prevents three sequential timeouts from summing to
+  minutes of hung requests.
 
 ---
 
@@ -758,11 +774,19 @@ SUPABASE_URL=
 SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 
-# LLM — one provider, configured, never hardcoded
-LLM_PROVIDER=
-LLM_MODEL=
-LLM_API_KEY=
-LLM_BASE_URL=
+# LLM — sequential fallback chain, never parallel
+# Gemini (primary, uses gemini-3.6-flash by default):
+GEMINI_API_KEY=
+# Grok/xAI (fallback, uses grok-3-mini by default):
+XAI_API_KEY=
+# GROK_MODEL=
+# OpenRouter (final fail-safe, uses google/gemini-2.0-flash-001 by default):
+OPENROUTER_API_KEY=
+# OPENROUTER_MODEL=
+# Optional overrides for the primary provider:
+# LLM_PROVIDER=
+# LLM_MODEL=
+# LLM_BASE_URL=
 
 # Embeddings — local, free, pinned
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
@@ -789,7 +813,7 @@ Never commit `.env`. `.env.example` documents every variable with no real values
 | Risk | Mitigation |
 |---|---|
 | Embedding model swapped mid-project, old vectors incomparable to new queries | Pin `EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` from Phase 1; changing either requires re-embedding the whole index, never mixing |
-| Free-tier LLM rate limits stall the demo | Documented, expected limitation of a single free-tier provider — not a reason to add a fallback chain; log and surface a clear error to the user |
+| Free-tier LLM rate limits stall the demo | Sequential fallback chain (Gemini → Grok → OpenRouter) handles transient failures; overall per-request timeout prevents cascading delays |
 | Large upload makes the request slow | `MAX_UPLOAD_SIZE_MB` enforced before the file is read into memory (Section 6) |
 | A member's pending document leaks into search results | Structurally impossible while the Section 5 invariant holds — `PENDING`/`REJECTED` documents have zero chunks; treat any violation as a Section 7 transaction bug |
 | Retrieval returns irrelevant/too many chunks | Bounded pre-rerank (~15) and post-rerank (~5–8) context, per Section 8 |
@@ -798,6 +822,8 @@ Never commit `.env`. `.env.example` documents every variable with no real values
 | A colleague's personal (pending) document text leaks through chunks | Enforced structurally by ingestion timing (Section 5), not by a query-time filter alone — verify both hold together |
 | Free/small local reranker gives noisier scores than a hosted one | Acceptable, documented trade-off for a free-tier project; the evaluation set (Section 15) quantifies this rather than assuming it's fine |
 | Secrets committed to git | `.gitignore` from commit #1, `.env.example` only |
+| Correlated provider outage (all three providers down simultaneously) | Rare but possible; the system surfaces a clear "LLM unavailable" error after exhausting the chain. The retrieval pipeline still works (metadata questions answerable from DB), so the system degrades gracefully rather than failing completely |
+| Provider API key accidentally logged | Logging never includes API keys — only provider name + HTTP status code. Structured logging with provider field makes audit possible without key exposure |
 
 ---
 

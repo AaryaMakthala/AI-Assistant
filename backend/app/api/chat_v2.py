@@ -26,6 +26,7 @@ Session management:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
@@ -38,19 +39,29 @@ from sqlalchemy import func, insert, select
 
 from app.api.dependencies import get_generic_llm
 from app.api.workspace_deps import assert_workspace_role
-from app.db.models import ChatMessage, ChatSession
+from app.db.models import ChatMessage, ChatSession, Document
 from app.llm.base import Completion, LLMError, LLMProvider
 from app.rag.prompts import build_messages
 from app.retrieval.pipeline import RetrievedChunk, retrieve
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
 
-router = APIRouter(prefix="/chat", tags=["chat"])
+router = APIRouter(prefix="/chat", tags=["chat"])#: Returned when retrieval finds zero candidate chunks.
+REFUSAL_NO_EVIDENCE = (
+    "I couldn't find any relevant information about that topic in your uploaded documents."
+)
 
-#: Returned verbatim when Layer-1 grounding fails (CLAUDE.md 8.3). This is the
-#: honest refusal that replaces any LLM call on an ungrounded question — the LLM
-#: never sees the question, so it can never be tempted to fill the gap.
-REFUSAL_ANSWER = "I couldn't find that information in the approved company knowledge base."
+#: Returned when retrieval finds chunks but none pass the grounding threshold.
+REFUSAL_NOT_RELEVANT = (
+    "Your workspace contains documents, but none of them contain information"
+    " about that specific topic. Try rephrasing your question or check that"
+    " the relevant document has been uploaded."
+)
+
+# Kept for backward compatibility; prefer the specific variants above.
+REFUSAL_ANSWER = REFUSAL_NO_EVIDENCE
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +182,209 @@ async def _sse_event(name: str, data: object) -> str:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Metadata questions  (bypass retrieval for count/list/role/member queries)
+# ---------------------------------------------------------------------------
+
+# Topic qualifiers that make a question about document *content*, not metadata.
+_TOPIC_QUALIFIERS = re.compile(
+    r"\b(?:about|discuss|cover|mention|regarding|on the topic of|concerning)\b",
+    re.IGNORECASE,
+)
+
+# Matches questions that ask about documents/files themselves (count or list).
+# A topic qualifier appearing AFTER the document phrase makes it a content
+# question -- "How many documents discuss X?" must go through retrieval, not
+# this path.
+_COUNT_PATTERN = re.compile(
+    r"(?:how\s+many|number\s+of|count\s+of|total\s+(?:number\s+of)?)"
+    r"\s+"
+    r"(?:uploaded\s+)?(?:my\s+|the\s+|this\s+)?(?:own\s+)?"
+    r"(?:files|documents?)",
+    re.IGNORECASE,
+)
+
+_LIST_PATTERN = re.compile(
+    r"(?:list|show|what|which|name)\s+"
+    r"(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?"
+    r"(?:my\s+|the\s+|this\s+)?(?:uploaded\s+)?(?:own\s+)?"
+    r"(?:files|documents?)",
+    re.IGNORECASE,
+)
+
+# --- Member/workspace metadata patterns ---
+
+_MEMBER_COUNT_PATTERN = re.compile(
+    r"(?:how\s+many|number\s+of|count\s+of|total\s+(?:number\s+of)?)"
+    r"\s+"
+    r"(?:people|members?|users?|employees?|team\s*members?|contributors?)",
+    re.IGNORECASE,
+)
+
+_MEMBER_LIST_PATTERN = re.compile(
+    r"(?:list|show|what|which|name|who)\s+"
+    r"(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?"
+    r"(?:the\s+|this\s+|our\s+)?(?:workspace\s+)?"
+    r"(?:people|members?|users?|employees?|team\s*members?|contributors?)",
+    re.IGNORECASE,
+)
+
+_ROLE_PATTERN = re.compile(
+    r"(?:what\s+is\s+my|my\s+current|what\s+role\s+(?:do\s+i|am\s+i))"
+    r"\s+"
+    r"(?:role|access|permission|level)",
+    re.IGNORECASE,
+)
+
+# "This month" date filter pattern.
+_THIS_MONTH_PATTERN = re.compile(
+    r"\b(?:this\s+month|current\s+month|in\s+the\s+current\s+month|"
+    r"uploaded\s+(?:this|in\s+this)\s+month)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_metadata_question(question: str) -> str | None:
+    """Detect document/member-metadata questions that bypass retrieval.
+
+    Returns "count", "list", "member_count", "member_list",
+    "role", or None.
+    """
+    normalised = question.strip().rstrip("?").rstrip(".").strip()
+
+    if _TOPIC_QUALIFIERS.search(normalised):
+        return None
+
+    # --- Document metadata ---
+    if _COUNT_PATTERN.search(normalised):
+        return "count"
+    if _LIST_PATTERN.search(normalised):
+        return "list"
+
+    # --- Member/workspace metadata ---
+    if _ROLE_PATTERN.search(normalised):
+        return "role"
+    if _MEMBER_COUNT_PATTERN.search(normalised):
+        return "member_count"
+    if _MEMBER_LIST_PATTERN.search(normalised):
+        return "member_list"
+
+    return None
+
+
+async def _answer_metadata_question(
+    *,
+    question: str,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> str:
+    """Answer a metadata question directly from the database.
+
+    No retrieval, no reranking, no LLM call.
+    """
+    from app.db.models import Member
+
+    intent = _is_metadata_question(question)
+    normalised = question.strip().rstrip("?").rstrip(".").strip()
+    this_month = bool(_THIS_MONTH_PATTERN.search(normalised))
+
+    async with tenant_session(workspace_id=workspace_id, user_id=user_id) as db:
+        if intent == "count":
+            stmt = select(func.count()).select_from(Document).where(
+                Document.workspace_id == workspace_id,
+                Document.status == "READY",
+            )
+            if this_month:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                stmt = stmt.where(Document.created_at >= month_start)
+            count = (await db.execute(stmt)).scalar_one()
+            if count == 0:
+                if this_month:
+                    return "You have no uploaded documents in this workspace this month."
+                return "You have no uploaded documents in this workspace."
+            word = "document" if count == 1 else "documents"
+            if this_month:
+                return f"You have {count} uploaded {word} in this workspace this month."
+            return f"You have {count} uploaded {word} in this workspace."
+
+        if intent == "list":
+            rows = (
+                await db.execute(
+                    select(Document.filename, Document.status, Document.created_at)
+                    .where(
+                        Document.workspace_id == workspace_id,
+                        Document.status == "READY",
+                    )
+                    .order_by(Document.created_at.desc())
+                )
+            ).all()
+            if not rows:
+                return "You have no uploaded documents in this workspace."
+            items = [f"- {row.filename}" for row in rows]
+            count = len(rows)
+            word = "document" if count == 1 else "documents"
+            header = f"You have {count} uploaded {word} in this workspace:"
+            return header + "\n" + "\n".join(items)
+
+        if intent == "member_count":
+            count = (
+                await db.execute(
+                    select(func.count()).select_from(Member).where(
+                        Member.workspace_id == workspace_id,
+                        Member.status == "ACTIVE",
+                    )
+                )
+            ).scalar_one()
+            if count == 0:
+                return "There are no members in this workspace yet."
+            word = "member" if count == 1 else "members"
+            verb = "is" if count == 1 else "are"
+            return f"There {verb} {count} {word} in this workspace."
+
+        if intent == "member_list":
+            rows = (
+                await db.execute(
+                    select(Member.user_id, Member.role, Member.status)
+                    .where(
+                        Member.workspace_id == workspace_id,
+                        Member.status == "ACTIVE",
+                    )
+                    .order_by(Member.created_at.asc())
+                )
+            ).all()
+            if not rows:
+                return "There are no members in this workspace yet."
+            items = [f"- User {str(row.user_id)[:8]}... (role: {row.role})" for row in rows]
+            count = len(rows)
+            word = "member" if count == 1 else "members"
+            verb = "is" if count == 1 else "are"
+            header = f"There {verb} {count} {word} in this workspace:"
+            return header + "\n" + "\n".join(items)
+
+        if intent == "role":
+            rows = (
+                await db.execute(
+                    select(Member.role).where(
+                        Member.workspace_id == workspace_id,
+                        Member.user_id == user_id,
+                        Member.status == "ACTIVE",
+                    )
+                )
+            ).all()
+            if not rows:
+                return "You are not an active member of this workspace."
+            return f"Your role in this workspace is {rows[0].role}."
+
+    return "I could not determine what metadata you are asking about."
+
+
+def _pick_refusal(had_candidates: bool) -> str:
+    """Choose the right refusal message based on retrieval output."""
+    return REFUSAL_NOT_RELEVANT if had_candidates else REFUSAL_NO_EVIDENCE
+
+
 # SSE streaming chat endpoint  (POST /chat)
 # ---------------------------------------------------------------------------
 
@@ -187,6 +401,74 @@ async def _stream_chat(
 
     # 1. Workspace membership check (before any DB write).
     await assert_workspace_role(workspace_id, principal)
+
+    # 1a. Metadata questions bypass the retrieval pipeline entirely.
+    metadata_intent = _is_metadata_question(question)
+    if metadata_intent is not None:
+        answer = await _answer_metadata_question(
+            question=question,
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
+        )
+        # We still need a session to persist the turn.
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            row = (
+                await db.execute(
+                    insert(ChatSession)
+                    .values(
+                        workspace_id=workspace_id,
+                        user_id=principal.user_id,
+                    )
+                    .returning(ChatSession.id)
+                )
+            ).scalar_one()
+            session_id = row
+        assert session_id is not None
+        yield await _sse_event("session", {"session_id": str(session_id)})
+        # Persist user message.
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=session_id,
+                    role="user",
+                    content=question,
+                )
+            )
+        # Emit the direct answer — no LLM, no retrieval.
+        yield await _sse_event("sources", {"sources": []})
+        yield await _sse_event("token", {"text": answer})
+        yield await _sse_event("citations", {"citations": []})
+        # Persist assistant message.
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=session_id,
+                    role="assistant",
+                    content=answer,
+                    sources=[],
+                )
+            )
+        yield await _sse_event(
+            "done",
+            {
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "provider": "",
+                "model": "",
+                "grounded": True,
+                "routes": [],
+                "sql_query": "",
+            },
+        )
+        logger.info(
+            "Metadata route: intent={intent} source=database workspace={ws}",
+            ws=workspace_id,
+            intent=metadata_intent,
+        )
+        return
 
     # 2. Create or verify session.
     session_id: uuid.UUID | None = None
@@ -246,14 +528,19 @@ async def _stream_chat(
         result = await retrieve(db, query=question, workspace_id=workspace_id)
 
     if not result.grounded:
+        # Choose the right refusal: documents exist but irrelevant, or nothing found.
+        refusal = _pick_refusal(had_candidates=bool(result.chunks))
         logger.info(
-            "Refused ungrounded question for workspace {ws} (top_score={score})",
+            "Refused ungrounded question for workspace {ws} (top_score={score}, "
+            "candidates={n}): {reason}",
             ws=workspace_id,
             score=result.top_score,
+            n=len(result.chunks),
+            reason="not_relevant" if result.chunks else "no_evidence",
         )
         # Emit empty sources, the refusal text as a token, and done.
         yield await _sse_event("sources", {"sources": []})
-        yield await _sse_event("token", {"text": REFUSAL_ANSWER})
+        yield await _sse_event("token", {"text": refusal})
         yield await _sse_event("citations", {"citations": []})
 
         # Persist refusal.
@@ -262,7 +549,7 @@ async def _stream_chat(
                 insert(ChatMessage).values(
                     session_id=session_id,
                     role="assistant",
-                    content=REFUSAL_ANSWER,
+                    content=refusal,
                     sources=[],
                 )
             )
@@ -423,19 +710,43 @@ async def grounded_chat(
     workspace_id = principal.workspace_id
     await assert_workspace_role(workspace_id, principal)
 
+    # Metadata questions bypass the retrieval pipeline entirely.
+    metadata_intent = _is_metadata_question(question)
+    if metadata_intent is not None:
+        answer = await _answer_metadata_question(
+            question=question,
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
+        )
+        logger.info(
+            "Metadata route: intent={intent} source=database workspace={ws}",
+            ws=workspace_id,
+            intent=metadata_intent,
+        )
+        return GroundedChatResponse(
+            answer=answer,
+            grounded=True,
+            insufficient_evidence=False,
+            sources=[],
+        )
+
     async with tenant_session(
         workspace_id=workspace_id, user_id=principal.user_id
     ) as session:
         result = await retrieve(session, query=question, workspace_id=workspace_id)
 
     if not result.grounded:
+        refusal = _pick_refusal(had_candidates=bool(result.chunks))
         logger.info(
-            "Refused ungrounded question for workspace {ws} (top_score={score})",
+            "Refused ungrounded question for workspace {ws} (top_score={score}, "
+            "candidates={n}): {reason}",
             ws=workspace_id,
             score=result.top_score,
+            n=len(result.chunks),
+            reason="not_relevant" if result.chunks else "no_evidence",
         )
         return GroundedChatResponse(
-            answer=REFUSAL_ANSWER,
+            answer=refusal,
             grounded=False,
             insufficient_evidence=True,
             sources=[],
@@ -694,6 +1005,9 @@ __all__ = [
     "GroundedChatRequest",
     "GroundedChatResponse",
     "REFUSAL_ANSWER",
+    "REFUSAL_NO_EVIDENCE",
+    "REFUSAL_NOT_RELEVANT",
     "Source",
+    "_is_metadata_question",
     "router",
 ]

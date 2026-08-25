@@ -36,6 +36,14 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "base_url": "https://api.groq.com/openai/v1",
         "model": "llama-3.3-70b-versatile",
     },
+    "grok": {
+        "base_url": "https://api.x.ai/v1",
+        "model": "grok-3-mini",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "google/gemini-2.0-flash-001",
+    },
 }
 
 
@@ -89,12 +97,21 @@ class Settings(BaseSettings):
     supabase_service_role_key: SecretStr
 
     # --- LLM provider keys (direct, no abstraction) ---
-    # The application supports Gemini and Groq via their direct API keys.
-    # Whichever key is present determines the active provider.  The generic
-    # LLM_PROVIDER/LLM_MODEL/LLM_API_KEY fields below can override this
-    # when neither preset fits (e.g. OpenRouter, self-hosted models).
+    # The application supports Gemini, Groq, Grok/xAI, and OpenRouter via
+    # their direct API keys.  The fallback chain is sequential:
+    # Gemini (primary) → Grok (fallback) → OpenRouter (final fail-safe).
+    # The generic LLM_PROVIDER/LLM_MODEL/LLM_API_KEY fields below can
+    # override the primary provider when set explicitly.
     gemini_api_key: SecretStr | None = Field(default=None, min_length=1)
     groq_api_key: SecretStr | None = Field(default=None, min_length=1)
+    xai_api_key: SecretStr | None = Field(default=None, min_length=1)
+    openrouter_api_key: SecretStr | None = Field(default=None, min_length=1)
+
+    # --- Per-provider model overrides (optional) ---
+    # These override the default model for each provider in the fallback chain.
+    # When unset, the provider preset default is used.
+    grok_model: str | None = None
+    openrouter_model: str | None = None
 
     # --- Generic LLM fields (optional when a provider key is set) ---
     # These are auto-derived from the provider key via a model validator.
@@ -241,16 +258,17 @@ class Settings(BaseSettings):
     def _derive_llm_config(self) -> "Settings":
         """Auto-derive LLM_PROVIDER/MODEL/API_KEY from a provider key when not set.
 
-        When a provider key (GEMINI_API_KEY or GROQ_API_KEY) is present but the
-        generic LLM fields are not, the validator fills them in from the provider
-        preset.  Explicit LLM_* values always take precedence — this is a
-        convenience, not an override of intentional configuration.
+        When a provider key (GEMINI_API_KEY, GROQ_API_KEY, XAI_API_KEY, or
+        OPENROUTER_API_KEY) is present but the generic LLM fields are not, the
+        validator fills them in from the provider preset.  Explicit LLM_* values
+        always take precedence — this is a convenience, not an override of
+        intentional configuration.
         """
         # If the generic fields are already fully specified, nothing to derive.
         if self.llm_provider and self.llm_model and self.llm_api_key:
             return self
 
-        # Determine which provider key is set.
+        # Determine which provider key is set (priority order for primary).
         active_key: SecretStr | None = None
         provider_name: str | None = None
         if self.gemini_api_key:
@@ -259,12 +277,19 @@ class Settings(BaseSettings):
         elif self.groq_api_key:
             active_key = self.groq_api_key
             provider_name = "groq"
+        elif self.xai_api_key:
+            active_key = self.xai_api_key
+            provider_name = "grok"
+        elif self.openrouter_api_key:
+            active_key = self.openrouter_api_key
+            provider_name = "openrouter"
 
         if active_key is None:
             # No provider key and no generic fields — this is a configuration error.
             # Raise a clear message instead of letting the app crash later.
             raise ValueError(
-                "No LLM provider configured. Set GEMINI_API_KEY or GROQ_API_KEY, "
+                "No LLM provider configured. Set GEMINI_API_KEY, GROQ_API_KEY, "
+                "XAI_API_KEY, or OPENROUTER_API_KEY, "
                 "or provide LLM_PROVIDER + LLM_MODEL + LLM_API_KEY explicitly."
             )
 
@@ -282,6 +307,45 @@ class Settings(BaseSettings):
             self.llm_base_url = preset["base_url"]
 
         return self
+
+    @property
+    def fallback_chain_configs(self) -> list[dict[str, str | None]]:
+        """Build the ordered fallback chain from configured provider keys.
+
+        Returns a list of dicts, each with keys: name, api_key, model, base_url.
+        Only providers whose API key is configured are included.  The order is
+        Gemini → Grok → OpenRouter, matching the architectural requirement.
+        """
+        chain: list[dict[str, str | None]] = []
+
+        # Primary: Gemini (or explicit LLM_* override)
+        if self.gemini_api_key:
+            chain.append({
+                "name": "gemini",
+                "api_key": self.gemini_api_key.get_secret_value(),
+                "model": self.llm_model if self.llm_provider == "gemini" else _PROVIDER_PRESETS["gemini"]["model"],
+                "base_url": self.llm_base_url if self.llm_provider == "gemini" else _PROVIDER_PRESETS["gemini"]["base_url"],
+            })
+
+        # Fallback 1: Grok/xAI
+        if self.xai_api_key:
+            chain.append({
+                "name": "grok",
+                "api_key": self.xai_api_key.get_secret_value(),
+                "model": self.grok_model or _PROVIDER_PRESETS["grok"]["model"],
+                "base_url": _PROVIDER_PRESETS["grok"]["base_url"],
+            })
+
+        # Final fail-safe: OpenRouter
+        if self.openrouter_api_key:
+            chain.append({
+                "name": "openrouter",
+                "api_key": self.openrouter_api_key.get_secret_value(),
+                "model": self.openrouter_model or _PROVIDER_PRESETS["openrouter"]["model"],
+                "base_url": _PROVIDER_PRESETS["openrouter"]["base_url"],
+            })
+
+        return chain
 
     @model_validator(mode="after")
     def _retrieval_counts_are_consistent(self) -> "Settings":

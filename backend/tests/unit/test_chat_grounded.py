@@ -30,7 +30,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.api.chat_v2 as chat_module
-from app.api.chat_v2 import REFUSAL_ANSWER
+from app.api.chat_v2 import REFUSAL_ANSWER, REFUSAL_NO_EVIDENCE, REFUSAL_NOT_RELEVANT
 from app.api.dependencies import get_generic_llm
 from app.config import get_settings
 from app.llm.base import Completion, LLMError, Message, TokenUsage
@@ -228,7 +228,7 @@ def test_no_retrieved_documents_is_refused_without_an_llm_call(
     body = response.json()
     assert body["grounded"] is False
     assert body["insufficient_evidence"] is True
-    assert body["answer"] == REFUSAL_ANSWER
+    assert body["answer"] == REFUSAL_NO_EVIDENCE
     assert body["sources"] == []
     assert stub.calls == []  # the LLM was never called
 
@@ -252,7 +252,7 @@ def test_below_threshold_evidence_is_refused_without_an_llm_call(
     body = response.json()
     assert body["grounded"] is False
     assert body["insufficient_evidence"] is True
-    assert body["answer"] == REFUSAL_ANSWER
+    assert body["answer"] == REFUSAL_NOT_RELEVANT
     assert body["sources"] == []
     assert stub.calls == []
 
@@ -281,7 +281,7 @@ def test_grounding_threshold_matches_phase_5(
     body = below.json()
     assert body["grounded"] is False
     assert body["insufficient_evidence"] is True
-    assert body["answer"] == REFUSAL_ANSWER
+    assert body["answer"] == REFUSAL_NOT_RELEVANT
 
     assert len(stub.calls) == 1  # only the at-threshold question reached the LLM
 

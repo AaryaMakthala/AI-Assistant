@@ -245,7 +245,8 @@ class TestASimpleFollowUp:
         )
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             captured_queries.append(query)
             return RetrievalResult(
@@ -318,7 +319,8 @@ class TestDocumentFollowUp:
         captured_queries: list[str] = []
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             captured_queries.append(query)
             return RetrievalResult(
@@ -380,24 +382,12 @@ class TestMetadataFollowUp:
     ) -> None:
         test_client, _ = client
 
-        # Mock rewrite to produce a member_count metadata query.
-        # Note: the rewritten query must match _is_metadata_question patterns.
-        async def _fake_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query="How many members are in this workspace?",
-                needs_clarification=False,
-                confidence=0.88,
-                status="success",
-                original_query=query,
-            )
-
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        # No rewrite needed — metadata intents skip rewrite in the new code path.
+        # "How many are invited?" is classified directly as member_count+INVITED.
 
         # Set up tenant_session with member count response.
-        # Call 1: _load_recent_history (no session found).
-        # Call 2: _answer_metadata_question (member_count query).
+        # Only one call: _answer_metadata_question (member_count query).
         session = _FakeSession(responses=[
-            _FakeResult(scalar=None),  # _load_recent_history: no session
             _FakeResult(scalar=3),     # member_count query result
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
@@ -406,7 +396,8 @@ class TestMetadataFollowUp:
         retrieval_called: list[str] = []
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             retrieval_called.append("called")
             raise AssertionError("retrieval must NOT run for metadata question")
@@ -423,6 +414,7 @@ class TestMetadataFollowUp:
         assert response.status_code == 200
         body = response.json()
         assert body["grounded"] is True
+        # The answer should contain the count (3) and mention invited members.
         assert "3" in body["answer"]
         assert body["sources"] == []
         # Retrieval was NOT called.
@@ -463,6 +455,8 @@ class TestMonthFollowUp:
         monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
 
         # Set up tenant_session for metadata count.
+        # "What about last month?" starts as DOCUMENT_CONTENT (no metadata match),
+        # so history loading runs first, then rewrite produces a metadata query.
         session = _FakeSession(responses=[
             _FakeResult(scalar=None),  # _load_recent_history: no session
             _FakeResult(scalar=5),     # metadata count query
@@ -472,7 +466,8 @@ class TestMonthFollowUp:
         retrieval_called: list[str] = []
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             retrieval_called.append("called")
             raise AssertionError("retrieval must NOT run for metadata question")
@@ -529,7 +524,8 @@ class TestAmbiguousFollowUp:
         retrieval_called: list[str] = []
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             retrieval_called.append("called")
             raise AssertionError("retrieval must NOT run for ambiguous query")
@@ -592,7 +588,8 @@ class TestFollowUpAfterRefusal:
         retrieval_called: list[str] = []
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             retrieval_called.append("called")
             raise AssertionError("retrieval must NOT run for metadata question")
@@ -656,7 +653,8 @@ class TestRewriteProviderFailure:
         )
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             captured_queries.append(query)
             return RetrievalResult(
@@ -706,7 +704,8 @@ class TestRewriteProviderFailure:
         kanban_chunk = _chunk(0.9, content="Kanban is a workflow method.")
 
         async def _retrieve(
-            session: Any, *, query: str, workspace_id: uuid.UUID  # noqa: ARG001
+            session: Any, *, query: str, workspace_id: uuid.UUID,  # noqa: ARG001
+            **kwargs: Any
         ) -> RetrievalResult:
             return RetrievalResult(
                 chunks=[kanban_chunk], grounded=True, top_score=0.9

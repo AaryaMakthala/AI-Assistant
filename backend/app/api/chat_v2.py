@@ -42,24 +42,26 @@ from app.api.workspace_deps import assert_workspace_role
 from app.db.models import ChatMessage, ChatSession, Document
 from app.llm.base import Completion, LLMError, LLMProvider
 from app.rag.prompts import build_messages
+from app.retrieval.intent import (
+    ConversationHistorySubIntent,
+    Intent,
+    IntentCategory,
+    MetadataSubIntent,
+    QueryShape,
+    classify_intent,
+    classify_query_shape,
+)
 from app.retrieval.pipeline import RetrievedChunk, retrieve
 from app.retrieval.query_rewrite import ChatTurn, RewriteResult, rewrite_query
+from app.retrieval.refusals import ResponseReason, refusal_message
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
 
-router = APIRouter(prefix="/chat", tags=["chat"])#: Returned when retrieval finds zero candidate chunks.
-REFUSAL_NO_EVIDENCE = (
-    "I couldn't find any relevant information about that topic in your uploaded documents."
-)
+router = APIRouter(prefix="/chat", tags=["chat"])
 
-#: Returned when retrieval finds chunks but none pass the grounding threshold.
-REFUSAL_NOT_RELEVANT = (
-    "Your workspace contains documents, but none of them contain information"
-    " about that specific topic. Try rephrasing your question or check that"
-    " the relevant document has been uploaded."
-)
-
-# Kept for backward compatibility; prefer the specific variants above.
+# Kept for backward compatibility.
+REFUSAL_NO_EVIDENCE = refusal_message(ResponseReason.NO_EVIDENCE)
+REFUSAL_NOT_RELEVANT = refusal_message(ResponseReason.NOT_RELEVANT)
 REFUSAL_ANSWER = REFUSAL_NO_EVIDENCE
 
 
@@ -281,22 +283,24 @@ def _is_metadata_question(question: str) -> str | None:
 
 async def _answer_metadata_question(
     *,
+    intent: Intent,
     question: str,
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
-) -> str:
+) -> tuple[str, ResponseReason | None]:
     """Answer a metadata question directly from the database.
 
     No retrieval, no reranking, no LLM call.
+    Returns (answer_text, refusal_reason_or_None).
     """
     from app.db.models import Member
 
-    intent = _is_metadata_question(question)
+    sub = intent.metadata_sub
     normalised = question.strip().rstrip("?").rstrip(".").strip()
     this_month = bool(_THIS_MONTH_PATTERN.search(normalised))
 
     async with tenant_session(workspace_id=workspace_id, user_id=user_id) as db:
-        if intent == "count":
+        if sub == MetadataSubIntent.DOC_COUNT:
             stmt = select(func.count()).select_from(Document).where(
                 Document.workspace_id == workspace_id,
                 Document.status == "READY",
@@ -309,14 +313,14 @@ async def _answer_metadata_question(
             count = (await db.execute(stmt)).scalar_one()
             if count == 0:
                 if this_month:
-                    return "You have no uploaded documents in this workspace this month."
-                return "You have no uploaded documents in this workspace."
+                    return "You have no uploaded documents in this workspace this month.", ResponseReason.METADATA_EMPTY
+                return "You have no uploaded documents in this workspace.", ResponseReason.METADATA_EMPTY
             word = "document" if count == 1 else "documents"
             if this_month:
-                return f"You have {count} uploaded {word} in this workspace this month."
-            return f"You have {count} uploaded {word} in this workspace."
+                return f"You have {count} uploaded {word} in this workspace this month.", None
+            return f"You have {count} uploaded {word} in this workspace.", None
 
-        if intent == "list":
+        if sub == MetadataSubIntent.DOC_LIST:
             rows = (
                 await db.execute(
                     select(Document.filename, Document.status, Document.created_at)
@@ -328,49 +332,73 @@ async def _answer_metadata_question(
                 )
             ).all()
             if not rows:
-                return "You have no uploaded documents in this workspace."
+                return "You have no uploaded documents in this workspace.", ResponseReason.METADATA_EMPTY
             items = [f"- {row.filename}" for row in rows]
             count = len(rows)
             word = "document" if count == 1 else "documents"
             header = f"You have {count} uploaded {word} in this workspace:"
-            return header + "\n" + "\n".join(items)
+            return header + "\n" + "\n".join(items), None
 
-        if intent == "member_count":
-            count = (
-                await db.execute(
-                    select(func.count()).select_from(Member).where(
-                        Member.workspace_id == workspace_id,
-                        Member.status == "ACTIVE",
-                    )
-                )
-            ).scalar_one()
+        if sub == MetadataSubIntent.DOC_PAGE_COUNT:
+            # Check if authoritative page-count metadata exists.
+            # The documents table does NOT store page counts, so we cannot
+            # answer this honestly.  Returning a clear "not available" rather
+            # than computing pages from chunks (which are not pages).
+            return (
+                "Page count information is not available for documents in this workspace."
+                " Document pages are not tracked as a metadata field.",
+                None,
+            )
+
+        if sub == MetadataSubIntent.MEMBER_COUNT:
+            # Build the query — optionally filter by status.
+            stmt = select(func.count()).select_from(Member).where(
+                Member.workspace_id == workspace_id,
+            )
+            if intent.member_status:
+                stmt = stmt.where(Member.status == intent.member_status)
+            count = (await db.execute(stmt)).scalar_one()
+            status_label = (intent.member_status or "ACTIVE").lower()
             if count == 0:
-                return "There are no members in this workspace yet."
+                if intent.member_status:
+                    return (
+                        f"There are no {status_label} members in this workspace.",
+                        ResponseReason.METADATA_EMPTY,
+                    )
+                return "There are no members in this workspace yet.", ResponseReason.METADATA_EMPTY
             word = "member" if count == 1 else "members"
             verb = "is" if count == 1 else "are"
-            return f"There {verb} {count} {word} in this workspace."
+            if intent.member_status:
+                return f"There {verb} {count} {status_label} {word} in this workspace.", None
+            return f"There {verb} {count} {word} in this workspace.", None
 
-        if intent == "member_list":
+        if sub == MetadataSubIntent.MEMBER_LIST:
+            stmt = (
+                select(Member.user_id, Member.role, Member.status)
+                .where(Member.workspace_id == workspace_id)
+            )
+            if intent.member_status:
+                stmt = stmt.where(Member.status == intent.member_status)
             rows = (
-                await db.execute(
-                    select(Member.user_id, Member.role, Member.status)
-                    .where(
-                        Member.workspace_id == workspace_id,
-                        Member.status == "ACTIVE",
-                    )
-                    .order_by(Member.created_at.asc())
-                )
+                await db.execute(stmt.order_by(Member.created_at.asc()))
             ).all()
             if not rows:
-                return "There are no members in this workspace yet."
-            items = [f"- User {str(row.user_id)[:8]}... (role: {row.role})" for row in rows]
+                if intent.member_status:
+                    status_label = intent.member_status.lower()
+                    return f"There are no {status_label} members in this workspace.", ResponseReason.METADATA_EMPTY
+                return "There are no members in this workspace yet.", ResponseReason.METADATA_EMPTY
+            items = [
+                f"- User {str(row.user_id)[:8]}... (role: {row.role}, status: {row.status})"
+                for row in rows
+            ]
             count = len(rows)
             word = "member" if count == 1 else "members"
             verb = "is" if count == 1 else "are"
-            header = f"There {verb} {count} {word} in this workspace:"
-            return header + "\n" + "\n".join(items)
+            status_label = (intent.member_status or "all").lower()
+            header = f"There {verb} {count} {status_label} {word} in this workspace:"
+            return header + "\n" + "\n".join(items), None
 
-        if intent == "role":
+        if sub == MetadataSubIntent.ROLE:
             rows = (
                 await db.execute(
                     select(Member.role).where(
@@ -381,15 +409,236 @@ async def _answer_metadata_question(
                 )
             ).all()
             if not rows:
-                return "You are not an active member of this workspace."
-            return f"Your role in this workspace is {rows[0].role}."
+                return "You are not an active member of this workspace.", None
+            return f"Your role in this workspace is {rows[0].role}.", None
 
-    return "I could not determine what metadata you are asking about."
+    return "I could not determine what metadata you are asking about.", ResponseReason.METADATA_EMPTY
+
+
+def _pick_refusal_reason(had_candidates: bool) -> ResponseReason:
+    """Choose the right refusal reason based on retrieval output."""
+    return ResponseReason.NOT_RELEVANT if had_candidates else ResponseReason.NO_EVIDENCE
 
 
 def _pick_refusal(had_candidates: bool) -> str:
     """Choose the right refusal message based on retrieval output."""
-    return REFUSAL_NOT_RELEVANT if had_candidates else REFUSAL_NO_EVIDENCE
+    return refusal_message(_pick_refusal_reason(had_candidates))
+
+
+# ---------------------------------------------------------------------------
+# Conversation history handler (Phase A, step 5)
+# ---------------------------------------------------------------------------
+
+
+async def _answer_conversation_history(
+    *,
+    intent: Intent,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_id: uuid.UUID | None = None,
+) -> str:
+    """Answer a conversation-history question from the current user's session.
+
+    Scoped to workspace_id, user_id, and session_id — never exposes other
+    users' conversations.
+    """
+    async with tenant_session(workspace_id=workspace_id, user_id=user_id) as db:
+        # Resolve the session to query.
+        target_session_id = session_id
+        if target_session_id is None:
+            row = (
+                await db.execute(
+                    select(ChatSession.id).where(
+                        ChatSession.workspace_id == workspace_id,
+                        ChatSession.user_id == user_id,
+                    ).order_by(ChatSession.created_at.desc()).limit(1)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return "You haven't asked any questions in this session yet."
+            target_session_id = row
+        else:
+            # Verify the session belongs to this user in this workspace.
+            exists = (
+                await db.execute(
+                    select(ChatSession.id).where(
+                        ChatSession.id == target_session_id,
+                        ChatSession.workspace_id == workspace_id,
+                        ChatSession.user_id == user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                return "Session not found."
+
+        # Load messages from the session.
+        rows = (
+            await db.execute(
+                select(ChatMessage.role, ChatMessage.content)
+                .where(ChatMessage.session_id == target_session_id)
+                .order_by(ChatMessage.created_at.asc())
+            )
+        ).all()
+
+    user_messages = [r.content for r in rows if r.role == "user"]
+    assistant_messages = [r.content for r in rows if r.role == "assistant"]
+
+    sub = intent.conversation_history_sub
+
+    if sub == ConversationHistorySubIntent.PREVIOUS_QUESTIONS:
+        if not user_messages:
+            return "You haven't asked any questions in this session yet."
+        items = [f"- {msg}" for msg in user_messages]
+        count = len(user_messages)
+        word = "question" if count == 1 else "questions"
+        header = f"You have asked {count} {word} in this session:"
+        return header + "\n" + "\n".join(items)
+
+    if sub == ConversationHistorySubIntent.PREVIOUS_ANSWER:
+        if not assistant_messages:
+            return "I haven't given any answers in this session yet."
+        last_answer = assistant_messages[-1]
+        # Truncate long answers for readability.
+        if len(last_answer) > 500:
+            last_answer = last_answer[:500] + "..."
+        return f"My most recent answer was:\n\n{last_answer}"
+
+    # Default: show recent conversation.
+    if not rows:
+        return "There's no conversation history in this session yet."
+    items = []
+    for r in rows:
+        label = "You" if r.role == "user" else "Assistant"
+        content = r.content[:200] + "..." if len(r.content) > 200 else r.content
+        items.append(f"{label}: {content}")
+    return "Recent conversation:\n" + "\n".join(items)
+
+
+# ---------------------------------------------------------------------------
+# Identity handler (Phase A, step 6)
+# ---------------------------------------------------------------------------
+
+
+async def _answer_identity(
+    *,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> tuple[str, ResponseReason]:
+    """Answer an identity question from the authenticated user's context.
+
+    Returns (answer, refusal_reason).  If the user's email is available from
+    the principal, we use it.  Otherwise we return IDENTITY_UNAVAILABLE.
+    """
+    # The principal's email is available from the JWT, but we don't have it
+    # in this function's signature yet.  We query the members table to see
+    # if we have any identifying info.
+    from app.db.models import Member
+
+    async with tenant_session(workspace_id=workspace_id, user_id=user_id) as db:
+        rows = (
+            await db.execute(
+                select(Member.user_id).where(
+                    Member.workspace_id == workspace_id,
+                    Member.user_id == user_id,
+                    Member.status == "ACTIVE",
+                )
+            )
+        ).all()
+
+    if not rows:
+        return (
+            refusal_message(ResponseReason.IDENTITY_UNAVAILABLE),
+            ResponseReason.IDENTITY_UNAVAILABLE,
+        )
+
+    # We have a membership but no display name stored — Supabase Auth profiles
+    # are not queried here.  Return the honest answer.
+    return (
+        "I can see you're a member of this workspace, but I don't have your name"
+        " available from the current session.",
+        ResponseReason.IDENTITY_UNAVAILABLE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# App-help handler (Phase A, step 7)
+# ---------------------------------------------------------------------------
+
+_APP_HELP_RESPONSES: dict[str, str] = {
+    # Permission-related: derived from the actual authorization model.
+    "who_can_upload": (
+        "Any workspace member can upload documents. Uploaded documents are"
+        " immediately available to the uploader. The workspace owner can"
+        " approve or reject member uploads to make them searchable."
+    ),
+    "how_to_upload_and_ask": (
+        "To use this assistant:\n"
+        "1. Upload documents through the Documents page."
+        " Owner uploads are immediately searchable."
+        " Member uploads need owner approval.\n"
+        "2. Ask questions in this chat."
+        " I'll search your workspace's approved documents and answer"
+        " with citations."
+    ),
+    "what_can_i_do": (
+        "You can:\n"
+        "- Ask questions about your workspace documents\n"
+        "- Upload documents (owner uploads are immediate; member uploads need approval)\n"
+        "- View document status and manage uploads\n"
+        "- Chat with the assistant using your workspace's knowledge base"
+    ),
+    "how_does_it_work": (
+        "This assistant searches your workspace's approved documents to"
+        " answer questions. It uses hybrid retrieval (semantic + keyword"
+        " search) with reranking to find the most relevant passages,"
+        " then generates an answer grounded in those sources."
+    ),
+    "monitored": (
+        "I don't have authoritative information about monitoring or"
+        " tracking policies. Please check your company's privacy policy"
+        " or IT department for details."
+    ),
+}
+
+
+def _answer_app_help(
+    *,
+    question: str,
+    intent: Intent,
+    principal_role: str | None = None,
+) -> tuple[str, ResponseReason | None]:
+    """Answer an app-help question.
+
+    Permission-related answers are derived from the actual authorization
+    model.  Privacy/monitoring questions only get answered if an authoritative
+    source exists.
+    """
+    q = question.lower()
+
+    # Detect specific help sub-intents.
+    if re.search(r"who\s+can\s+(?:upload|add|submit)", q):
+        return _APP_HELP_RESPONSES["who_can_upload"], None
+    if re.search(r"how\s+(?:can|do|should)\s+(?:i|we)\s+(?:upload|ask)", q):
+        return _APP_HELP_RESPONSES["how_to_upload_and_ask"], None
+    if re.search(r"what\s+can\s+(?:i|we)\s+do", q):
+        return _APP_HELP_RESPONSES["what_can_i_do"], None
+    if re.search(r"how\s+(?:does|do)\s+(?:this|it)\s+work", q):
+        return _APP_HELP_RESPONSES["how_does_it_work"], None
+    if re.search(r"(?:am\s+i\s+being|do\s+you\s+(?:track|monitor))", q):
+        return _APP_HELP_RESPONSES["monitored"], ResponseReason.APP_HELP_UNAVAILABLE
+    if re.search(r"(?:who\s+has\s+(?:access|permission))", q):
+        role_info = f"Your role is {principal_role}." if principal_role else ""
+        return (
+            f"{role_info} All active workspace members can read documents"
+            " and chat. Only the workspace owner can approve documents"
+            " and manage members.",
+            None,
+        )
+
+    return (
+        refusal_message(ResponseReason.APP_HELP_UNAVAILABLE),
+        ResponseReason.APP_HELP_UNAVAILABLE,
+    )
 
 
 async def _load_recent_history(
@@ -455,28 +704,41 @@ async def _stream_chat(
     payload: ChatStreamRequest,
     llm: LLMProvider,
 ) -> AsyncIterator[str]:
-    """SSE generator: retrieval → grounding → LLM stream → persist."""
+    """SSE generator: intent → (metadata | history | identity | help | RAG) → stream."""
 
     workspace_id = principal.workspace_id
     question = payload.message.strip()
 
     # 1. Workspace membership check (before any DB write).
-    await assert_workspace_role(workspace_id, principal)
+    # This MUST happen before every answer path — INVITED-only users get 403.
+    member_role = await assert_workspace_role(workspace_id, principal)
 
-    # 1a. Load recent conversation history for query rewriting.
-    history = await _load_recent_history(
-        workspace_id=workspace_id,
-        user_id=principal.user_id,
-        session_id=payload.session_id,
-    )
+    # 1a. Classify intent deterministically.
+    # For structured intents (metadata, out_of_scope, identity, etc.) we skip
+    # rewriting to preserve constraints like status filters.
+    intent = classify_intent(question)
+    effective_query = question  # may be overridden by rewrite below
+    needs_clarification = False
+    refusal_reason: ResponseReason | None = None
 
-    # 1b. Rewrite follow-up queries into standalone form.
-    rewrite_result = await rewrite_query(query=question, history=history)
-    effective_query = rewrite_result.rewritten_query
-    needs_clarification = rewrite_result.needs_clarification
+    # 1b. Only rewrite for document_content intents that have conversation history.
+    if intent.category == IntentCategory.DOCUMENT_CONTENT:
+        history = await _load_recent_history(
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
+            session_id=payload.session_id,
+        )
+        rewrite_result = await rewrite_query(query=question, history=history)
+        effective_query = rewrite_result.rewritten_query
+        needs_clarification = rewrite_result.needs_clarification
+        # Re-classify after rewrite in case the rewritten query changed the intent.
+        if rewrite_result.status == "success" and effective_query != question:
+            intent = classify_intent(effective_query)
+    elif intent.category == IntentCategory.AMBIGUOUS:
+        needs_clarification = True
 
     # 1c. Handle ambiguity: ask for clarification instead of refusing.
-    if needs_clarification:
+    if needs_clarification or intent.needs_clarification:
         # Create session and persist.
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
             row = (
@@ -494,9 +756,7 @@ async def _stream_chat(
                     session_id=clarify_session_id, role="user", content=question,
                 )
             )
-        clarification_text = (
-            "I'm not sure what you're referring to. Could you clarify your question?"
-        )
+        clarification_text = refusal_message(ResponseReason.NEEDS_CLARIFICATION)
         yield await _sse_event("sources", {"sources": []})
         yield await _sse_event("token", {"text": clarification_text})
         yield await _sse_event("citations", {"citations": []})
@@ -511,16 +771,72 @@ async def _stream_chat(
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "provider": "", "model": "", "grounded": True, "routes": [], "sql_query": "",
         })
+        logger.info(
+            "intent=ambiguous reason=needs_clarification workspace={ws}",
+            ws=workspace_id,
+        )
         return
 
-    # 1d. Metadata questions bypass the retrieval pipeline entirely.
-    metadata_intent = _is_metadata_question(effective_query)
-    if metadata_intent is not None:
-        answer = await _answer_metadata_question(
+    # 1d. Route by intent category.
+    answer: str | None = None
+
+    if intent.category == IntentCategory.OUT_OF_SCOPE:
+        answer = refusal_message(ResponseReason.OUT_OF_SCOPE)
+        refusal_reason = ResponseReason.OUT_OF_SCOPE
+        logger.info(
+            "intent=out_of_scope workspace={ws}", ws=workspace_id,
+        )
+
+    elif intent.category == IntentCategory.IDENTITY:
+        answer, refusal_reason = await _answer_identity(
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
+        )
+        logger.info(
+            "intent=identity workspace={ws} refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+
+    elif intent.category == IntentCategory.APP_HELP:
+        answer, refusal_reason = _answer_app_help(
+            question=effective_query,
+            intent=intent,
+            principal_role=member_role,
+        )
+        logger.info(
+            "intent=app_help workspace={ws} refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+
+    elif intent.category == IntentCategory.CONVERSATION_HISTORY:
+        answer = await _answer_conversation_history(
+            intent=intent,
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
+            session_id=payload.session_id,
+        )
+        logger.info(
+            "intent=conversation_history sub={sub} workspace={ws}",
+            sub=intent.conversation_history_sub.value if intent.conversation_history_sub else None,
+            ws=workspace_id,
+        )
+
+    elif intent.category == IntentCategory.METADATA:
+        answer, refusal_reason = await _answer_metadata_question(
+            intent=intent,
             question=effective_query,
             workspace_id=workspace_id,
             user_id=principal.user_id,
         )
+        logger.info(
+            "intent=metadata sub={sub} workspace={ws} refusal={refusal}",
+            sub=intent.metadata_sub.value if intent.metadata_sub else None,
+            ws=workspace_id,
+            refusal=refusal_reason.value if refusal_reason else None,
+        )
+
+    # For non-document intents, emit the answer and persist.
+    if answer is not None:
         # We still need a session to persist the turn.
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
             row = (
@@ -574,13 +890,9 @@ async def _stream_chat(
                 "sql_query": "",
             },
         )
-        logger.info(
-            "Metadata route: intent={intent} source=database workspace={ws}",
-            ws=workspace_id,
-            intent=metadata_intent,
-        )
         return
 
+    # --- Document content path (RAG) ---
     # 2. Create or verify session.
     session_id: uuid.UUID | None = None
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
@@ -636,19 +948,37 @@ async def _stream_chat(
 
     # 4. Retrieve evidence (session closes before the LLM call).
     # Use the rewritten query for all downstream operations.
+    # Phase B: classify query shape for overview-aware retrieval and grounding.
+    doc_target_result = None
+    if intent.category == IntentCategory.DOCUMENT_CONTENT:
+        from app.retrieval.doc_targeting import detect_document_reference
+        doc_target_result = detect_document_reference(effective_query)
+    query_shape = classify_query_shape(
+        effective_query,
+        has_doc_target=(doc_target_result is not None and doc_target_result is not None),
+    )
+    logger.info(
+        "intent=document_content query_shape={shape} workspace={ws}",
+        shape=query_shape.value, ws=workspace_id,
+    )
+
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
-        result = await retrieve(db, query=effective_query, workspace_id=workspace_id)
+        result = await retrieve(
+            db, query=effective_query, workspace_id=workspace_id,
+            query_shape=query_shape,
+        )
 
     if not result.grounded:
         # Choose the right refusal: documents exist but irrelevant, or nothing found.
-        refusal = _pick_refusal(had_candidates=bool(result.chunks))
+        refusal_reason = _pick_refusal_reason(had_candidates=bool(result.chunks))
+        refusal = refusal_message(refusal_reason)
         logger.info(
-            "Refused ungrounded question for workspace {ws} (top_score={score}, "
-            "candidates={n}): {reason}",
+            "intent=document_content refusal={reason} top_score={score} "
+            "candidates={n} workspace={ws}",
             ws=workspace_id,
             score=result.top_score,
             n=len(result.chunks),
-            reason="not_relevant" if result.chunks else "no_evidence",
+            reason=refusal_reason.value,
         )
         # Emit empty sources, the refusal text as a token, and done.
         yield await _sse_event("sources", {"sources": []})
@@ -820,46 +1150,83 @@ async def grounded_chat(
         )
 
     workspace_id = principal.workspace_id
-    await assert_workspace_role(workspace_id, principal)
+    member_role = await assert_workspace_role(workspace_id, principal)
 
-    # Load recent conversation history for query rewriting.
-    history = await _load_recent_history(
-        workspace_id=workspace_id,
-        user_id=principal.user_id,
-    )
+    # Classify intent.
+    intent = classify_intent(question)
+    effective_query = question
 
-    # Rewrite follow-up queries into standalone form.
-    rewrite_result = await rewrite_query(query=question, history=history)
-    effective_query = rewrite_result.rewritten_query
-
-    # Handle ambiguity: ask for clarification instead of refusing.
-    if rewrite_result.needs_clarification:
-        clarification = (
-            "I'm not sure what you're referring to. Could you clarify your question?"
+    # Only rewrite for document_content intents.
+    if intent.category == IntentCategory.DOCUMENT_CONTENT:
+        history = await _load_recent_history(
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
         )
-        logger.info(
-            "Query rewrite requested clarification for workspace {ws}",
-            ws=workspace_id,
-        )
+        rewrite_result = await rewrite_query(query=question, history=history)
+        effective_query = rewrite_result.rewritten_query
+        if rewrite_result.needs_clarification:
+            return GroundedChatResponse(
+                answer=refusal_message(ResponseReason.NEEDS_CLARIFICATION),
+                grounded=True,
+                insufficient_evidence=False,
+                sources=[],
+            )
+        if rewrite_result.status == "success" and effective_query != question:
+            intent = classify_intent(effective_query)
+    elif intent.category == IntentCategory.AMBIGUOUS:
         return GroundedChatResponse(
-            answer=clarification,
+            answer=refusal_message(ResponseReason.NEEDS_CLARIFICATION),
             grounded=True,
             insufficient_evidence=False,
             sources=[],
         )
 
-    # Metadata questions bypass the retrieval pipeline entirely.
-    metadata_intent = _is_metadata_question(effective_query)
-    if metadata_intent is not None:
-        answer = await _answer_metadata_question(
-            question=effective_query,
-            workspace_id=workspace_id,
-            user_id=principal.user_id,
+    # Route by intent category.
+    if intent.category == IntentCategory.OUT_OF_SCOPE:
+        logger.info("intent=out_of_scope workspace={ws}", ws=workspace_id)
+        return GroundedChatResponse(
+            answer=refusal_message(ResponseReason.OUT_OF_SCOPE),
+            grounded=True,
+            insufficient_evidence=False,
+            sources=[],
+        )
+
+    if intent.category == IntentCategory.IDENTITY:
+        answer, refusal_reason = await _answer_identity(
+            workspace_id=workspace_id, user_id=principal.user_id,
         )
         logger.info(
-            "Metadata route: intent={intent} source=database workspace={ws}",
-            ws=workspace_id,
-            intent=metadata_intent,
+            "intent=identity workspace={ws} refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+        return GroundedChatResponse(
+            answer=answer,
+            grounded=True,
+            insufficient_evidence=refusal_reason is not None,
+            sources=[],
+        )
+
+    if intent.category == IntentCategory.APP_HELP:
+        answer, refusal_reason = _answer_app_help(
+            question=effective_query, intent=intent, principal_role=member_role,
+        )
+        logger.info(
+            "intent=app_help workspace={ws} refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+        return GroundedChatResponse(
+            answer=answer,
+            grounded=True,
+            insufficient_evidence=refusal_reason is not None,
+            sources=[],
+        )
+
+    if intent.category == IntentCategory.CONVERSATION_HISTORY:
+        answer = await _answer_conversation_history(
+            intent=intent, workspace_id=workspace_id, user_id=principal.user_id,
+        )
+        logger.info(
+            "intent=conversation_history workspace={ws}", ws=workspace_id,
         )
         return GroundedChatResponse(
             answer=answer,
@@ -868,20 +1235,49 @@ async def grounded_chat(
             sources=[],
         )
 
+    if intent.category == IntentCategory.METADATA:
+        answer, refusal_reason = await _answer_metadata_question(
+            intent=intent, question=effective_query,
+            workspace_id=workspace_id, user_id=principal.user_id,
+        )
+        logger.info(
+            "intent=metadata sub={sub} workspace={ws} refusal={refusal}",
+            sub=intent.metadata_sub.value if intent.metadata_sub else None,
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+        return GroundedChatResponse(
+            answer=answer,
+            grounded=True,
+            insufficient_evidence=refusal_reason is not None,
+            sources=[],
+        )
+
+    # --- Document content path (RAG) ---
+    # Phase B: classify query shape for overview-aware retrieval.
+    from app.retrieval.doc_targeting import detect_document_reference
+    doc_target = detect_document_reference(effective_query)
+    query_shape = classify_query_shape(
+        effective_query,
+        has_doc_target=(doc_target is not None),
+    )
     async with tenant_session(
         workspace_id=workspace_id, user_id=principal.user_id
     ) as session:
-        result = await retrieve(session, query=effective_query, workspace_id=workspace_id)
+        result = await retrieve(
+            session, query=effective_query, workspace_id=workspace_id,
+            query_shape=query_shape,
+        )
 
     if not result.grounded:
-        refusal = _pick_refusal(had_candidates=bool(result.chunks))
+        refusal_reason = _pick_refusal_reason(had_candidates=bool(result.chunks))
+        refusal = refusal_message(refusal_reason)
         logger.info(
-            "Refused ungrounded question for workspace {ws} (top_score={score}, "
-            "candidates={n}): {reason}",
+            "intent=document_content refusal={reason} top_score={score} "
+            "candidates={n} workspace={ws}",
             ws=workspace_id,
             score=result.top_score,
             n=len(result.chunks),
-            reason="not_relevant" if result.chunks else "no_evidence",
+            reason=refusal_reason.value,
         )
         return GroundedChatResponse(
             answer=refusal,

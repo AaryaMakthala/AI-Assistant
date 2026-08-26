@@ -186,9 +186,8 @@ class TestGroupAMetadata:
         """How many documents were uploaded this month? -> DB count, no RAG."""
         test_client, _ = client
         # Stub: 3 docs created this month.
-        # Extra response for _load_recent_history (session lookup returns None).
+        # No history lookup needed — metadata intents skip rewrite.
         session = _FakeSession(responses=[
-            _FakeResult(scalar=None),  # _load_recent_history: no session found
             _FakeResult(scalar=3),      # metadata count query
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
@@ -253,9 +252,8 @@ class TestGroupAMetadata:
         """How many members are in this workspace? -> DB count, no RAG."""
         test_client, _ = client
         # Stub: 3 ACTIVE members.
-        # Extra response for _load_recent_history (session lookup returns None).
+        # No history lookup needed — metadata intents skip rewrite.
         session = _FakeSession(responses=[
-            _FakeResult(scalar=None),  # _load_recent_history: no session found
             _FakeResult(scalar=3),      # member count query
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
@@ -340,7 +338,7 @@ class TestGroupBRelevance:
             filename="DevOps Question Bank.docx",
         )
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[kanban_chunk], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -372,7 +370,7 @@ class TestGroupBRelevance:
         # The relevance gate (inside retrieve) catches this as obviously_unrelated
         # and returns grounded=False with no chunks.  Stub retrieve to simulate
         # what the relevance gate would return.
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -385,7 +383,10 @@ class TestGroupBRelevance:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["grounded"] is False
+        # Now caught by out_of_scope intent before retrieval — returns a clear
+        # message, grounded=True (it IS a valid response, just not from docs).
+        assert body["grounded"] is True
+        assert "outside" in body["answer"].lower()
         assert body["sources"] == []
         assert stub.calls == []  # LLM was never called
 
@@ -395,7 +396,7 @@ class TestGroupBRelevance:
         """Quantum computing policy -> relevant-looking but no evidence -> no hallucination."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -446,7 +447,7 @@ class TestGroupCDocumentTargeting:
             filename="Software Engineering Question Bank.docx",
         )
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             # Simulate: only DevOps doc chunks returned (targeted retrieval).
             return RetrievalResult(chunks=[devops_chunk], grounded=True, top_score=0.85)
 
@@ -505,7 +506,7 @@ class TestGroupCDocumentTargeting:
         """Non-existent Security Policy -> normal retrieval path, no hallucination."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             # No evidence found.
             return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
@@ -546,7 +547,7 @@ class TestGroupCDocumentTargeting:
         chunk1 = _chunk(0.8, content="Basic DevOps content.", document_id=doc1_id, filename="DevOps Question Bank.pdf")
         chunk2 = _chunk(0.75, content="Advanced DevOps content.", document_id=doc2_id, filename="Advanced DevOps Question Bank.pdf")
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             # Both documents' chunks returned (workspace-wide retrieval).
             return RetrievalResult(chunks=[chunk1, chunk2], grounded=True, top_score=0.8)
 
@@ -584,7 +585,7 @@ class TestGroupDTenantIsolation:
 
         seen_workspace_ids: list[uuid.UUID] = []
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             seen_workspace_ids.append(workspace_id)
             # Only return chunks from the requested workspace.
             assert workspace_id == workspace_a_id, f"Wrong workspace: {workspace_id}"
@@ -708,7 +709,7 @@ class TestGroupEFallbackChain:
         """All three providers fail -> clear LLM-unavailable error, no key leakage."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -732,7 +733,7 @@ class TestGroupEFallbackChain:
         """Verify no API key appears in error messages."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -762,7 +763,7 @@ class TestGroupFStreaming:
         """Streaming emits chunks incrementally."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -786,7 +787,7 @@ class TestGroupFStreaming:
         """Provider fails before content emitted -> error surfaced."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -807,7 +808,7 @@ class TestGroupFStreaming:
         """Provider emits partial content then fails -> no second provider attempted."""
         test_client, _ = client
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -854,7 +855,7 @@ class TestGroupGContextPreservation:
 
         chunk = _chunk(0.9, content="Vacation policy: 20 days per year.")
 
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[chunk], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -908,7 +909,7 @@ class TestGroupHRelevanceGateFailure:
         test_client, _ = client
 
         # Stub: retrieval finds evidence.
-        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+        async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
             return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)

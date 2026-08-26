@@ -278,9 +278,8 @@ def test_count_bypasses_retrieval_and_llm(
     test_client, principal = client
 
     # Stub: document count is 4.
-    # Extra response for _load_recent_history (session lookup returns None).
+    # No history lookup needed — metadata intents skip rewrite.
     session = _FakeSession(responses=[
-        _FakeResult(scalar=None),  # _load_recent_history: no session found
         _FakeResult(scalar=4),      # metadata count query
     ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
@@ -315,9 +314,8 @@ def test_list_bypasses_retrieval_and_llm(
     test_client, principal = client
 
     doc_rows = _make_doc_rows("handbook.pdf", "refund_policy.docx", "travel_guide.csv")
-    # Extra response for _load_recent_history (session lookup returns None).
+    # No history lookup needed — metadata intents skip rewrite.
     session = _FakeSession(responses=[
-        _FakeResult(scalar=None),  # _load_recent_history: no session found
         _FakeResult(rows=doc_rows),  # metadata list query
     ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
@@ -354,7 +352,7 @@ def test_content_question_uses_retrieval_and_llm(
     """A content question goes through retrieval and the LLM."""
     test_client, _ = client
 
-    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
         return RetrievalResult(chunks=[_chunk(0.9)], grounded=True, top_score=0.9)
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -379,7 +377,7 @@ def test_no_relevant_chunks_does_not_call_llm(
     """When retrieval returns nothing, the LLM is not called."""
     test_client, _ = client
 
-    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
         return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -403,7 +401,7 @@ def test_chunks_below_threshold_uses_not_relevant_refusal(
     """When chunks exist but none pass the threshold, the refusal mentions documents."""
     test_client, _ = client
 
-    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
         return RetrievalResult(chunks=[_chunk(0.05)], grounded=False, top_score=0.05)
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -428,7 +426,7 @@ def test_no_chunks_uses_no_evidence_refusal(
     """When no chunks are found at all, the refusal is about missing evidence."""
     test_client, _ = client
 
-    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
+    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
         return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
@@ -472,8 +470,10 @@ def test_how_many_discuss_uses_retrieval_not_metadata(
     """'How many documents discuss X?' is a content question, not a metadata count."""
     test_client, _ = client
 
-    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID) -> RetrievalResult:  # noqa: ARG001
-        return RetrievalResult(chunks=[_chunk(0.85, content="We process 50 refunds per month.")], grounded=True, top_score=0.85)
+    async def _retrieve(session: Any, *, query: str, workspace_id: uuid.UUID, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
+        return RetrievalResult(
+            chunks=[_chunk(0.85, content="We process 50 refunds per month.")], grounded=True, top_score=0.85
+        )
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 

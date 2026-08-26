@@ -30,6 +30,7 @@ Phase 3 ingestion pattern.
 from __future__ import annotations
 
 import asyncio
+import statistics
 import uuid
 from dataclasses import dataclass
 
@@ -38,13 +39,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.rag.embeddings import embed_query
-from app.retrieval.grounding import is_grounded
+from app.retrieval.grounding import is_grounded, is_overview_grounded
 from app.retrieval.hybrid import (
     HybridCandidate,
     keyword_search,
     rrf_merge,
     semantic_search,
 )
+from app.retrieval.intent import QueryShape
 from app.retrieval.rerank import rerank_scores
 
 
@@ -114,6 +116,7 @@ async def retrieve(
     *,
     query: str,
     workspace_id: uuid.UUID,
+    query_shape: QueryShape | None = None,
 ) -> RetrievalResult:
     """Retrieve the best evidence for `query` inside one workspace.
 
@@ -124,14 +127,25 @@ async def retrieve(
 
     The pipeline now includes a relevance gate (Part 2) that runs BEFORE retrieval
     to avoid wasting computation on obviously unrelated questions.
+
+    Phase B: ``query_shape`` controls retrieval breadth and grounding strategy.
+    OVERVIEW queries use broader candidate pools and aggregate grounding.
     """
     text = query.strip()
     if not text:
         return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
     settings = get_settings()
+    # Phase B: OVERVIEW queries need broader retrieval.
+    is_overview = query_shape == QueryShape.OVERVIEW
     candidate_count = settings.retrieval_candidate_count
+    if is_overview:
+        # For overview, retrieve more candidates to capture diffuse relevance.
+        candidate_count = min(candidate_count * 2, 30)
     final_count = settings.retrieval_final_count
+    if is_overview:
+        # For overview, keep more chunks in the final set for the LLM.
+        final_count = min(final_count + 2, 10)
 
     # --- Relevance gate (Part 2) ---
     # Check if the question is about this workspace's documents before retrieval.
@@ -234,7 +248,27 @@ async def retrieve(
     final = [_to_retrieved(chunk, score) for chunk, score in scored[:final_count]]
     top_score = scored[0][1]
     second_score = scored[1][1] if len(scored) > 1 else None
-    grounded = is_grounded(top_score)
+
+    # Phase B: Use query-shape-aware grounding.
+    all_scores = [score for _, score in scored[:final_count]]
+    if is_overview and len(all_scores) >= 2:
+        # Overview: aggregate/coverage-based grounding.
+        grounded = is_overview_grounded(all_scores)
+        # Diagnostic logging for overview queries.
+        all_median = statistics.median(all_scores)
+        logger.info(
+            "Overview grounding: query='{query}' scores={scores} "
+            "median={median:.4f} top_mean={top_mean:.4f} "
+            "grounded={grounded}",
+            query=text[:80],
+            scores=[round(s, 4) for s in all_scores],
+            median=all_median,
+            top_mean=statistics.mean(all_scores),
+            grounded=grounded,
+        )
+    else:
+        # Default: single-chunk grounding (fact_lookup, targeted, etc.).
+        grounded = is_grounded(top_score)
 
     # Collect document metadata for logging.
     selected_doc_ids = list({str(c.document_id) for c in final})

@@ -110,6 +110,8 @@ class _FakeSession:
             result = self._responses[self._call_index]
             self._call_index += 1
             return result
+        # Default: return empty result so extra queries (e.g. _load_recent_history)
+        # don't crash the test.
         return _FakeResult()
 
     async def __aenter__(self) -> "_FakeSession":
@@ -184,7 +186,11 @@ class TestGroupAMetadata:
         """How many documents were uploaded this month? -> DB count, no RAG."""
         test_client, _ = client
         # Stub: 3 docs created this month.
-        session = _FakeSession(responses=[_FakeResult(scalar=3)])
+        # Extra response for _load_recent_history (session lookup returns None).
+        session = _FakeSession(responses=[
+            _FakeResult(scalar=None),  # _load_recent_history: no session found
+            _FakeResult(scalar=3),      # metadata count query
+        ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called: list[str] = []
@@ -214,7 +220,10 @@ class TestGroupAMetadata:
     ) -> None:
         """How many documents were uploaded this month? (zero docs) -> 0, no error."""
         test_client, _ = client
-        session = _FakeSession(responses=[_FakeResult(scalar=0)])
+        session = _FakeSession(responses=[
+            _FakeResult(scalar=None),  # _load_recent_history: no session found
+            _FakeResult(scalar=0),      # metadata count query
+        ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called: list[str] = []
@@ -244,7 +253,11 @@ class TestGroupAMetadata:
         """How many members are in this workspace? -> DB count, no RAG."""
         test_client, _ = client
         # Stub: 3 ACTIVE members.
-        session = _FakeSession(responses=[_FakeResult(scalar=3)])
+        # Extra response for _load_recent_history (session lookup returns None).
+        session = _FakeSession(responses=[
+            _FakeResult(scalar=None),  # _load_recent_history: no session found
+            _FakeResult(scalar=3),      # member count query
+        ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called: list[str] = []

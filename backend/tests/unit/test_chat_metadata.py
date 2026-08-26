@@ -278,7 +278,11 @@ def test_count_bypasses_retrieval_and_llm(
     test_client, principal = client
 
     # Stub: document count is 4.
-    session = _FakeSession(responses=[_FakeResult(scalar=4)])
+    # Extra response for _load_recent_history (session lookup returns None).
+    session = _FakeSession(responses=[
+        _FakeResult(scalar=None),  # _load_recent_history: no session found
+        _FakeResult(scalar=4),      # metadata count query
+    ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
     retrieval_called: list[str] = []
@@ -311,7 +315,11 @@ def test_list_bypasses_retrieval_and_llm(
     test_client, principal = client
 
     doc_rows = _make_doc_rows("handbook.pdf", "refund_policy.docx", "travel_guide.csv")
-    session = _FakeSession(responses=[_FakeResult(rows=doc_rows)])
+    # Extra response for _load_recent_history (session lookup returns None).
+    session = _FakeSession(responses=[
+        _FakeResult(scalar=None),  # _load_recent_history: no session found
+        _FakeResult(rows=doc_rows),  # metadata list query
+    ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
     retrieval_called: list[str] = []

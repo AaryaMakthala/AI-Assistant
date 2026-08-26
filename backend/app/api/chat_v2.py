@@ -43,6 +43,7 @@ from app.db.models import ChatMessage, ChatSession, Document
 from app.llm.base import Completion, LLMError, LLMProvider
 from app.rag.prompts import build_messages
 from app.retrieval.pipeline import RetrievedChunk, retrieve
+from app.retrieval.query_rewrite import ChatTurn, RewriteResult, rewrite_query
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
 
@@ -61,7 +62,7 @@ REFUSAL_NOT_RELEVANT = (
 # Kept for backward compatibility; prefer the specific variants above.
 REFUSAL_ANSWER = REFUSAL_NO_EVIDENCE
 
-
+
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +392,60 @@ def _pick_refusal(had_candidates: bool) -> str:
     return REFUSAL_NOT_RELEVANT if had_candidates else REFUSAL_NO_EVIDENCE
 
 
+async def _load_recent_history(
+    *,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_id: uuid.UUID | None = None,
+    max_turns: int = 6,
+) -> list[ChatTurn]:
+    """Load the most recent conversation turns for query rewriting.
+
+    If ``session_id`` is provided, loads messages from that session.
+    Otherwise, loads from the user's most recent session in the workspace.
+    Returns at most ``max_turns`` messages (3 user/assistant pairs).
+    """
+    try:
+        async with tenant_session(workspace_id=workspace_id, user_id=user_id) as db:
+            # Find the session to load from.
+            target_session_id = session_id
+            if target_session_id is None:
+                # Find the user's most recent session in this workspace.
+                row = (
+                    await db.execute(
+                        select(ChatSession.id).where(
+                            ChatSession.workspace_id == workspace_id,
+                            ChatSession.user_id == user_id,
+                        ).order_by(ChatSession.created_at.desc()).limit(1)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    return []
+                target_session_id = row
+
+            # Load recent messages from that session.
+            rows = (
+                await db.execute(
+                    select(ChatMessage.role, ChatMessage.content)
+                    .where(ChatMessage.session_id == target_session_id)
+                    .order_by(ChatMessage.created_at.desc())
+                    .limit(max_turns)
+                )
+            ).all()
+
+            # Reverse to chronological order (oldest first).
+            rows = list(reversed(rows))
+
+            return [ChatTurn(role=r.role, content=r.content) for r in rows]
+    except Exception as exc:
+        # If history loading fails, proceed without context.
+        logger.debug(
+            "Failed to load conversation history for rewrite: {error}",
+            error=str(exc)[:200],
+        )
+        return []
+
+
 # SSE streaming chat endpoint  (POST /chat)
 # ---------------------------------------------------------------------------
 
@@ -408,11 +463,61 @@ async def _stream_chat(
     # 1. Workspace membership check (before any DB write).
     await assert_workspace_role(workspace_id, principal)
 
-    # 1a. Metadata questions bypass the retrieval pipeline entirely.
-    metadata_intent = _is_metadata_question(question)
+    # 1a. Load recent conversation history for query rewriting.
+    history = await _load_recent_history(
+        workspace_id=workspace_id,
+        user_id=principal.user_id,
+        session_id=payload.session_id,
+    )
+
+    # 1b. Rewrite follow-up queries into standalone form.
+    rewrite_result = await rewrite_query(query=question, history=history)
+    effective_query = rewrite_result.rewritten_query
+    needs_clarification = rewrite_result.needs_clarification
+
+    # 1c. Handle ambiguity: ask for clarification instead of refusing.
+    if needs_clarification:
+        # Create session and persist.
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            row = (
+                await db.execute(
+                    insert(ChatSession)
+                    .values(workspace_id=workspace_id, user_id=principal.user_id)
+                    .returning(ChatSession.id)
+                )
+            ).scalar_one()
+            clarify_session_id = row
+        yield await _sse_event("session", {"session_id": str(clarify_session_id)})
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=clarify_session_id, role="user", content=question,
+                )
+            )
+        clarification_text = (
+            "I'm not sure what you're referring to. Could you clarify your question?"
+        )
+        yield await _sse_event("sources", {"sources": []})
+        yield await _sse_event("token", {"text": clarification_text})
+        yield await _sse_event("citations", {"citations": []})
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=clarify_session_id, role="assistant",
+                    content=clarification_text, sources=[],
+                )
+            )
+        yield await _sse_event("done", {
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "provider": "", "model": "", "grounded": True, "routes": [], "sql_query": "",
+        })
+        return
+
+    # 1d. Metadata questions bypass the retrieval pipeline entirely.
+    metadata_intent = _is_metadata_question(effective_query)
     if metadata_intent is not None:
         answer = await _answer_metadata_question(
-            question=question,
+            question=effective_query,
             workspace_id=workspace_id,
             user_id=principal.user_id,
         )
@@ -530,8 +635,9 @@ async def _stream_chat(
         )
 
     # 4. Retrieve evidence (session closes before the LLM call).
+    # Use the rewritten query for all downstream operations.
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
-        result = await retrieve(db, query=question, workspace_id=workspace_id)
+        result = await retrieve(db, query=effective_query, workspace_id=workspace_id)
 
     if not result.grounded:
         # Choose the right refusal: documents exist but irrelevant, or nothing found.
@@ -585,7 +691,7 @@ async def _stream_chat(
     yield await _sse_event("sources", {"sources": sources_list})
 
     # 6. Stream LLM tokens.
-    messages = build_messages(question=question, chunks=result.chunks)
+    messages = build_messages(question=effective_query, chunks=result.chunks)
     completion = Completion()
     full_text = ""
     try:
@@ -716,11 +822,37 @@ async def grounded_chat(
     workspace_id = principal.workspace_id
     await assert_workspace_role(workspace_id, principal)
 
+    # Load recent conversation history for query rewriting.
+    history = await _load_recent_history(
+        workspace_id=workspace_id,
+        user_id=principal.user_id,
+    )
+
+    # Rewrite follow-up queries into standalone form.
+    rewrite_result = await rewrite_query(query=question, history=history)
+    effective_query = rewrite_result.rewritten_query
+
+    # Handle ambiguity: ask for clarification instead of refusing.
+    if rewrite_result.needs_clarification:
+        clarification = (
+            "I'm not sure what you're referring to. Could you clarify your question?"
+        )
+        logger.info(
+            "Query rewrite requested clarification for workspace {ws}",
+            ws=workspace_id,
+        )
+        return GroundedChatResponse(
+            answer=clarification,
+            grounded=True,
+            insufficient_evidence=False,
+            sources=[],
+        )
+
     # Metadata questions bypass the retrieval pipeline entirely.
-    metadata_intent = _is_metadata_question(question)
+    metadata_intent = _is_metadata_question(effective_query)
     if metadata_intent is not None:
         answer = await _answer_metadata_question(
-            question=question,
+            question=effective_query,
             workspace_id=workspace_id,
             user_id=principal.user_id,
         )
@@ -739,7 +871,7 @@ async def grounded_chat(
     async with tenant_session(
         workspace_id=workspace_id, user_id=principal.user_id
     ) as session:
-        result = await retrieve(session, query=question, workspace_id=workspace_id)
+        result = await retrieve(session, query=effective_query, workspace_id=workspace_id)
 
     if not result.grounded:
         refusal = _pick_refusal(had_candidates=bool(result.chunks))
@@ -758,7 +890,7 @@ async def grounded_chat(
             sources=[],
         )
 
-    messages = build_messages(question=question, chunks=result.chunks)
+    messages = build_messages(question=effective_query, chunks=result.chunks)
     completion = Completion()
     try:
         async for _token in llm.stream(messages, completion=completion):

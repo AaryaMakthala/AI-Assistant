@@ -23,9 +23,20 @@ _ENV_EXAMPLE_HINT = (
 
 # ---------------------------------------------------------------------------
 # Provider presets — the base URL and default model for each supported provider.
-# Both Gemini and Groq expose OpenAI-compatible chat-completions endpoints, so
-# the GenericProvider can talk to either one without provider-specific code.
+# All providers expose OpenAI-compatible chat-completions endpoints.
+# Model identifiers are internal only; user-facing output uses generic names
+# ("primary", "fallback", "secondary_fallback").
 # ---------------------------------------------------------------------------
+
+# User-facing display names for providers — used in API responses and logs.
+# Internal model identifiers stay internal; these generic names are shown to users.
+# Fallback chain order: Groq (primary) → OpenRouter (fallback) → Gemini (secondary_fallback).
+_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
+    "groq": "primary",
+    "openrouter": "fallback",
+    "gemini": "secondary_fallback",
+}
+
 
 _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "gemini": {
@@ -34,11 +45,7 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.3-70b-versatile",
-    },
-    "grok": {
-        "base_url": "https://api.x.ai/v1",
-        "model": "grok-3-mini",
+        "model": "qwen/qwen3.6-27b",
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
@@ -97,20 +104,18 @@ class Settings(BaseSettings):
     supabase_service_role_key: SecretStr
 
     # --- LLM provider keys (direct, no abstraction) ---
-    # The application supports Gemini, Groq, Grok/xAI, and OpenRouter via
-    # their direct API keys.  The fallback chain is sequential:
-    # Gemini (primary) → Grok (fallback) → OpenRouter (final fail-safe).
+    # The application supports Groq, OpenRouter, and Gemini via their direct
+    # API keys.  The fallback chain is sequential:
+    # Groq (primary) → OpenRouter (fallback) → Gemini (secondary fallback).
     # The generic LLM_PROVIDER/LLM_MODEL/LLM_API_KEY fields below can
     # override the primary provider when set explicitly.
     gemini_api_key: SecretStr | None = Field(default=None, min_length=1)
     groq_api_key: SecretStr | None = Field(default=None, min_length=1)
-    xai_api_key: SecretStr | None = Field(default=None, min_length=1)
     openrouter_api_key: SecretStr | None = Field(default=None, min_length=1)
 
     # --- Per-provider model overrides (optional) ---
     # These override the default model for each provider in the fallback chain.
     # When unset, the provider preset default is used.
-    grok_model: str | None = None
     openrouter_model: str | None = None
 
     # --- Generic LLM fields (optional when a provider key is set) ---
@@ -212,6 +217,46 @@ class Settings(BaseSettings):
     #: below this, the LLM is never called and the question is refused honestly.
     retrieval_relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
 
+    # --- Phase B-2: Absolute grounding thresholds (cross-encoder logits) ---
+
+    #: Absolute minimum rerank score for an overview query's top chunk.
+    #: Cross-encoder scores are raw logits (range ~[-12, +12]), NOT probabilities.
+    #: Calibrated: Kanban overview top=-3.80, clearly irrelevant is ~-8.
+    #: This is independent of retrieval_relevance_threshold (which governs fact-lookup).
+    overview_min_score: float = Field(
+        default=-4.0,
+        description="Absolute minimum rerank score for overview grounding",
+    )
+    #: Absolute minimum mean score across top chunks for overview aggregate grounding.
+    #: Calibrated: Kanban overview top-3 mean ~-7.16, clearly irrelevant mean ~-8.7.
+    overview_aggregate_min: float = Field(
+        default=-7.5,
+        description="Absolute minimum mean of top overview scores",
+    )
+    #: Confidence threshold above which document targeting is considered high-confidence
+    #: and grounds with a relaxed score floor.  Range [0.0, 1.0].
+    doc_target_high_confidence: float = Field(
+        default=0.90, ge=0.0, le=1.0,
+        description="Confidence threshold for high-confidence doc-target grounding",
+    )
+    #: Absolute minimum rerank score when high-confidence document targeting applies.
+    #: More relaxed than overview_min_score because the doc target is strong evidence.
+    #: Calibrated: Aarya resume top_score=-0.477 passes; clearly irrelevant ~-8 does not.
+    doc_target_relaxed_score: float = Field(
+        default=-3.0,
+        description="Absolute min score when high-confidence doc-target relaxes grounding",
+    )
+    #: Permissive floor for filename-matched queries.  When filename matching finds
+    #: a document and chunks from it are in the final set, we ground regardless of
+    #: the reranker score — the filename IS the evidence.  Set very low to accommodate
+    #: cases where the reranker scores the content poorly (e.g. "do you have any resume"
+    #: scores -11 against resume content).  Clearly irrelevant chunks still fail
+    #: because they won't be from the filename-matched document.
+    filename_match_relaxed_score: float = Field(
+        default=-15.0,
+        description="Permissive floor when filename match + target chunks present",
+    )
+
     # --- Reranker (CLAUDE.md 2) ---
 
     #: Local cross-encoder, run via sentence-transformers. Pinned like the embedding
@@ -225,7 +270,7 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = Field(default=10, ge=1)
 
     llm_temperature: float = 0.2
-    llm_max_output_tokens: int = 1024
+    llm_max_output_tokens: int = 4096
     #: Time budget for the whole generation. A stalled provider must surface as an error
     #: rather than an open connection the client waits on indefinitely.
     llm_timeout_seconds: float = 60.0
@@ -258,7 +303,7 @@ class Settings(BaseSettings):
     def _derive_llm_config(self) -> "Settings":
         """Auto-derive LLM_PROVIDER/MODEL/API_KEY from a provider key when not set.
 
-        When a provider key (GEMINI_API_KEY, GROQ_API_KEY, XAI_API_KEY, or
+        When a provider key (GEMINI_API_KEY, GROQ_API_KEY, or
         OPENROUTER_API_KEY) is present but the generic LLM fields are not, the
         validator fills them in from the provider preset.  Explicit LLM_* values
         always take precedence — this is a convenience, not an override of
@@ -269,27 +314,25 @@ class Settings(BaseSettings):
             return self
 
         # Determine which provider key is set (priority order for primary).
+        # Chain order: Groq (primary) → OpenRouter (fallback) → Gemini (secondary fallback).
         active_key: SecretStr | None = None
         provider_name: str | None = None
-        if self.gemini_api_key:
-            active_key = self.gemini_api_key
-            provider_name = "gemini"
-        elif self.groq_api_key:
+        if self.groq_api_key:
             active_key = self.groq_api_key
             provider_name = "groq"
-        elif self.xai_api_key:
-            active_key = self.xai_api_key
-            provider_name = "grok"
         elif self.openrouter_api_key:
             active_key = self.openrouter_api_key
             provider_name = "openrouter"
+        elif self.gemini_api_key:
+            active_key = self.gemini_api_key
+            provider_name = "gemini"
 
         if active_key is None:
             # No provider key and no generic fields — this is a configuration error.
             # Raise a clear message instead of letting the app crash later.
             raise ValueError(
                 "No LLM provider configured. Set GEMINI_API_KEY, GROQ_API_KEY, "
-                "XAI_API_KEY, or OPENROUTER_API_KEY, "
+                "or OPENROUTER_API_KEY, "
                 "or provide LLM_PROVIDER + LLM_MODEL + LLM_API_KEY explicitly."
             )
 
@@ -314,35 +357,35 @@ class Settings(BaseSettings):
 
         Returns a list of dicts, each with keys: name, api_key, model, base_url.
         Only providers whose API key is configured are included.  The order is
-        Gemini → Grok → OpenRouter, matching the architectural requirement.
+        Groq (primary) → OpenRouter (fallback) → Gemini (secondary fallback).
         """
         chain: list[dict[str, str | None]] = []
 
-        # Primary: Gemini (or explicit LLM_* override)
-        if self.gemini_api_key:
+        # Primary: Groq (or explicit LLM_* override when provider is groq)
+        if self.groq_api_key:
             chain.append({
-                "name": "gemini",
-                "api_key": self.gemini_api_key.get_secret_value(),
-                "model": self.llm_model if self.llm_provider == "gemini" else _PROVIDER_PRESETS["gemini"]["model"],
-                "base_url": self.llm_base_url if self.llm_provider == "gemini" else _PROVIDER_PRESETS["gemini"]["base_url"],
+                "name": "groq",
+                "api_key": self.groq_api_key.get_secret_value(),
+                "model": self.llm_model if self.llm_provider == "groq" else _PROVIDER_PRESETS["groq"]["model"],
+                "base_url": self.llm_base_url if self.llm_provider == "groq" else _PROVIDER_PRESETS["groq"]["base_url"],
             })
 
-        # Fallback 1: Grok/xAI
-        if self.xai_api_key:
-            chain.append({
-                "name": "grok",
-                "api_key": self.xai_api_key.get_secret_value(),
-                "model": self.grok_model or _PROVIDER_PRESETS["grok"]["model"],
-                "base_url": _PROVIDER_PRESETS["grok"]["base_url"],
-            })
-
-        # Final fail-safe: OpenRouter
+        # Fallback: OpenRouter (if configured)
         if self.openrouter_api_key:
             chain.append({
                 "name": "openrouter",
                 "api_key": self.openrouter_api_key.get_secret_value(),
                 "model": self.openrouter_model or _PROVIDER_PRESETS["openrouter"]["model"],
                 "base_url": _PROVIDER_PRESETS["openrouter"]["base_url"],
+            })
+
+        # Secondary fallback: Gemini (if configured)
+        if self.gemini_api_key and self.llm_provider != "gemini":
+            chain.append({
+                "name": "gemini",
+                "api_key": self.gemini_api_key.get_secret_value(),
+                "model": _PROVIDER_PRESETS["gemini"]["model"],
+                "base_url": _PROVIDER_PRESETS["gemini"]["base_url"],
             })
 
         return chain

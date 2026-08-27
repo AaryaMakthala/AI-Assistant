@@ -26,7 +26,7 @@ def _ignore_dotenv(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in _TEST_ENV:
         monkeypatch.delenv(key, raising=False)
     # Provider keys that may leak from a developer's shell or .env.
-    for key in ("GEMINI_API_KEY", "GROQ_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"):
+    for key in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     # Clear every remaining config-affecting variable (GITHUB_TOKEN, SENTRY_DSN, ...)
     # so results cannot vary with a developer's shell or user environment. The field's

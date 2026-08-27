@@ -83,39 +83,39 @@ def _make_mock_client(side_effect: Any) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# TEST A: Gemini 503 -> Grok success
+# TEST A: Groq 503 -> OpenRouter success
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_gemini_503_grok_success() -> None:
-    """Gemini -> HTTP 503, Grok -> success.
+async def test_groq_503_openrouter_success() -> None:
+    """Groq -> HTTP 503, OpenRouter -> success.
 
     Asserts:
-    - Gemini called first
-    - Grok called second
-    - OpenRouter NOT called
-    - returned content comes from Grok
+    - Groq called first
+    - OpenRouter called second
+    - Gemini NOT called
+    - returned content comes from OpenRouter
     """
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
     openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
+    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
 
-    chain = _build_chain(gemini, grok, openrouter)
+    chain = _build_chain(groq, openrouter, gemini)
 
     call_log: list[str] = []
 
     def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
-        if "generativelanguage" in url:
-            call_log.append("gemini")
+        if "api.groq.com" in url:
+            call_log.append("groq")
             return _MockResponse(503)
-        elif "x.ai" in url:
-            call_log.append("grok")
+        elif "openrouter" in url:
+            call_log.append("openrouter")
             return _MockResponse(200, lines=[
                 _sse("Kanban is a visual workflow method."),
                 "data: [DONE]",
             ])
-        elif "openrouter" in url:
-            call_log.append("openrouter")
+        elif "generativelanguage" in url:
+            call_log.append("gemini")
             return _MockResponse(200)  # should not be reached
         return _MockResponse(500)
 
@@ -128,44 +128,44 @@ async def test_gemini_503_grok_success() -> None:
         async for token in chain.stream(messages, completion=completion):
             tokens.append(token)
 
-    assert call_log == ["gemini", "grok"], f"Expected [gemini, grok], got {call_log}"
-    assert "openrouter" not in call_log, "OpenRouter should NOT be called"
+    assert call_log == ["groq", "openrouter"], f"Expected [groq, openrouter], got {call_log}"
+    assert "gemini" not in call_log, "Gemini should NOT be called"
     assert "".join(tokens) == "Kanban is a visual workflow method."
     assert completion.text == "Kanban is a visual workflow method."
-    assert completion.provider == "grok"
-    assert completion.model == "grok-3-mini"
+    assert completion.provider == "openrouter"
+    assert completion.model == "google/gemini-2.0-flash-001"
 
 
 # ---------------------------------------------------------------------------
-# TEST B: Gemini 503 -> Grok 503 -> OpenRouter success
+# TEST B: Groq 503 -> OpenRouter 503 -> Gemini success
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_gemini_503_grok_503_openrouter_success() -> None:
-    """Gemini -> 503, Grok -> 503, OpenRouter -> success.
+async def test_groq_503_openrouter_503_gemini_success() -> None:
+    """Groq -> 503, OpenRouter -> 503, Gemini -> success.
 
-    Asserts exact order: Gemini -> Grok -> OpenRouter.
-    Asserts calls are sequential, OpenRouter is reached, final response from OpenRouter.
+    Asserts exact order: Groq -> OpenRouter -> Gemini.
+    Asserts calls are sequential, Gemini is reached, final response from Gemini.
     """
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
     openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
+    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
 
-    chain = _build_chain(gemini, grok, openrouter)
+    chain = _build_chain(groq, openrouter, gemini)
 
     call_log: list[str] = []
 
     def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
-        if "generativelanguage" in url:
-            call_log.append("gemini")
-            return _MockResponse(503)
-        elif "x.ai" in url:
-            call_log.append("grok")
+        if "api.groq.com" in url:
+            call_log.append("groq")
             return _MockResponse(503)
         elif "openrouter" in url:
             call_log.append("openrouter")
+            return _MockResponse(503)
+        elif "generativelanguage" in url:
+            call_log.append("gemini")
             return _MockResponse(200, lines=[
-                _sse("OpenRouter says: Kanban is a workflow."),
+                _sse("Gemini says: Kanban is a workflow."),
                 "data: [DONE]",
             ])
         return _MockResponse(500)
@@ -179,11 +179,11 @@ async def test_gemini_503_grok_503_openrouter_success() -> None:
         async for token in chain.stream(messages, completion=completion):
             tokens.append(token)
 
-    assert call_log == ["gemini", "grok", "openrouter"], f"Expected sequential order, got {call_log}"
-    assert "".join(tokens) == "OpenRouter says: Kanban is a workflow."
-    assert completion.text == "OpenRouter says: Kanban is a workflow."
-    assert completion.provider == "openrouter"
-    assert completion.model == "google/gemini-2.0-flash-001"
+    assert call_log == ["groq", "openrouter", "gemini"], f"Expected sequential order, got {call_log}"
+    assert "".join(tokens) == "Gemini says: Kanban is a workflow."
+    assert completion.text == "Gemini says: Kanban is a workflow."
+    assert completion.provider == "gemini"
+    assert completion.model == "gemini-3.6-flash"
 
 
 # ---------------------------------------------------------------------------
@@ -192,28 +192,28 @@ async def test_gemini_503_grok_503_openrouter_success() -> None:
 
 @pytest.mark.asyncio
 async def test_all_providers_fail_no_key_leakage() -> None:
-    """Gemini -> 503, Grok -> 503, OpenRouter -> 503.
+    """Groq -> 503, OpenRouter -> 503, Gemini -> 503.
 
     Asserts:
     - All three providers are attempted
     - Final error is the expected provider-unavailable error
     - No API key is present in exception text
     """
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
     openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
+    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
 
-    chain = _build_chain(gemini, grok, openrouter)
+    chain = _build_chain(groq, openrouter, gemini)
 
     call_log: list[str] = []
 
     def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
-        if "generativelanguage" in url:
-            call_log.append("gemini")
-        elif "x.ai" in url:
-            call_log.append("grok")
+        if "api.groq.com" in url:
+            call_log.append("groq")
         elif "openrouter" in url:
             call_log.append("openrouter")
+        elif "generativelanguage" in url:
+            call_log.append("gemini")
         return _MockResponse(503, body=json.dumps({"error": "server overloaded"}).encode())
 
     messages = [Message(role="user", content="What is Kanban?")]
@@ -225,13 +225,13 @@ async def test_all_providers_fail_no_key_leakage() -> None:
             async for _token in chain.stream(messages, completion=completion):
                 pass
 
-    assert call_log == ["gemini", "grok", "openrouter"], f"Expected all three attempted, got {call_log}"
+    assert call_log == ["groq", "openrouter", "gemini"], f"Expected all three attempted, got {call_log}"
     error_text = str(exc_info.value)
     assert "503" in error_text or "failed" in error_text.lower()
     # No API key leakage
-    assert "fake-gemini-key" not in error_text
-    assert "fake-grok-key" not in error_text
+    assert "fake-groq-key" not in error_text
     assert "fake-openrouter-key" not in error_text
+    assert "fake-gemini-key" not in error_text
 
 
 # ---------------------------------------------------------------------------
@@ -240,23 +240,23 @@ async def test_all_providers_fail_no_key_leakage() -> None:
 
 @pytest.mark.asyncio
 async def test_fallback_preserves_context() -> None:
-    """When Gemini fails and Grok succeeds, Grok receives the same context.
+    """When Groq fails and OpenRouter succeeds, OpenRouter receives the same context.
 
     Creates a request with system prompt, user query, conversation history,
-    retrieved chunk text, and source metadata.  Forces Gemini failure, Grok
-    success.  Captures the actual payload given to Grok.
+    retrieved chunk text, and source metadata.  Forces Groq failure, OpenRouter
+    success.  Captures the actual payload given to OpenRouter.
     """
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
+    openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
 
-    chain = _build_chain(gemini, grok)
+    chain = _build_chain(groq, openrouter)
 
     captured_payloads: list[dict] = []
 
     def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:
-        if "generativelanguage" in url:
+        if "api.groq.com" in url:
             return _MockResponse(503)
-        elif "x.ai" in url:
+        elif "openrouter" in url:
             captured_payloads.append(kwargs.get("json", {}))
             return _MockResponse(200, lines=[
                 _sse("The policy allows 20 days."),
@@ -298,11 +298,11 @@ async def test_fallback_preserves_context() -> None:
         async for token in chain.stream(messages, completion=completion):
             tokens.append(token)
 
-    # Verify Grok received the correct payload.
-    assert len(captured_payloads) == 1, f"Expected 1 Grok payload, got {len(captured_payloads)}"
+    # Verify OpenRouter received the correct payload.
+    assert len(captured_payloads) == 1, f"Expected 1 OpenRouter payload, got {len(captured_payloads)}"
     payload = captured_payloads[0]
 
-    assert payload["model"] == "grok-3-mini"
+    assert payload["model"] == "google/gemini-2.0-flash-001"
 
     sent_messages = payload["messages"]
     assert len(sent_messages) == 4  # system + 2 history + user
@@ -330,29 +330,29 @@ async def test_fallback_preserves_context() -> None:
 
 @pytest.mark.asyncio
 async def test_partial_stream_no_failover() -> None:
-    """Gemini emits meaningful content then fails -> Grok is NOT called.
+    """Groq emits meaningful content then fails -> OpenRouter is NOT called.
 
     Asserts:
-    - Gemini is called
-    - Grok is NOT called
+    - Groq is called
     - OpenRouter is NOT called
+    - Gemini is NOT called
     - partial output is not concatenated with another provider's output
     """
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
     openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
+    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
 
-    chain = _build_chain(gemini, grok, openrouter)
+    chain = _build_chain(groq, openrouter, gemini)
 
     call_log: list[str] = []
 
-    class _PartialGeminiResponse:
+    class _PartialGroqResponse:
         status_code = 200
 
         async def aread(self) -> bytes:
             return b""
 
-        async def __aenter__(self) -> "_PartialGeminiResponse":
+        async def __aenter__(self) -> "_PartialGroqResponse":
             return self
 
         async def __aexit__(self, *args: Any) -> None:
@@ -365,12 +365,92 @@ async def test_partial_stream_no_failover() -> None:
             raise ConnectionError("Connection reset by peer")
 
     def _mock_stream(method: str, url: str, **kwargs: Any) -> Any:  # noqa: ARG001
-        if "generativelanguage" in url:
+        if "api.groq.com" in url:
+            call_log.append("groq")
+            return _PartialGroqResponse()
+        elif "openrouter" in url:
+            call_log.append("openrouter")
+            return _MockResponse(200, lines=[_sse("OpenRouter answer"), "data: [DONE]"])
+        elif "generativelanguage" in url:
             call_log.append("gemini")
-            return _PartialGeminiResponse()
-        elif "x.ai" in url:
-            call_log.append("grok")
-            return _MockResponse(200, lines=[_sse("Grok's answer"), "data: [DONE]"])
+            return _MockResponse(200)
+        return _MockResponse(500)
+
+    messages = [Message(role="user", content="What is Kanban?")]
+    completion = Completion()
+
+    mock_client = _make_mock_client(_mock_stream)
+    with patch.object(httpx, "AsyncClient", return_value=mock_client):
+        with pytest.raises(LLMError) as exc_info:
+            async for _token in chain.stream(messages, completion=completion):
+                pass
+
+    # Only Groq was called — no failover after partial content.
+    assert call_log == ["groq"], f"Expected only Groq, got {call_log}"
+    assert "openrouter" not in call_log
+    assert "gemini" not in call_log
+    # Partial content was captured before the failure.
+    assert completion.text == "Kanban is a visual workflow"
+
+
+@pytest.mark.asyncio
+async def test_pre_stream_failure_allows_failover() -> None:
+    """Groq fails before any content -> OpenRouter IS attempted.
+
+    This is the counterpart to test_partial_stream_no_failover: failover
+    IS allowed when no content has been emitted.
+    """
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
+    openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
+
+    chain = _build_chain(groq, openrouter)
+
+    call_log: list[str] = []
+
+    def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
+        if "api.groq.com" in url:
+            call_log.append("groq")
+            return _MockResponse(503, body=b"server overloaded")
+        elif "openrouter" in url:
+            call_log.append("openrouter")
+            return _MockResponse(200, lines=[
+                _sse("OpenRouter says: Kanban is a workflow."),
+                "data: [DONE]",
+            ])
+        return _MockResponse(500)
+
+    messages = [Message(role="user", content="What is Kanban?")]
+    completion = Completion()
+
+    mock_client = _make_mock_client(_mock_stream)
+    with patch.object(httpx, "AsyncClient", return_value=mock_client):
+        tokens = []
+        async for token in chain.stream(messages, completion=completion):
+            tokens.append(token)
+
+    assert call_log == ["groq", "openrouter"], f"Expected [groq, openrouter], got {call_log}"
+    assert "".join(tokens) == "OpenRouter says: Kanban is a workflow."
+    assert completion.provider == "openrouter"
+
+
+# ---------------------------------------------------------------------------
+# Non-retryable error test
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_non_retryable_error_no_failover() -> None:
+    """Groq returns 401 (non-retryable) -> OpenRouter is NOT attempted."""
+    groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
+    openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
+
+    chain = _build_chain(groq, openrouter)
+
+    call_log: list[str] = []
+
+    def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
+        if "api.groq.com" in url:
+            call_log.append("groq")
+            return _MockResponse(401, body=b"invalid api key")
         elif "openrouter" in url:
             call_log.append("openrouter")
             return _MockResponse(200)
@@ -385,86 +465,6 @@ async def test_partial_stream_no_failover() -> None:
             async for _token in chain.stream(messages, completion=completion):
                 pass
 
-    # Only Gemini was called — no failover after partial content.
-    assert call_log == ["gemini"], f"Expected only Gemini, got {call_log}"
-    assert "grok" not in call_log
-    assert "openrouter" not in call_log
-    # Partial content was captured before the failure.
-    assert completion.text == "Kanban is a visual workflow"
-
-
-@pytest.mark.asyncio
-async def test_pre_stream_failure_allows_failover() -> None:
-    """Gemini fails before any content -> Grok IS attempted.
-
-    This is the counterpart to test_partial_stream_no_failover: failover
-    IS allowed when no content has been emitted.
-    """
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
-
-    chain = _build_chain(gemini, grok)
-
-    call_log: list[str] = []
-
-    def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
-        if "generativelanguage" in url:
-            call_log.append("gemini")
-            return _MockResponse(503, body=b"server overloaded")
-        elif "x.ai" in url:
-            call_log.append("grok")
-            return _MockResponse(200, lines=[
-                _sse("Grok says: Kanban is a workflow."),
-                "data: [DONE]",
-            ])
-        return _MockResponse(500)
-
-    messages = [Message(role="user", content="What is Kanban?")]
-    completion = Completion()
-
-    mock_client = _make_mock_client(_mock_stream)
-    with patch.object(httpx, "AsyncClient", return_value=mock_client):
-        tokens = []
-        async for token in chain.stream(messages, completion=completion):
-            tokens.append(token)
-
-    assert call_log == ["gemini", "grok"], f"Expected [gemini, grok], got {call_log}"
-    assert "".join(tokens) == "Grok says: Kanban is a workflow."
-    assert completion.provider == "grok"
-
-
-# ---------------------------------------------------------------------------
-# Non-retryable error test
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_non_retryable_error_no_failover() -> None:
-    """Gemini returns 401 (non-retryable) -> Grok is NOT attempted."""
-    gemini = _make_provider("gemini", "gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com/v1beta/openai")
-    grok = _make_provider("grok", "grok-3-mini", base_url="https://api.x.ai/v1")
-
-    chain = _build_chain(gemini, grok)
-
-    call_log: list[str] = []
-
-    def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
-        if "generativelanguage" in url:
-            call_log.append("gemini")
-            return _MockResponse(401, body=b"invalid api key")
-        elif "x.ai" in url:
-            call_log.append("grok")
-            return _MockResponse(200)
-        return _MockResponse(500)
-
-    messages = [Message(role="user", content="What is Kanban?")]
-    completion = Completion()
-
-    mock_client = _make_mock_client(_mock_stream)
-    with patch.object(httpx, "AsyncClient", return_value=mock_client):
-        with pytest.raises(LLMError) as exc_info:
-            async for _token in chain.stream(messages, completion=completion):
-                pass
-
-    # Only Gemini called — 401 is non-retryable, no failover.
-    assert call_log == ["gemini"], f"Expected only Gemini, got {call_log}"
+    # Only Groq called — 401 is non-retryable, no failover.
+    assert call_log == ["groq"], f"Expected only Groq, got {call_log}"
     assert exc_info.value.retryable is False

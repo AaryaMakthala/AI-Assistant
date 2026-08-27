@@ -347,7 +347,7 @@ def test_final_chunks_reach_the_llm_and_backend_sources_match(
     assert body["insufficient_evidence"] is False
     assert body["answer"] == "20 days, with 12 months of carryover."
     assert body["provider"] == "test-provider"
-    assert body["model"] == "test-model"
+    assert body["model"] == ""
 
 
 def test_llm_configuration_comes_from_canonical_settings() -> None:

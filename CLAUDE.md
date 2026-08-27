@@ -89,14 +89,15 @@ Auth
   the backend verifies it and looks up membership from the database.
 
 LLM
-  Sequential fallback chain: Gemini (primary) → Grok/xAI (fallback) → OpenRouter
-  (final fail-safe). Providers are tried strictly sequentially, never in parallel.
-  Configured through environment variables (GEMINI_API_KEY, XAI_API_KEY,
-  OPENROUTER_API_KEY, or the generic LLM_PROVIDER/LLM_MODEL/LLM_API_KEY/LLM_BASE_URL).
+  Sequential fallback chain: Groq (primary) → OpenRouter (fallback) → Gemini
+  (secondary fallback). Providers are tried strictly sequentially, never in parallel.
+  Configured through environment variables (GROQ_API_KEY, OPENROUTER_API_KEY,
+  GEMINI_API_KEY, or the generic LLM_PROVIDER/LLM_MODEL/LLM_API_KEY/LLM_BASE_URL).
   Only providers whose API key is present are included in the chain.  Fallback triggers
   on HTTP 429/5xx, timeout, or connection error — not on invalid requests.  The code
   treats every provider as a generic chat-completions endpoint; no provider-specific
-  quirks are assumed.
+  quirks are assumed.  User-facing output uses generic names ("primary", "fallback",
+  "secondary_fallback") instead of specific model identifiers.
 
 Embeddings
   Exactly ONE local, free embedding model via sentence-transformers
@@ -775,12 +776,11 @@ SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 
 # LLM — sequential fallback chain, never parallel
-# Gemini (primary, uses gemini-3.6-flash by default):
+# Primary provider:
 GEMINI_API_KEY=
-# Grok/xAI (fallback, uses grok-3-mini by default):
-XAI_API_KEY=
-# GROK_MODEL=
-# OpenRouter (final fail-safe, uses google/gemini-2.0-flash-001 by default):
+# Fallback provider:
+GROQ_API_KEY=
+# Secondary fallback provider:
 OPENROUTER_API_KEY=
 # OPENROUTER_MODEL=
 # Optional overrides for the primary provider:

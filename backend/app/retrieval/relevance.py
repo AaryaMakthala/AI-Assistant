@@ -188,9 +188,24 @@ async def _llm_relevance_check(
 
         # Import the LLM provider from the same dependency the chat endpoint uses.
         from app.llm.base import Completion, Message
-        from app.llm.generic import GenericProvider
+        from app.config import get_settings
 
-        provider = GenericProvider()
+        settings = get_settings()
+        chain_count = sum(
+            1
+            for key in (
+                settings.gemini_api_key,
+                settings.groq_api_key,
+                settings.openrouter_api_key,
+            )
+            if key is not None
+        )
+        if chain_count > 1:
+            from app.llm.fallback import FallbackChainProvider
+            provider = FallbackChainProvider()
+        else:
+            from app.llm.generic import GenericProvider
+            provider = GenericProvider()
         messages = [Message(role="user", content=classification_prompt)]
         completion = Completion()
 

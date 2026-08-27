@@ -51,6 +51,11 @@ def _stub_settings(monkeypatch: pytest.MonkeyPatch) -> None:
         retrieval_candidate_count=15,
         retrieval_final_count=3,
         retrieval_relevance_threshold=0.3,
+        overview_min_score=-3.0,
+        overview_aggregate_min=-4.0,
+        doc_target_high_confidence=0.90,
+        doc_target_relaxed_score=-3.0,
+        filename_match_relaxed_score=-15.0,
     )
     monkeypatch.setattr(pipeline_module, "get_settings", lambda: settings)
 
@@ -60,6 +65,10 @@ async def _empty_semantic(session, **kwargs) -> list[Match]:  # noqa: ANN001, AR
 
 
 async def _empty_keyword(session, **kwargs) -> list[Match]:  # noqa: ANN001, ARG001
+    return []
+
+
+async def _empty_filename(session, **kwargs) -> list[Match]:  # noqa: ANN001, ARG001
     return []
 
 
@@ -81,6 +90,7 @@ async def test_retrieve_threads_workspace_into_searches(
     monkeypatch.setattr(pipeline_module, "embed_query", lambda q: [0.0])
     monkeypatch.setattr(pipeline_module, "semantic_search", _semantic)
     monkeypatch.setattr(pipeline_module, "keyword_search", _keyword)
+    monkeypatch.setattr(pipeline_module, "filename_search", _empty_filename)
 
     await retrieve(FakeSession(), query="vacation", workspace_id=ws)
 
@@ -98,6 +108,7 @@ async def test_retrieve_no_candidates_is_refused(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(pipeline_module, "embed_query", lambda q: [0.0])
     monkeypatch.setattr(pipeline_module, "semantic_search", _empty_semantic)
     monkeypatch.setattr(pipeline_module, "keyword_search", _empty_keyword)
+    monkeypatch.setattr(pipeline_module, "filename_search", _empty_filename)
 
     result = await retrieve(FakeSession(), query="nothing", workspace_id=uuid.uuid4())
     assert result.chunks == []
@@ -124,6 +135,7 @@ async def test_retrieve_reranks_and_caps_at_final_count(
 
     monkeypatch.setattr(pipeline_module, "semantic_search", _semantic)
     monkeypatch.setattr(pipeline_module, "keyword_search", _empty_keyword)
+    monkeypatch.setattr(pipeline_module, "filename_search", _empty_filename)
     # Invert: later RRF rank ⇒ higher rerank score.
     monkeypatch.setattr(
         pipeline_module,
@@ -159,6 +171,7 @@ async def test_retrieve_grounding_uses_rerank_scores(
 
     monkeypatch.setattr(pipeline_module, "semantic_search", _semantic)
     monkeypatch.setattr(pipeline_module, "keyword_search", _empty_keyword)
+    monkeypatch.setattr(pipeline_module, "filename_search", _empty_filename)
     monkeypatch.setattr(pipeline_module, "rerank_scores", lambda q, texts: [0.05])
 
     result = await retrieve(FakeSession(), query="q", workspace_id=ws)

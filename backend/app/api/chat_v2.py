@@ -178,6 +178,37 @@ def _source_dict(chunk: RetrievedChunk, *, number: int) -> dict:
     }
 
 
+# Matches complete think blocks: <think>...</think>
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+# Matches unclosed think blocks (model hit max_tokens before closing tag).
+_THINK_TAG_OPEN_RE = re.compile(r"<think>.*", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove model-injected thinking/reasoning blocks from LLM output.
+
+    Some models (e.g. Qwen3) emit ``<think>...</think>`` tags containing
+    internal reasoning.  Users should see only the final answer.
+    Handles both closed and unclosed think blocks.
+    """
+    result = _THINK_TAG_RE.sub("", text)
+    # Remove any unclosed think block (open tag without close).
+    if "<think>" in result and "</think>" not in result:
+        result = _THINK_TAG_OPEN_RE.sub("", result)
+    return result.strip()
+
+
+def _display_provider_name(internal_name: str) -> str:
+    """Map internal provider name to a generic user-facing display name.
+
+    Internal names like "gemini", "groq", "openrouter" are mapped to
+    "primary", "fallback", "secondary_fallback" respectively. Unknown
+    names pass through unchanged.
+    """
+    from app.config import _PROVIDER_DISPLAY_NAMES
+    return _PROVIDER_DISPLAY_NAMES.get(internal_name, internal_name)
+
+
 async def _sse_event(name: str, data: object) -> str:
     """Format one SSE ``event:`` / ``data:`` frame."""
     payload = json.dumps(data, default=str)
@@ -948,24 +979,35 @@ async def _stream_chat(
 
     # 4. Retrieve evidence (session closes before the LLM call).
     # Use the rewritten query for all downstream operations.
-    # Phase B: classify query shape for overview-aware retrieval and grounding.
+    # Phase B-2: classify query shape + resolve doc target for filename-aware retrieval.
     doc_target_result = None
     if intent.category == IntentCategory.DOCUMENT_CONTENT:
-        from app.retrieval.doc_targeting import detect_document_reference
-        doc_target_result = detect_document_reference(effective_query)
+        from app.retrieval.doc_targeting import resolve_document_target
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as dt_db:
+            doc_target_result = await resolve_document_target(
+                session=dt_db,
+                question=effective_query,
+                workspace_id=workspace_id,
+            )
+    has_doc_target = doc_target_result is not None and doc_target_result.matched_document_id is not None
     query_shape = classify_query_shape(
         effective_query,
-        has_doc_target=(doc_target_result is not None and doc_target_result is not None),
+        has_doc_target=has_doc_target,
     )
     logger.info(
-        "intent=document_content query_shape={shape} workspace={ws}",
+        "intent=document_content query_shape={shape} workspace={ws} "
+        "filename_match={fm} matched_filename={mf} doc_target_confidence={dtc}",
         shape=query_shape.value, ws=workspace_id,
+        fm=doc_target_result is not None and doc_target_result.matched_filename is not None,
+        mf=doc_target_result.matched_filename if doc_target_result else None,
+        dtc=doc_target_result.confidence if doc_target_result else 0.0,
     )
 
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
         result = await retrieve(
             db, query=effective_query, workspace_id=workspace_id,
             query_shape=query_shape,
+            doc_target_result=doc_target_result,
         )
 
     if not result.grounded:
@@ -1044,6 +1086,9 @@ async def _stream_chat(
         )
         return
 
+    # Strip model-injected thinking/reasoning blocks (e.g. Qwen3 `` tags).
+    full_text = _strip_think_tags(full_text)
+
     if not full_text.strip():
         yield await _sse_event(
             "error",
@@ -1073,8 +1118,8 @@ async def _stream_chat(
         "done",
         {
             "usage": completion.usage.as_dict(),
-            "provider": completion.provider or llm.name,
-            "model": completion.model or llm.model,
+            "provider": _display_provider_name(completion.provider or llm.name),
+            "model": "",
             "grounded": True,
             "routes": [],
             "sql_query": "",
@@ -1253,12 +1298,28 @@ async def grounded_chat(
         )
 
     # --- Document content path (RAG) ---
-    # Phase B: classify query shape for overview-aware retrieval.
-    from app.retrieval.doc_targeting import detect_document_reference
-    doc_target = detect_document_reference(effective_query)
+    # Phase B-2: classify query shape + resolve doc target for filename-aware retrieval.
+    from app.retrieval.doc_targeting import resolve_document_target
+    async with tenant_session(
+        workspace_id=workspace_id, user_id=principal.user_id
+    ) as dt_db:
+        doc_target_result = await resolve_document_target(
+            session=dt_db,
+            question=effective_query,
+            workspace_id=workspace_id,
+        )
+    has_doc_target = doc_target_result is not None and doc_target_result.matched_document_id is not None
     query_shape = classify_query_shape(
         effective_query,
-        has_doc_target=(doc_target is not None),
+        has_doc_target=has_doc_target,
+    )
+    logger.info(
+        "intent=document_content query_shape={shape} workspace={ws} "
+        "filename_match={fm} matched_filename={mf} doc_target_confidence={dtc}",
+        shape=query_shape.value, ws=workspace_id,
+        fm=doc_target_result.matched_filename is not None,
+        mf=doc_target_result.matched_filename,
+        dtc=doc_target_result.confidence,
     )
     async with tenant_session(
         workspace_id=workspace_id, user_id=principal.user_id
@@ -1266,6 +1327,7 @@ async def grounded_chat(
         result = await retrieve(
             session, query=effective_query, workspace_id=workspace_id,
             query_shape=query_shape,
+            doc_target_result=doc_target_result,
         )
 
     if not result.grounded:
@@ -1315,6 +1377,8 @@ async def grounded_chat(
         )
 
     sources = [_source(chunk) for chunk in result.chunks]
+    # Strip model-injected thinking/reasoning blocks (e.g. Qwen3 `` tags).
+    answer_text = _strip_think_tags(completion.text)
     logger.info(
         "Grounded answer for workspace {ws}: {n} sources, {tokens} completion tokens",
         ws=workspace_id,
@@ -1322,12 +1386,12 @@ async def grounded_chat(
         tokens=completion.usage.completion_tokens,
     )
     return GroundedChatResponse(
-        answer=completion.text,
+        answer=answer_text,
         grounded=True,
         insufficient_evidence=False,
         sources=sources,
-        provider=completion.provider or llm.name,
-        model=completion.model or llm.model,
+        provider=_display_provider_name(completion.provider or llm.name),
+        model="",
     )
 
 

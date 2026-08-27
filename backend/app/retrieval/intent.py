@@ -198,7 +198,12 @@ _GENERAL_KNOW_PATTERN = re.compile(
     r"(?:who\s+(?:won|scored|played)\s+.*(?:world\s+cup|super\s+bowl|olympics))"
     r"|(?:write\s+(?:me\s+)?(?:a\s+)?(?:python|javascript|java|c\+\+|rust|go)\s+"
     r"(?:program|script|function|game|app))"
-    r"|(?:tell\s+me\s+a\s+joke)",
+    r"|(?:tell\s+me\s+a\s+joke)"
+    r"|(?:what(?:'?s|\s+is)\s+(?:the\s+)?weather\s+(?:today|tomorrow|like|outside|forecast))"
+    r"|(?:how(?:'?s|\s+is)\s+(?:the\s+)?weather)"
+    r"|(?:who\s+(?:is|are)\s+the\s+(?:president|ceo|pm|prime\s+minister|king|queen))"
+    r"|(?:what\s+time\s+(?:is\s+it|do\s+(?:we|you|they)\s+(?:start|finish|close|open)))"
+    r"|(?:translate\s+.*\s+to\s+(?:french|spanish|german|chinese|japanese|hindi|arabic))",
     re.IGNORECASE,
 )
 
@@ -222,7 +227,11 @@ _APP_HELP_PATTERN = re.compile(
     r"|(?:do\s+you\s+(?:track|monitor|log)\s+(?:my|us|activity))\b"
     r"|(?:who\s+has\s+(?:access|permission))\b"
     r"|(?:what\s+(?:are\s+)?(?:my|the)\s+(?:permission|role|access))\b"
-    r"|(?:how\s+(?:does\s+)?(?:this|it)\s+work)\b",
+    r"|(?:how\s+(?:does\s+)?(?:this|it)\s+work)\b"
+    r"|(?:how\s+(?:can|do|should)\s+(?:i|we|you)\s+"
+    r"(?:invite|add|send)\s+(?:.*?\s+)?(?:member|user|person|colleague|someone)?)\b"
+    r"|(?:how\s+(?:do\s+)?i\s+"
+    r"(?:invite|add|onboard)\s+(?:a\s+)?(?:member|user|person|colleague|someone)?)\b",
     re.IGNORECASE,
 )
 
@@ -238,7 +247,10 @@ _CONVERSATION_HISTORY_PATTERN = re.compile(
     r"(?:ask|asked|sent|made))\b"
     r"|(?:show\s+(?:me\s+)?(?:my\s+)?(?:previous|recent|last)\s+"
     r"(?:questions?|messages?|conversation))\b"
-    r"|(?:what\s+have\s+(?:i|we)\s+(?:been\s+)?(?:asking|discussing|talking))\b",
+    r"|(?:what\s+have\s+(?:i|we)\s+(?:been\s+)?(?:asking|discussing|talking))\b"
+    r"|(?:what\s+have\s+(?:i|we)\s+(?:been\s+)?discussing\s*(?:recently)?\b)"
+    r"|(?:what\s+(?:have|did)\s+(?:i|we)\s+"
+    r"(?:discussed|covered|talked\s+about|covered|spoken\s+about))\b",
     re.IGNORECASE,
 )
 
@@ -254,6 +266,7 @@ _MEMBER_LIST_PATTERN = re.compile(
     r"(?:list|show|what|which|name)s?\s+"
     r"(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?"
     r"(?:the\s+|this\s+|our\s+)?(?:workspace\s+)?"
+    r"(?:\w+\s+)?"  # optional adjective before noun (e.g. "active members")
     r"(?:people|members?|users?|employees?|team\s*members?|contributors?)"
     r"|(?:who(?:'?s|\s+is|\s+are))\s+"
     r"(?:in|of|on|at)\s+"
@@ -334,6 +347,22 @@ def classify_intent(query: str) -> Intent:
             category=IntentCategory.AMBIGUOUS,
             needs_clarification=True,
             reason="empty_query",
+        )
+
+    # --- 0. Ambiguous / anaphoric references ---
+    _ANAPHORIC_PATTERN = re.compile(
+        r"(?:tell\s+me\s+about\s+(?:that|it|them|this))\b"
+        r"|(?:what\s+about\s+(?:that|it|them|this))\b"
+        r"|(?:how\s+about\s+(?:that|it|them|this))\b"
+        r"|(?:explain\s+(?:that|it|them|this))\b"
+        r"|(?:describe\s+(?:that|it|them|this))\b",
+        re.IGNORECASE,
+    )
+    if _ANAPHORIC_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.AMBIGUOUS,
+            needs_clarification=True,
+            reason="anaphoric_reference",
         )
 
     # --- 1. Out-of-scope (obvious general knowledge) ---

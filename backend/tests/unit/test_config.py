@@ -272,7 +272,7 @@ def test_groq_key_derives_llm_config(
     settings = get_settings()
 
     assert settings.llm_provider == "groq"
-    assert settings.llm_model == "llama-3.3-70b-versatile"
+    assert settings.llm_model == "qwen/qwen3.6-27b"
     assert settings.llm_api_key.get_secret_value() == "my-groq-key-abcdef123456"
     assert settings.llm_base_url == "https://api.groq.com/openai/v1"
 
@@ -323,3 +323,59 @@ def test_gemini_key_not_exposed_in_repr(
     dumped = repr(settings) + str(settings.model_dump())
 
     assert "my-gemini-key-1234567890" not in dumped
+
+
+# ── Fallback chain order ──────────────────────────────────────────────
+
+
+def test_fallback_chain_order_groq_primary(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    """When all three provider keys are set, chain order is Groq → OpenRouter → Gemini."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key-1234567890")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key-1234567890")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key-1234567890")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    chain = settings.fallback_chain_configs
+
+    assert len(chain) == 3
+    assert chain[0]["name"] == "groq"
+    assert chain[1]["name"] == "openrouter"
+    assert chain[2]["name"] == "gemini"
+
+
+def test_fallback_chain_groq_only(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
+    """When only GROQ_API_KEY is set, chain has one entry."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key-1234567890")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    chain = settings.fallback_chain_configs
+
+    assert len(chain) == 1
+    assert chain[0]["name"] == "groq"
+
+
+def test_fallback_chain_groq_openrouter(monkeypatch: pytest.MonkeyPatch, valid_env: None) -> None:
+    """When GROQ_API_KEY and OPENROUTER_API_KEY are set, chain has two entries in order."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key-1234567890")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key-1234567890")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    chain = settings.fallback_chain_configs
+
+    assert len(chain) == 2
+    assert chain[0]["name"] == "groq"
+    assert chain[1]["name"] == "openrouter"

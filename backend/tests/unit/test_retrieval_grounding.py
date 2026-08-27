@@ -50,14 +50,15 @@ async def test_no_evidence_is_never_grounded(threshold: float) -> None:
 
 
 class TestOverviewGrounding:
-    """Overview queries use relative scoring because cross-encoder scores
-    are unbounded logits (can be negative).  These tests verify the
-    relative-scoring grounding logic against real and synthetic score sets.
+    """Overview queries use absolute cross-encoder score thresholds (Phase B-2).
+    Cross-encoder scores are raw logits (can be negative, range ~[-12, +12]).
+    These tests verify the absolute-threshold grounding logic against real and
+    synthetic score sets.
     """
 
     def test_real_kanban_scores_ground(self) -> None:
         """The real Kanban overview scores (all negative logits) should ground
-        because the top chunks are consistently better than the noise floor.
+        because the top chunks clear the absolute minimum threshold.
         """
         # Best first: -2.45, -3.80, -4.24, -5.94, -6.11, -9.60
         scores = [-2.4534, -3.8034, -4.2362, -5.9403, -6.1114, -9.5952]
@@ -67,13 +68,19 @@ class TestOverviewGrounding:
         """Tight positive cluster should ground."""
         assert is_overview_grounded([0.25, 0.22, 0.18, 0.15, 0.10]) is True
 
-    def test_one_outlier_does_not_ground(self) -> None:
-        """One high score among negative noise should NOT ground."""
-        assert is_overview_grounded([0.5, -3.0, -4.0, -5.0, -6.0]) is False
+    def test_one_positive_outlier_with_negative_rest_still_grounds(self) -> None:
+        """One strong positive score among negatives still grounds with absolute
+        thresholds — the top chunk clears the minimum and the top-k mean is
+        acceptable.  This is correct: if one chunk is genuinely relevant
+        (score 0.5), an overview answer can be grounded.
+        """
+        assert is_overview_grounded([0.5, -3.0, -4.0, -5.0, -6.0]) is True
 
-    def test_three_one_outlier_does_not_ground(self) -> None:
-        """Three chunks with one outlier should NOT ground."""
-        assert is_overview_grounded([0.8, -5.0, -6.0]) is False
+    def test_three_one_positive_outlier_grounds(self) -> None:
+        """Three chunks with one positive outlier: top=0.8 clears min, top-2
+        mean = -2.1 clears aggregate min -> grounds.
+        """
+        assert is_overview_grounded([0.8, -5.0, -6.0]) is True
 
     def test_tight_negative_cluster_grounds(self) -> None:
         """Consistently negative but tightly clustered top should ground."""
@@ -95,8 +102,10 @@ class TestOverviewGrounding:
         assert is_overview_grounded([-2.0, -2.1]) is True
 
     def test_two_far_chunks_do_not_ground(self) -> None:
-        """Two chunks with very different scores = inconsistent."""
-        assert is_overview_grounded([-1.0, -10.0]) is False
+        """Two chunks with very different scores: top=-1.0 clears min but
+        mean = -9.5 fails aggregate -> does not ground.
+        """
+        assert is_overview_grounded([-1.0, -18.0]) is False
 
     def test_fact_lookup_still_uses_absolute_threshold(self) -> None:
         """FACT_LOOKUP should still use the absolute threshold, not relative."""

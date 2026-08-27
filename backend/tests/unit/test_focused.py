@@ -638,8 +638,8 @@ class TestGroupEFallbackChain:
         assert hasattr(llm, "stream")
         assert hasattr(llm, "name")
 
-    def test_16_gemini_503_grok_success(self) -> None:
-        """Gemini fails -> Grok succeeds -> response returned.
+    def test_16_gemini_503_groq_success(self) -> None:
+        """Gemini fails -> Groq succeeds -> response returned.
 
         Tests the FallbackChainProvider directly.  The provider tries each
         configured provider sequentially; on retryable failure, it moves to
@@ -662,13 +662,13 @@ class TestGroupEFallbackChain:
             api_key = "fake-gemini-key"
             base_url = "https://fake.gemini.api"
 
-        class _GrokSuccess:
-            name = "grok"
-            model = "grok-3-mini"
-            api_key = "fake-grok-key"
-            base_url = "https://fake.grok.api"
+        class _GroqSuccess:
+            name = "groq"
+            model = "qwen/qwen3.6-27b"
+            api_key = "fake-groq-key"
+            base_url = "https://fake.groq.api"
 
-        provider._providers = [_GeminiFail(), _GrokSuccess()]
+        provider._providers = [_GeminiFail(), _GroqSuccess()]
 
         # Mock the HTTP calls.
         import httpx
@@ -701,7 +701,7 @@ class TestGroupEFallbackChain:
         # Instead, test the protocol: the chain has the right providers.
         assert len(provider._providers) == 2
         assert provider._providers[0].name == "gemini"
-        assert provider._providers[1].name == "grok"
+        assert provider._providers[1].name == "groq"
 
     def test_17_all_providers_fail(
         self, monkeypatch: pytest.MonkeyPatch, client: tuple[TestClient, Principal]

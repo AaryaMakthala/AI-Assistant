@@ -1,8 +1,8 @@
 """Centralized multi-provider LLM fallback chain (CLAUDE.md sections 2, 10).
 
-Implements a sequential failover chain: Gemini (primary) → Grok/xAI (fallback) →
-OpenRouter (final fail-safe). Providers are tried strictly sequentially, never in
-parallel. The fallback triggers on HTTP 429, 500, 502, 503, 504, timeout, or
+Implements a sequential failover chain: primary (Groq) → fallback (OpenRouter) →
+secondary fallback (Gemini). Providers are tried strictly sequentially, never
+in parallel. The fallback triggers on HTTP 429, 500, 502, 503, 504, timeout, or
 connection errors — NOT on invalid requests from our own code (those surface
 clearly without retrying).
 
@@ -10,7 +10,8 @@ Key constraints (CLAUDE.md section 10):
 - No parallel model calls per request — bounded by an overall request timeout.
 - If partial content has already been streamed to the client, no failover occurs.
 - API keys are never logged; only provider name + status code.
-- The chain degrades gracefully: if only Gemini is configured, only Gemini runs.
+- The chain degrades gracefully: if only the primary provider is configured,
+  only that provider runs.
 
 The :class:`FallbackChainProvider` satisfies the same :class:`~app.llm.base.LLMProvider`
 protocol that the pipeline and chat endpoints expect, so callers cannot tell whether
@@ -66,7 +67,7 @@ class FallbackChainProvider:
         if not chain_configs:
             raise LLMError(
                 "No LLM provider API keys configured. "
-                "Set at least one of GEMINI_API_KEY, XAI_API_KEY, or OPENROUTER_API_KEY.",
+                "Set at least one of GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY.",
                 provider="none",
                 retryable=False,
             )
@@ -212,7 +213,7 @@ class FallbackChainProvider:
                             f"Provider returned HTTP {response.status_code}: "
                             f"{body[:error_body_limit]}",
                             provider=provider.name,
-                            retryable=response.status_code >= 500,
+                            retryable=response.status_code == 429 or response.status_code >= 500,
                         )
                     async for line in response.aiter_lines():
                         token = self._parse_line(line, completion)

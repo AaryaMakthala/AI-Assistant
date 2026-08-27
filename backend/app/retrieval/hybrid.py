@@ -19,6 +19,12 @@ No status filter is applied to ``document_chunks`` — deliberately. Section 5's
 invariant makes it unnecessary: only READY documents are ever chunked, so a PENDING
 or REJECTED document structurally has zero rows here. A query-time filter would be
 papering over a broken invariant rather than enforcing it.
+
+Phase B-2: filename-aware retrieval.  When a user asks "do you have any resume"
+or "aarya document", semantic + keyword chunk retrieval may be weak, but the
+filename is strong evidence.  This module provides ``filename_search`` which matches
+query tokens against normalized document filenames within the workspace, then returns
+chunks from matching documents.
 """
 
 from __future__ import annotations
@@ -219,4 +225,159 @@ def rrf_merge(
     ]
 
 
-__all__ = ["HybridCandidate", "Match", "RRF_K", "keyword_search", "rrf_merge", "semantic_search"]
+# ---------------------------------------------------------------------------
+# Filename-aware retrieval (Phase B-2)
+# ---------------------------------------------------------------------------
+
+# Common words that are too generic to serve as filename evidence.
+_FILENAME_STOP_WORDS = frozenset({
+    "document", "doc", "file", "the", "a", "an", "have", "has",
+    "any", "you", "what", "which", "do", "does", "is", "are",
+    "about", "that", "this", "there", "can", "could", "would",
+    "should", "tell", "me", "give", "show", "list", "name",
+})
+
+
+def _normalize_filename_for_match(text: str) -> str:
+    """Normalize a filename (or query token) for matching.
+
+    Reuses the same normalization strategy as doc_targeting.py:
+    strip extension, lowercase, replace punctuation with spaces,
+    collapse whitespace.
+    """
+    import re
+    import unicodedata
+
+    t = text.lower().strip()
+    # Remove file extensions.
+    t = re.sub(r"\.(pdf|docx?|xlsx?|csv|txt|pptx?)$", "", t)
+    # Replace punctuation and special characters with spaces.
+    t = re.sub(r"[_\-/\\.,;:!?\"'()\[\]{}]", " ", t)
+    # Normalize unicode.
+    t = unicodedata.normalize("NFKD", t)
+    # Collapse whitespace.
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _extract_filename_tokens(query: str) -> set[str]:
+    """Extract meaningful tokens from a query for filename matching.
+
+    Strips stop words and generic document-type words that don't help
+    distinguish filenames.
+    """
+    normalized = _normalize_filename_for_match(query)
+    tokens = set(normalized.split()) - _FILENAME_STOP_WORDS
+    return tokens
+
+
+def _filename_matches_query(filename: str, query_tokens: set[str]) -> bool:
+    """Check if a normalized filename contains meaningful query tokens.
+
+    At least one query token (not a stop word) must appear in the
+    normalized filename tokens.
+    """
+    if not query_tokens:
+        return False
+    doc_tokens = set(_normalize_filename_for_match(filename).split())
+    # Remove stop words from the document tokens too.
+    doc_tokens -= _FILENAME_STOP_WORDS
+    if not doc_tokens:
+        return False
+    # At least one query token must overlap with document tokens.
+    return bool(query_tokens & doc_tokens)
+
+
+async def filename_search(
+    session: AsyncSession,
+    *,
+    query: str,
+    workspace_id: uuid.UUID,
+    limit: int,
+) -> list[Match]:
+    """Retrieve chunks from documents whose filenames match the query.
+
+    This is a workspace-scoped, READY-only filename search.  It extracts
+    meaningful tokens from the query (stripping stop words), normalizes
+    document filenames the same way as doc_targeting.py, and returns
+    chunks from matching documents.
+
+    Used as an additional candidate source alongside semantic and keyword
+    search, to handle queries like "do you have any resume" where chunk
+    content may not contain the word "resume" but the filename does.
+    """
+    query_tokens = _extract_filename_tokens(query)
+    if not query_tokens:
+        return []
+
+    # Fetch READY document metadata for this workspace.
+    doc_rows = (
+        await session.execute(
+            select(
+                Document.id,
+                Document.filename,
+            ).where(
+                Document.workspace_id == workspace_id,
+                Document.status == "READY",
+            )
+        )
+    ).all()
+
+    if not doc_rows:
+        return []
+
+    # Find documents whose filenames match the query.
+    matching_doc_ids: list[uuid.UUID] = []
+    for doc_id, filename in doc_rows:
+        if _filename_matches_query(filename, query_tokens):
+            matching_doc_ids.append(doc_id)
+
+    if not matching_doc_ids:
+        return []
+
+    # Retrieve chunks from matching documents (workspace-scoped).
+    stmt = (
+        select(
+            DocumentChunk.id,
+            DocumentChunk.document_id,
+            DocumentChunk.content,
+            DocumentChunk.page_number,
+            DocumentChunk.section_title,
+            DocumentChunk.chunk_index,
+            Document.filename,
+        )
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(
+            DocumentChunk.workspace_id == workspace_id,
+            DocumentChunk.document_id.in_(matching_doc_ids),
+        )
+        .order_by(DocumentChunk.chunk_index)
+        .limit(limit)
+    )
+
+    rows = (await session.execute(stmt)).all()
+
+    return [
+        Match(
+            chunk_id=row.id,
+            document_id=row.document_id,
+            filename=row.filename,
+            content=row.content,
+            page_number=row.page_number,
+            section_title=row.section_title,
+            chunk_index=row.chunk_index,
+            rank=index,
+        )
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
+__all__ = [
+    "HybridCandidate",
+    "Match",
+    "RRF_K",
+    "filename_search",
+    "keyword_search",
+    "rrf_merge",
+    "semantic_search",
+]

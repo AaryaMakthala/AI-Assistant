@@ -3,7 +3,7 @@
 Two-layer grounding keeps the LLM from answering without evidence:
 
 * **Layer 1 (this module) — retrieval-level.** If the top reranked chunk scores below
-  ``RETRIEVAL_RELEVANCE_THRESHOLD``, the caller must skip the LLM call entirely and
+  the configured absolute threshold, the caller must skip the LLM call entirely and
   refuse honestly ("I couldn't find that information..."). This is what prevents the
   LLM from ever seeing a question with no real supporting evidence.
 * Layer 2 — generation-level — is the strict system prompt in the chat phase, a
@@ -15,10 +15,10 @@ that evidence is strong enough to generate from. An out-of-scope question ("who 
 World Cup") is not a special case — it is simply a question whose top rerank score lands
 below the threshold, handled exactly like any other ungrounded question.
 
-Phase B: Overview queries (e.g. "What is Kanban?") have diffuse relevance across many
-chunks rather than sharp relevance to one.  ``is_overview_grounded`` considers multiple
-relevant chunks, aggregate relevance, and same-document consistency instead of requiring
-a single chunk to clear the threshold.
+Phase B-2: Overview queries use absolute thresholds calibrated to the cross-encoder
+score scale (raw logits, range ~[-12, +12]).  High-confidence document targeting
+relaxes the grounding floor when supported by at least one retrieved chunk from the
+targeted document.
 """
 
 from __future__ import annotations
@@ -28,32 +28,73 @@ import statistics
 from app.config import get_settings
 
 
-def is_grounded(top_score: float | None) -> bool:
+def is_grounded(
+    top_score: float | None,
+    *,
+    doc_target_high_confidence: bool = False,
+    has_target_chunk: bool = False,
+    has_filename_match_chunk: bool = False,
+) -> bool:
     """Whether the best rerank score clears the Layer-1 grounding threshold.
 
     ``None`` means nothing was retrieved at all — the absence of evidence, which is
     the same refusal as evidence that scores too low.
+
+    Parameters
+    ----------
+    top_score:
+        Best rerank score across the candidates.
+    doc_target_high_confidence:
+        Whether the query resolved a high-confidence document target.
+    has_target_chunk:
+        Whether at least one retrieved chunk belongs to the targeted document.
+        Required alongside ``doc_target_high_confidence`` for relaxation.
+    has_filename_match_chunk:
+        Whether at least one retrieved chunk belongs to a filename-matched document.
+        When True, uses a very permissive floor — the filename IS the evidence.
     """
     if top_score is None:
         return False
-    threshold = get_settings().retrieval_relevance_threshold
-    return top_score >= threshold
+
+    settings = get_settings()
+
+    # Filename match with chunks from the matched document: use the permissive
+    # floor.  The filename IS the evidence; the reranker score is secondary.
+    if has_filename_match_chunk:
+        return top_score >= settings.filename_match_relaxed_score
+
+    # High-confidence document targeting with at least one chunk from the target
+    # document: use the relaxed absolute threshold.
+    if doc_target_high_confidence and has_target_chunk:
+        return top_score >= settings.doc_target_relaxed_score
+
+    # Normal fact-lookup: use the global relevance threshold.
+    # This threshold is on the [0, 1] scale — valid for positive-logit cases.
+    return top_score >= settings.retrieval_relevance_threshold
 
 
-def is_overview_grounded(scores: list[float], *, top_k: int = 3) -> bool:
-    """Evidence-aware grounding for OVERVIEW queries using RELATIVE scoring.
+def is_overview_grounded(
+    scores: list[float],
+    *,
+    top_k: int = 3,
+    doc_target_high_confidence: bool = False,
+    has_target_chunk: bool = False,
+    has_filename_match_chunk: bool = False,
+) -> bool:
+    """Grounding for OVERVIEW queries using absolute cross-encoder score thresholds.
 
     Overview queries ("What is Kanban?", "Tell me about X") have diffuse relevance
     across many chunks rather than sharp relevance to one.  Cross-encoder scores
-    are unbounded logits (can be negative), so absolute thresholds don't work for
-    overview queries.  Instead, this uses relative scoring:
+    are raw logits (can be negative, range ~[-12, +12]), so we use absolute
+    thresholds calibrated to the actual score scale, not percentage-based heuristics.
 
-    1. At least 2 of the top-k chunks must score above the median of ALL
-       retrieved candidates (i.e. the top chunks are meaningfully better than
-       the noise floor).
-    2. The gap between the best and the k-th best chunk must be small enough
-       to indicate consistent relevance (not one lucky match plus garbage).
-    3. There must be at least 2 chunks above the median (evidence coverage).
+    The grounding check:
+    1. The top chunk's absolute score must exceed ``overview_min_score``.
+    2. The mean of the top-k chunks must exceed ``overview_aggregate_min``.
+    3. At least 2 chunks must be present (overview needs diffuse evidence).
+
+    When a high-confidence document target is present with at least one chunk from
+    the targeted document, the thresholds are relaxed via ``doc_target_relaxed_score``.
 
     Parameters
     ----------
@@ -61,6 +102,10 @@ def is_overview_grounded(scores: list[float], *, top_k: int = 3) -> bool:
         Rerank scores for the retrieved chunks, best first.
     top_k:
         Number of top chunks to consider for aggregate relevance.
+    doc_target_high_confidence:
+        Whether the query resolved a high-confidence document target.
+    has_target_chunk:
+        Whether at least one retrieved chunk belongs to the targeted document.
 
     Returns
     -------
@@ -69,44 +114,34 @@ def is_overview_grounded(scores: list[float], *, top_k: int = 3) -> bool:
     if len(scores) < 2:
         return False
 
-    top_scores = scores[:min(top_k, len(scores))]
+    settings = get_settings()
 
-    # The median of ALL retrieved scores is the noise floor — chunks above
-    # it are meaningfully better than random retrieval results.
-    all_median = statistics.median(scores)
+    # Determine which thresholds to use.
+    if has_filename_match_chunk:
+        min_score = settings.filename_match_relaxed_score
+        aggregate_min = settings.filename_match_relaxed_score
+    elif doc_target_high_confidence and has_target_chunk:
+        min_score = settings.doc_target_relaxed_score
+        aggregate_min = settings.doc_target_relaxed_score
+    else:
+        min_score = settings.overview_min_score
+        aggregate_min = settings.overview_aggregate_min
 
-    # Condition 1: at least 2 of the top-k chunks are at or above the median.
-    # Use >= (not >) so identical scores still count.
-    above_median = [s for s in top_scores if s >= all_median]
-    if len(above_median) < 2:
-        # Special case: only 2 chunks total, both must be close together.
-        if len(scores) == 2:
-            gap = abs(scores[0] - scores[1])
-            return gap < 2.0  # Close scores = consistent relevance.
+    top_scores = scores[: min(top_k, len(scores))]
+
+    # Condition 1: the top chunk must clear the absolute minimum.
+    if top_scores[0] < min_score:
         return False
 
-    # Condition 2: the top chunk is not a statistical outlier.
-    # If the best score is more than 2 standard deviations above the mean,
-    # it's one lucky match, not diffuse relevance.
-    best = top_scores[0]
-    if len(scores) >= 3:
-        mean_all = statistics.mean(scores)
-        std_all = statistics.stdev(scores)
-        if std_all > 0 and best > mean_all + std_all * 2:
-            return False
-    # Also check: the gap between best and k-th best should be bounded
-    # relative to the overall score spread.
-    kth = top_scores[-1]
-    gap = best - kth
-    if len(scores) >= 3:
-        overall_range = scores[0] - scores[-1]
-        if overall_range > 0 and gap > overall_range * 0.6:
-            return False
-
-    # Condition 3: the mean of the top-k is at or above the median.
-    # This ensures the top chunks collectively represent real signal.
+    # Condition 2: the mean of the top-k chunks must clear the aggregate minimum.
     top_mean = statistics.mean(top_scores)
-    if top_mean < all_median:
+    if top_mean < aggregate_min:
+        return False
+
+    # Condition 3: there must be at least 2 chunks for diffuse evidence.
+    # (Already guaranteed by the len(scores) < 2 check above, but
+    # explicitly checking top_scores for clarity.)
+    if len(top_scores) < 2:
         return False
 
     return True

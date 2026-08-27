@@ -39,9 +39,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.rag.embeddings import embed_query
+from app.retrieval.doc_targeting import DocumentTargetingResult
 from app.retrieval.grounding import is_grounded, is_overview_grounded
 from app.retrieval.hybrid import (
     HybridCandidate,
+    RRF_K,
+    filename_search,
     keyword_search,
     rrf_merge,
     semantic_search,
@@ -117,6 +120,7 @@ async def retrieve(
     query: str,
     workspace_id: uuid.UUID,
     query_shape: QueryShape | None = None,
+    doc_target_result: DocumentTargetingResult | None = None,
 ) -> RetrievalResult:
     """Retrieve the best evidence for `query` inside one workspace.
 
@@ -130,6 +134,9 @@ async def retrieve(
 
     Phase B: ``query_shape`` controls retrieval breadth and grounding strategy.
     OVERVIEW queries use broader candidate pools and aggregate grounding.
+
+    Phase B-2: ``doc_target_result`` enables filename-aware candidate generation
+    and high-confidence document-target grounding relaxation.
     """
     text = query.strip()
     if not text:
@@ -181,15 +188,19 @@ async def retrieve(
         layer=relevance.layer,
     )
 
-    # --- Document targeting (Part 4) ---
-    # Check if the user explicitly named a document in their question.
-    from app.retrieval.doc_targeting import resolve_document_target
+    # --- Document targeting (Phase B-2) ---
+    # Use the doc_target_result passed by the caller (resolved in chat_v2.py
+    # or by the pipeline itself if not provided).
+    if doc_target_result is not None:
+        doc_target = doc_target_result
+    else:
+        from app.retrieval.doc_targeting import resolve_document_target
 
-    doc_target = await resolve_document_target(
-        session=session,
-        question=text,
-        workspace_id=workspace_id,
-    )
+        doc_target = await resolve_document_target(
+            session=session,
+            question=text,
+            workspace_id=workspace_id,
+        )
     target_doc_id = doc_target.matched_document_id
     if target_doc_id is not None:
         logger.info(
@@ -199,6 +210,31 @@ async def retrieve(
             doc_id=target_doc_id,
             filename=doc_target.matched_filename,
             confidence=doc_target.confidence,
+        )
+
+    # --- Filename-aware retrieval (Phase B-2) ---
+    # Additional candidate source: match query tokens against normalized
+    # filenames of READY documents in this workspace.
+    filename_matched_docs: list[tuple[uuid.UUID, str]] = []
+    filename_candidates = await filename_search(
+        session,
+        query=text,
+        workspace_id=workspace_id,
+        limit=candidate_count,
+    )
+    if filename_candidates:
+        # Track which documents were matched by filename.
+        seen_docs: set[uuid.UUID] = set()
+        for fc in filename_candidates:
+            if fc.document_id not in seen_docs:
+                filename_matched_docs.append((fc.document_id, fc.filename))
+                seen_docs.add(fc.document_id)
+        logger.info(
+            "Filename search matched {n} document(s) for query='{query}': "
+            "docs={docs}",
+            n=len(filename_matched_docs),
+            query=text[:80],
+            docs=[(fid, fn) for fid, fn in filename_matched_docs],
         )
 
     # --- Hybrid retrieval ---
@@ -221,9 +257,29 @@ async def retrieve(
         document_id=target_doc_id,
     )
 
-    # Fuse the two ranked lists; the merged pool is capped at the pre-rerank count
+    # Fuse all candidate sources: semantic + keyword + filename.
+    # The merged pool is capped at the pre-rerank count
     # (section 8.2: never rerank hundreds of chunks — slow and unnecessary).
     candidates = rrf_merge(semantic, keyword, top_n=candidate_count)
+
+    # Inject filename-matched chunks if not already present.
+    existing_chunk_ids = {c.chunk_id for c in candidates}
+    for fc in filename_candidates:
+        if fc.chunk_id not in existing_chunk_ids and len(candidates) < candidate_count:
+            # Give filename-matched chunks an RRF-like score to keep them
+            # competitive in the candidate pool.
+            candidates.append(HybridCandidate(
+                chunk_id=fc.chunk_id,
+                document_id=fc.document_id,
+                filename=fc.filename,
+                content=fc.content,
+                page_number=fc.page_number,
+                section_title=fc.section_title,
+                chunk_index=fc.chunk_index,
+                rrf_score=1.0 / (RRF_K + 1),  # Rank-1 equivalent RRF score
+            ))
+            existing_chunk_ids.add(fc.chunk_id)
+
     fused_count = len(candidates)
     if not candidates:
         logger.info(
@@ -249,26 +305,73 @@ async def retrieve(
     top_score = scored[0][1]
     second_score = scored[1][1] if len(scored) > 1 else None
 
-    # Phase B: Use query-shape-aware grounding.
+    # --- Phase B-2: Compute doc-target grounding parameters ---
+    is_high_confidence_target = (
+        doc_target is not None
+        and doc_target.matched_document_id is not None
+        and doc_target.confidence >= settings.doc_target_high_confidence
+    )
+    has_target_chunk = False
+    if is_high_confidence_target and target_doc_id is not None:
+        has_target_chunk = any(
+            c.document_id == target_doc_id for c in final
+        )
+
+    # Check if filename-matched documents have chunks in the final set.
+    # When True, grounding uses the permissive filename_match_relaxed_score.
+    has_filename_match_chunk = False
+    if filename_matched_docs:
+        filename_doc_ids = {doc_id for doc_id, _ in filename_matched_docs}
+        has_filename_match_chunk = any(
+            c.document_id in filename_doc_ids for c in final
+        )
+        if has_filename_match_chunk and not is_high_confidence_target:
+            logger.info(
+                "Filename match grounding relaxation: matched_docs={docs} "
+                "chunks_in_final=True",
+                docs=[fn for _, fn in filename_matched_docs],
+            )
+
+    # Filename match info for logging.
+    filename_match = bool(filename_matched_docs)
+    matched_filename = (
+        filename_matched_docs[0][1] if filename_matched_docs else None
+    )
+
+    # --- Grounding check ---
+    # Use query-shape-aware grounding with doc-target relaxation.
     all_scores = [score for _, score in scored[:final_count]]
     if is_overview and len(all_scores) >= 2:
-        # Overview: aggregate/coverage-based grounding.
-        grounded = is_overview_grounded(all_scores)
+        # Overview: absolute-threshold aggregate grounding.
+        grounded = is_overview_grounded(
+            all_scores,
+            doc_target_high_confidence=is_high_confidence_target,
+            has_target_chunk=has_target_chunk,
+            has_filename_match_chunk=has_filename_match_chunk,
+        )
         # Diagnostic logging for overview queries.
         all_median = statistics.median(all_scores)
         logger.info(
             "Overview grounding: query='{query}' scores={scores} "
             "median={median:.4f} top_mean={top_mean:.4f} "
+            "doc_target_high_conf={dt_hc} has_target_chunk={htc} "
             "grounded={grounded}",
             query=text[:80],
             scores=[round(s, 4) for s in all_scores],
             median=all_median,
             top_mean=statistics.mean(all_scores),
+            dt_hc=is_high_confidence_target,
+            htc=has_target_chunk,
             grounded=grounded,
         )
     else:
         # Default: single-chunk grounding (fact_lookup, targeted, etc.).
-        grounded = is_grounded(top_score)
+        grounded = is_grounded(
+            top_score,
+            doc_target_high_confidence=is_high_confidence_target,
+            has_target_chunk=has_target_chunk,
+            has_filename_match_chunk=has_filename_match_chunk,
+        )
 
     # Collect document metadata for logging.
     selected_doc_ids = list({str(c.document_id) for c in final})
@@ -278,7 +381,9 @@ async def retrieve(
         "Retrieved {final}/{fused} chunks for workspace {ws} "
         "(grounded={grounded}, top_score={top_score:.4f}, "
         "second_score={second_score}, "
-        "selected_docs={docs}, relevance={reason})",
+        "selected_docs={docs}, relevance={reason}, "
+        "filename_match={fm}, matched_filename={mf}, "
+        "doc_target_confidence={dtc})",
         final=len(final),
         fused=fused_count,
         ws=workspace_id,
@@ -287,6 +392,9 @@ async def retrieve(
         second_score=f"{second_score:.4f}" if second_score is not None else "None",
         docs=selected_doc_titles,
         reason=relevance.reason,
+        fm=filename_match,
+        mf=matched_filename,
+        dtc=doc_target.confidence if doc_target else 0.0,
     )
     return RetrievalResult(
         chunks=final,

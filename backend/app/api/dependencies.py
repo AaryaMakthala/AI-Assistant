@@ -23,8 +23,8 @@ def get_generic_llm() -> LLMProvider:
 
     When multiple provider API keys are configured, returns a
     :class:`~app.llm.fallback.FallbackChainProvider` that implements sequential
-    failover (Gemini → Grok → OpenRouter).  When only one key is present,
-    returns a plain :class:`~app.llm.generic.GenericProvider`.
+    failover (primary → fallback → secondary fallback).  When only one key is
+    present, returns a plain :class:`~app.llm.generic.GenericProvider`.
     """
     from app.config import get_settings
 
@@ -33,7 +33,7 @@ def get_generic_llm() -> LLMProvider:
         1
         for key in (
             settings.gemini_api_key,
-            settings.xai_api_key,
+            settings.groq_api_key,
             settings.openrouter_api_key,
         )
         if key is not None

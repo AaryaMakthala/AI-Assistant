@@ -375,7 +375,7 @@ def test_llm_provider_failure_returns_503_without_exposing_details(
     stub.fail_with(LLMError(f"provider exploded: {secret}", provider="test-provider"))
     test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
-    response = test_client.post("/chat/grounded", json={"message": "hi"})
+    response = test_client.post("/chat/grounded", json={"message": "What is Kanban?"})
     assert response.status_code == 503
     assert "unavailable" in response.json()["detail"]
     assert secret not in response.text
@@ -392,7 +392,7 @@ def test_retrieval_failure_surfaces_as_an_opaque_500(
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-    response = test_client.post("/chat/grounded", json={"message": "hi"})
+    response = test_client.post("/chat/grounded", json={"message": "What is Kanban?"})
     assert response.status_code == 500
     assert "postgres://" not in response.text
     assert "database blew up" not in response.text

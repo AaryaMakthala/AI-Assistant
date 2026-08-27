@@ -838,15 +838,15 @@ class TestRegression:
     def test_all_intent_patterns_still_work(self):
         """Verify all intent patterns produce valid Intent objects."""
         cases = [
-            ("How many documents are there?", IntentCategory.METADATA, MetadataSubIntent.DOC_COUNT),
-            ("List all documents.", IntentCategory.METADATA, MetadataSubIntent.DOC_LIST),
-            ("How many pages in documents?", IntentCategory.METADATA, MetadataSubIntent.DOC_PAGE_COUNT),
-            ("How many active members?", IntentCategory.METADATA, MetadataSubIntent.MEMBER_COUNT),
-            ("List active members.", IntentCategory.METADATA, MetadataSubIntent.MEMBER_LIST),
-            ("What is my role?", IntentCategory.METADATA, MetadataSubIntent.ROLE),
+            ("How many documents are there?", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.DOC_COUNT),
+            ("List all documents.", IntentCategory.DOCUMENT_LIST, MetadataSubIntent.DOC_LIST),
+            ("How many pages in documents?", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.DOC_PAGE_COUNT),
+            ("How many active members?", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.MEMBER_COUNT),
+            ("List active members.", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.MEMBER_LIST),
+            ("What is my role?", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.ROLE),
             ("What was my previous question?", IntentCategory.CONVERSATION_HISTORY, None),
             ("What is my name?", IntentCategory.IDENTITY, None),
-            ("Who can upload documents?", IntentCategory.APP_HELP, None),
+            ("Who can upload documents?", IntentCategory.WORKSPACE_PERMISSION, None),
             ("How do I invite a member?", IntentCategory.APP_HELP, None),
             ("What is 2+2?", IntentCategory.OUT_OF_SCOPE, None),
             ("Capital of Japan", IntentCategory.OUT_OF_SCOPE, None),

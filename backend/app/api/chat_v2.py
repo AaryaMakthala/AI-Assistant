@@ -546,6 +546,40 @@ async def _answer_conversation_history(
 
 
 # ---------------------------------------------------------------------------
+# Greeting handler
+# ---------------------------------------------------------------------------
+
+
+def _answer_greeting(*, question: str) -> str:
+    """Return a simple conversational greeting response.
+
+    No database query, no retrieval, no LLM call.
+    """
+    q = question.strip().lower()
+
+    # Farewells
+    if re.match(r"^(?:bye|goodbye|see\s+you|take\s+care|good\s+night)\s*[!.?]*$", q):
+        return "Goodbye! Feel free to come back anytime if you have questions about your documents."
+
+    # Thanks
+    if re.match(r"^(?:thank(?:s|\s+you)|thanks\s+a\s+lot|cheers)\s*[!.?]*$", q):
+        return "You're welcome! Let me know if you need anything else."
+
+    # Help command
+    if re.match(r"^(?:help|/help|/start)\s*$", q):
+        return (
+            "I'm your company knowledge assistant. I can help you:\n"
+            "- Answer questions about your workspace documents\n"
+            "- List and find documents\n"
+            "- Compare information across documents\n"
+            "Just ask a question about your documents to get started!"
+        )
+
+    # Default greeting
+    return "Hello! I'm your company knowledge assistant. How can I help you today?"
+
+
+# ---------------------------------------------------------------------------
 # Identity handler (Phase A, step 6)
 # ---------------------------------------------------------------------------
 
@@ -624,12 +658,78 @@ _APP_HELP_RESPONSES: dict[str, str] = {
         " search) with reranking to find the most relevant passages,"
         " then generates an answer grounded in those sources."
     ),
+    "what_is_this": (
+        "I'm a company knowledge assistant. I help you find information"
+        " from your workspace's approved documents. You can ask me questions"
+        " about uploaded documents, and I'll answer with citations from"
+        " the relevant sources."
+    ),
+    "what_can_i_ask": (
+        "You can ask me about any information in your workspace's approved"
+        " documents. For example:\n"
+        "- Questions about policies, procedures, or guidelines\n"
+        "- Summaries of specific documents\n"
+        "- Comparisons between documents\n"
+        "I'll search the documents and provide answers with citations."
+    ),
+    "how_do_i_use": (
+        "To get started:\n"
+        "1. Upload documents through the Documents page\n"
+        "2. Ask questions in this chat about your documents\n"
+        "3. I'll search and answer with citations from the sources"
+    ),
     "monitored": (
         "I don't have authoritative information about monitoring or"
         " tracking policies. Please check your company's privacy policy"
         " or IT department for details."
     ),
 }
+
+
+def _answer_workspace_permission(
+    *,
+    question: str,
+    principal_role: str | None = None,
+) -> tuple[str, ResponseReason | None]:
+    """Answer a workspace permission question from the authorization model."""
+    q = question.lower()
+
+    # Permission-specific answers derived from the actual authorization model.
+    if re.search(r"who\s+can\s+(?:upload|add|submit)", q):
+        return _APP_HELP_RESPONSES["who_can_upload"], None
+    if re.search(r"can\s+(?:i|we|members?)\s+upload", q):
+        return (
+            "Yes, any workspace member can upload documents."
+            " Owner uploads are immediately searchable."
+            " Member uploads need owner approval before becoming searchable.",
+            None,
+        )
+    if re.search(r"(?:who\s+has\s+(?:access|permission))", q):
+        role_info = f"Your role is {principal_role}." if principal_role else ""
+        return (
+            f"{role_info} All active workspace members can read documents"
+            " and chat. Only the workspace owner can approve documents"
+            " and manage members.",
+            None,
+        )
+    if re.search(r"(?:what\s+(?:are|is)\s+(?:my|the|our)\s+(?:permission|role|access))", q):
+        if principal_role:
+            return (
+                f"Your role in this workspace is {principal_role}."
+                " Members can upload documents (pending owner approval) and"
+                " ask questions. Owners can also approve/reject documents"
+                " and manage members.",
+                None,
+            )
+        return (
+            "I don't have your role information available.",
+            ResponseReason.IDENTITY_UNAVAILABLE,
+        )
+
+    return (
+        refusal_message(ResponseReason.APP_HELP_UNAVAILABLE),
+        ResponseReason.APP_HELP_UNAVAILABLE,
+    )
 
 
 def _answer_app_help(
@@ -655,6 +755,16 @@ def _answer_app_help(
         return _APP_HELP_RESPONSES["what_can_i_do"], None
     if re.search(r"how\s+(?:does|do)\s+(?:this|it)\s+work", q):
         return _APP_HELP_RESPONSES["how_does_it_work"], None
+    if re.search(r"(?:what\s+(?:does|do)\s+(?:this|the)\s+(?:chatbot|assistant|app|bot)\s+(?:do|does|offer|provide))", q):
+        return _APP_HELP_RESPONSES["what_is_this"], None
+    if re.search(r"(?:tell\s+me\s+about\s+(?:this\s+)?(?:chatbot|assistant|app|system|bot))", q):
+        return _APP_HELP_RESPONSES["what_is_this"], None
+    if re.search(r"(?:what\s+(?:is|are)\s+this\s+(?:chatbot|assistant|app|system|bot))", q):
+        return _APP_HELP_RESPONSES["what_is_this"], None
+    if re.search(r"(?:what\s+(?:can|kind|type)\s+(?:i|we)\s+(?:ask|use))", q):
+        return _APP_HELP_RESPONSES["what_can_i_ask"], None
+    if re.search(r"(?:how\s+(?:do|can)\s+i\s+(?:use|start|get\s+started))", q):
+        return _APP_HELP_RESPONSES["how_do_i_use"], None
     if re.search(r"(?:am\s+i\s+being|do\s+you\s+(?:track|monitor))", q):
         return _APP_HELP_RESPONSES["monitored"], ResponseReason.APP_HELP_UNAVAILABLE
     if re.search(r"(?:who\s+has\s+(?:access|permission))", q):
@@ -811,11 +921,19 @@ async def _stream_chat(
     # 1d. Route by intent category.
     answer: str | None = None
 
-    if intent.category == IntentCategory.OUT_OF_SCOPE:
+    if intent.category == IntentCategory.GREETING:
+        answer = _answer_greeting(question=effective_query)
+        logger.info(
+            "intent=greeting workspace={ws} retrieval_called=False",
+            ws=workspace_id,
+        )
+
+    elif intent.category == IntentCategory.OUT_OF_SCOPE:
         answer = refusal_message(ResponseReason.OUT_OF_SCOPE)
         refusal_reason = ResponseReason.OUT_OF_SCOPE
         logger.info(
-            "intent=out_of_scope workspace={ws}", ws=workspace_id,
+            "intent=out_of_scope workspace={ws} retrieval_called=False",
+            ws=workspace_id,
         )
 
     elif intent.category == IntentCategory.IDENTITY:
@@ -824,7 +942,17 @@ async def _stream_chat(
             user_id=principal.user_id,
         )
         logger.info(
-            "intent=identity workspace={ws} refusal={refusal}",
+            "intent=identity workspace={ws} retrieval_called=False refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+
+    elif intent.category == IntentCategory.WORKSPACE_PERMISSION:
+        answer, refusal_reason = _answer_workspace_permission(
+            question=effective_query,
+            principal_role=member_role,
+        )
+        logger.info(
+            "intent=workspace_permission workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
 
@@ -835,7 +963,7 @@ async def _stream_chat(
             principal_role=member_role,
         )
         logger.info(
-            "intent=app_help workspace={ws} refusal={refusal}",
+            "intent=app_help workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
 
@@ -847,12 +975,12 @@ async def _stream_chat(
             session_id=payload.session_id,
         )
         logger.info(
-            "intent=conversation_history sub={sub} workspace={ws}",
+            "intent=conversation_history sub={sub} workspace={ws} retrieval_called=False",
             sub=intent.conversation_history_sub.value if intent.conversation_history_sub else None,
             ws=workspace_id,
         )
 
-    elif intent.category == IntentCategory.METADATA:
+    elif intent.category in (IntentCategory.WORKSPACE_METADATA, IntentCategory.DOCUMENT_LIST):
         answer, refusal_reason = await _answer_metadata_question(
             intent=intent,
             question=effective_query,
@@ -860,7 +988,8 @@ async def _stream_chat(
             user_id=principal.user_id,
         )
         logger.info(
-            "intent=metadata sub={sub} workspace={ws} refusal={refusal}",
+            "intent={intent_type} sub={sub} workspace={ws} retrieval_called=False refusal={refusal}",
+            intent_type=intent.category.value,
             sub=intent.metadata_sub.value if intent.metadata_sub else None,
             ws=workspace_id,
             refusal=refusal_reason.value if refusal_reason else None,
@@ -996,7 +1125,8 @@ async def _stream_chat(
     )
     logger.info(
         "intent=document_content query_shape={shape} workspace={ws} "
-        "filename_match={fm} matched_filename={mf} doc_target_confidence={dtc}",
+        "retrieval_called=True filename_match={fm} matched_filename={mf} "
+        "doc_target_confidence={dtc}",
         shape=query_shape.value, ws=workspace_id,
         fm=doc_target_result is not None and doc_target_result.matched_filename is not None,
         mf=doc_target_result.matched_filename if doc_target_result else None,
@@ -1016,7 +1146,7 @@ async def _stream_chat(
         refusal = refusal_message(refusal_reason)
         logger.info(
             "intent=document_content refusal={reason} top_score={score} "
-            "candidates={n} workspace={ws}",
+            "candidates={n} retrieval_called=True workspace={ws}",
             ws=workspace_id,
             score=result.top_score,
             n=len(result.chunks),
@@ -1227,13 +1357,20 @@ async def grounded_chat(
         )
 
     # Route by intent category.
+    if intent.category == IntentCategory.GREETING:
+        answer = _answer_greeting(question=effective_query)
+        logger.info(
+            "intent=greeting workspace={ws} retrieval_called=False", ws=workspace_id,
+        )
+        return GroundedChatResponse(
+            answer=answer, grounded=True, insufficient_evidence=False, sources=[],
+        )
+
     if intent.category == IntentCategory.OUT_OF_SCOPE:
-        logger.info("intent=out_of_scope workspace={ws}", ws=workspace_id)
+        logger.info("intent=out_of_scope workspace={ws} retrieval_called=False", ws=workspace_id)
         return GroundedChatResponse(
             answer=refusal_message(ResponseReason.OUT_OF_SCOPE),
-            grounded=True,
-            insufficient_evidence=False,
-            sources=[],
+            grounded=True, insufficient_evidence=False, sources=[],
         )
 
     if intent.category == IntentCategory.IDENTITY:
@@ -1241,14 +1378,25 @@ async def grounded_chat(
             workspace_id=workspace_id, user_id=principal.user_id,
         )
         logger.info(
-            "intent=identity workspace={ws} refusal={refusal}",
+            "intent=identity workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
         return GroundedChatResponse(
-            answer=answer,
-            grounded=True,
-            insufficient_evidence=refusal_reason is not None,
-            sources=[],
+            answer=answer, grounded=True,
+            insufficient_evidence=refusal_reason is not None, sources=[],
+        )
+
+    if intent.category == IntentCategory.WORKSPACE_PERMISSION:
+        answer, refusal_reason = _answer_workspace_permission(
+            question=effective_query, principal_role=member_role,
+        )
+        logger.info(
+            "intent=workspace_permission workspace={ws} retrieval_called=False refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+        return GroundedChatResponse(
+            answer=answer, grounded=True,
+            insufficient_evidence=refusal_reason is not None, sources=[],
         )
 
     if intent.category == IntentCategory.APP_HELP:
@@ -1256,14 +1404,12 @@ async def grounded_chat(
             question=effective_query, intent=intent, principal_role=member_role,
         )
         logger.info(
-            "intent=app_help workspace={ws} refusal={refusal}",
+            "intent=app_help workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
         return GroundedChatResponse(
-            answer=answer,
-            grounded=True,
-            insufficient_evidence=refusal_reason is not None,
-            sources=[],
+            answer=answer, grounded=True,
+            insufficient_evidence=refusal_reason is not None, sources=[],
         )
 
     if intent.category == IntentCategory.CONVERSATION_HISTORY:
@@ -1271,30 +1417,26 @@ async def grounded_chat(
             intent=intent, workspace_id=workspace_id, user_id=principal.user_id,
         )
         logger.info(
-            "intent=conversation_history workspace={ws}", ws=workspace_id,
+            "intent=conversation_history workspace={ws} retrieval_called=False", ws=workspace_id,
         )
         return GroundedChatResponse(
-            answer=answer,
-            grounded=True,
-            insufficient_evidence=False,
-            sources=[],
+            answer=answer, grounded=True, insufficient_evidence=False, sources=[],
         )
 
-    if intent.category == IntentCategory.METADATA:
+    if intent.category in (IntentCategory.WORKSPACE_METADATA, IntentCategory.DOCUMENT_LIST):
         answer, refusal_reason = await _answer_metadata_question(
             intent=intent, question=effective_query,
             workspace_id=workspace_id, user_id=principal.user_id,
         )
         logger.info(
-            "intent=metadata sub={sub} workspace={ws} refusal={refusal}",
+            "intent={intent_type} sub={sub} workspace={ws} retrieval_called=False refusal={refusal}",
+            intent_type=intent.category.value,
             sub=intent.metadata_sub.value if intent.metadata_sub else None,
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
         return GroundedChatResponse(
-            answer=answer,
-            grounded=True,
-            insufficient_evidence=refusal_reason is not None,
-            sources=[],
+            answer=answer, grounded=True,
+            insufficient_evidence=refusal_reason is not None, sources=[],
         )
 
     # --- Document content path (RAG) ---
@@ -1315,7 +1457,8 @@ async def grounded_chat(
     )
     logger.info(
         "intent=document_content query_shape={shape} workspace={ws} "
-        "filename_match={fm} matched_filename={mf} doc_target_confidence={dtc}",
+        "retrieval_called=True filename_match={fm} matched_filename={mf} "
+        "doc_target_confidence={dtc}",
         shape=query_shape.value, ws=workspace_id,
         fm=doc_target_result.matched_filename is not None,
         mf=doc_target_result.matched_filename,
@@ -1335,7 +1478,7 @@ async def grounded_chat(
         refusal = refusal_message(refusal_reason)
         logger.info(
             "intent=document_content refusal={reason} top_score={score} "
-            "candidates={n} workspace={ws}",
+            "candidates={n} retrieval_called=True workspace={ws}",
             ws=workspace_id,
             score=result.top_score,
             n=len(result.chunks),

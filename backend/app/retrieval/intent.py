@@ -1,13 +1,26 @@
 """Deterministic intent classification for chat questions.
 
-Phase A: replaces the ad-hoc ``_is_metadata_question`` check with a proper
-multi-intent router.  Deterministic regex/heuristics handle obvious cases;
-an LLM fallback is available for genuinely ambiguous queries (but NOT used
-during routing — only when the caller needs disambiguation).
+Expanded routing layer: determines which lane a query enters.
+
+  GREETING             → conversational greeting, no retrieval
+  APP_HELP             → questions about the application itself
+  IDENTITY             → who-am-I questions from session data
+  WORKSPACE_METADATA   → workspace/member/document count queries
+  WORKSPACE_PERMISSION → who-can-do-what questions
+  DOCUMENT_LIST        → list/show documents (metadata, not content)
+  DOCUMENT_CONTENT     → questions answered from document content (Phase B-2 RAG)
+  DOCUMENT_COMPARISON  → compare two or more documents
+  CONVERSATION_HISTORY → questions about prior conversation
+  OUT_OF_SCOPE         → general knowledge, no retrieval
+  GENERAL_CONVERSATION → general chat not matching any specific lane
+  AMBIGUOUS            → genuinely unclear, needs clarification
+
+Deterministic regex/heuristics handle obvious cases; an LLM fallback is
+available for genuinely ambiguous queries (but NOT used during routing —
+only when the caller needs disambiguation).
 
 The classifier returns an :class:`Intent` that tells the chat handler which
-lane to route the question into.  Every lane (including identity,
-conversation_history, app_help, and out_of_scope) runs through
+lane to route the question into.  Every lane runs through
 ``assert_workspace_role`` first — authorization is non-negotiable.
 """
 
@@ -26,13 +39,18 @@ from typing import Literal
 class IntentCategory(str, Enum):
     """High-level routing lane."""
 
-    METADATA = "metadata"
-    CONVERSATION_HISTORY = "conversation_history"
-    IDENTITY = "identity"
+    GREETING = "greeting"
     APP_HELP = "app_help"
+    IDENTITY = "identity"
+    WORKSPACE_METADATA = "workspace_metadata"
+    WORKSPACE_PERMISSION = "workspace_permission"
+    DOCUMENT_LIST = "document_list"
     DOCUMENT_CONTENT = "document_content"
-    AMBIGUOUS = "ambiguous"
+    DOCUMENT_COMPARISON = "document_comparison"
+    CONVERSATION_HISTORY = "conversation_history"
     OUT_OF_SCOPE = "out_of_scope"
+    GENERAL_CONVERSATION = "general_conversation"
+    AMBIGUOUS = "ambiguous"
 
 
 class MetadataSubIntent(str, Enum):
@@ -73,7 +91,7 @@ class Intent:
     category:
         The high-level routing lane.
     metadata_sub:
-        ``None`` unless ``category == METADATA``.
+        ``None`` unless ``category`` is a metadata/document lane.
     member_status:
         For ``member_count`` / ``member_list``, the status filter
         (e.g. ``"ACTIVE"`` or ``"INVITED"``).  ``None`` means no filter.
@@ -180,9 +198,19 @@ def classify_query_shape(query: str, *, has_doc_target: bool = False) -> QuerySh
 # Deterministic patterns — order matters (first match wins)
 # ---------------------------------------------------------------------------
 
-# --- Out-of-scope patterns ---
-# General-knowledge questions that have nothing to do with workspace documents.
+# --- Greeting patterns ---
+_GREETING_PATTERN = re.compile(
+    r"^\s*(?:hi|hello|hey|howdy|good\s+(?:morning|afternoon|evening|day)|"
+    r"what'?s\s+up|sup|yo|greetings|how\s+are\s+(?:you|things|it\s+going)|"
+    r"how\s+do\s+you\s+do|nice\s+to\s+meet\s+you|"
+    r"thank(?:s|\s+you)|thanks\s+a\s+lot|cheers|"
+    r"bye|goodbye|see\s+you|take\s+care|good\s+night|"
+    r"ok|okay|sure|yes|no|yeah|nah|yep|nope|"
+    r"help|/help|/start)\s*[!.?]?\s*$",
+    re.IGNORECASE,
+)
 
+# --- Out-of-scope patterns ---
 _MATH_PATTERN = re.compile(
     r"^\s*(?:what\s+is\s+)?(?:\d+\s*[\+\-\*\/\=]\s*\d+|sqrt\s+of\s+\d+|"
     r"what\s+is\s+\d+\s*[\+\-\*\/]\s*\d+)\s*[?.]?\s*$",
@@ -209,29 +237,60 @@ _GENERAL_KNOW_PATTERN = re.compile(
 
 # --- Identity patterns ---
 _IDENTITY_PATTERN = re.compile(
-    r"(?:what(?:'?s|\s+is)\s+my\s+(?:name|email))\b"
+    r"(?:what(?:'?s|\s+is)\s+my\s+(?:name|email|username|display\s+name))\b"
     r"|who\s+am\s+i\b"
-    r"|my\s+name\b",
+    r"|my\s+name\b"
+    r"|what\s+(?:is|are)\s+my\s+(?:credentials|profile|account\s+details?)\b",
     re.IGNORECASE,
 )
 
-# --- App-help patterns ---
+# --- App-help patterns (questions about the application itself) ---
 _APP_HELP_PATTERN = re.compile(
-    r"(?:who\s+can\s+(?:upload|add|submit)\s+(?:document|file)s?)\b"
-    r"|(?:how\s+(?:can|do|should)\s+(?:i|we)\s+"
-    r"(?:upload|add|submit)\s+(?:.*?\s+)?(?:document|file)s?)\b"
-    r"|(?:how\s+(?:can|do|should)\s+(?:i|we)\s+"
-    r"(?:upload|add|submit).*?\b(?:and\s+)?(?:ask|question))\b"
-    r"|(?:what\s+can\s+(?:i|we)\s+do)\b"
+    r"(?:what\s+(?:does|do)\s+(?:this|the)\s+(?:chatbot|assistant|app(?:lication)?|bot)\s+"
+    r"(?:do|does|offer|provide|support|know|answer))\b"
+    r"|(?:what\s+can\s+(?:i|we|you)\s+do)\b"
+    r"|(?:what\s+can\s+(?:i|we)\s+(?:ask|use\s+this\s+for))\b"
+    r"|(?:how\s+(?:does\s+)?(?:this|it|the\s+app)\s+work)\b"
+    r"|(?:how\s+(?:do|can|should)\s+(?:i|we)\s+(?:use|start|begin)\s+this)\b"
+    r"|(?:how\s+do\s+i\s+(?:use|access|open|get\s+started))\b"
+    r"|(?:what\s+(?:are\s+)?(?:the\s+)?(?:features?|capabilities|functions?))\b"
+    r"|(?:what\s+(?:kind|type)\s+of\s+(?:questions?|things?)\s+(?:can|do)\s+"
+    r"(?:i|we|you)\s+(?:ask|answer|handle))\b"
+    r"|(?:how\s+do\s+i\s+(?:upload|add|submit)\s+(?:.*?\s+)?(?:document|file)s?)\b"
+    r"|(?:who\s+can\s+(?:upload|add|submit)\s+(?:document|file)s?)\b"
+    r"|(?:can\s+(?:i|we|members?)\s+upload)\b"
     r"|(?:am\s+i\s+being\s+(?:monitored|tracked|watched))\b"
     r"|(?:do\s+you\s+(?:track|monitor|log)\s+(?:my|us|activity))\b"
-    r"|(?:who\s+has\s+(?:access|permission))\b"
-    r"|(?:what\s+(?:are\s+)?(?:my|the)\s+(?:permission|role|access))\b"
-    r"|(?:how\s+(?:does\s+)?(?:this|it)\s+work)\b"
     r"|(?:how\s+(?:can|do|should)\s+(?:i|we|you)\s+"
     r"(?:invite|add|send)\s+(?:.*?\s+)?(?:member|user|person|colleague|someone)?)\b"
     r"|(?:how\s+(?:do\s+)?i\s+"
-    r"(?:invite|add|onboard)\s+(?:a\s+)?(?:member|user|person|colleague|someone)?)\b",
+    r"(?:invite|add|onboard)\s+(?:a\s+)?(?:member|user|person|colleague|someone)?)\b"
+    r"|(?:tell\s+me\s+about\s+(?:this\s+)?(?:chatbot|assistant|app(?:lication)?|system|bot))\b"
+    r"|(?:what\s+(?:is|are)\s+this\s+(?:chatbot|assistant|app(?:lication)?|system|bot))\b",
+    re.IGNORECASE,
+)
+
+# --- Workspace permission patterns ---
+# NOTE: "What is my role?" is handled by _ROLE_PATTERN in metadata, not here.
+# This pattern covers action-level permissions (who can upload, can I invite, etc.).
+# "How can I upload and ask" is APP_HELP (application usage), not permission.
+# "who can" always matches permission; "can I/members" matches permission when
+# not preceded by "how" (which makes it a how-to/app-help question).
+_WORKSPACE_PERMISSION_PATTERN = re.compile(
+    r"(?:who\s+can\s+(?:upload|add|submit|delete|remove|approve|reject|invite|manage|edit|view|read|access|see))\b"
+    r"|(?:can\s+(?:i|we|members?|users?|everyone|anyone)\s+(?:only\s+)?"
+    r"(?:upload|add|submit|delete|remove|approve|reject|invite|manage|edit|view|read|access|see))\b"
+    r"|(?:what\s+(?:can|am\s+i\s+allowed\s+to)\s+(?:i|we)\s+"
+    r"(?:do|upload|add|delete|remove|approve|reject|invite|manage|edit|view|read|access))\b"
+    r"|(?:who\s+(?:has|have)\s+(?:access|permission|rights?))\b"
+    r"|(?:who\s+(?:is|are)\s+(?:allowed|permitted|authorized)\s+to)\b",
+    re.IGNORECASE,
+)
+
+# "how can I upload" is a how-to question, not a permission question.
+_HOW_TO_UPLOAD_PATTERN = re.compile(
+    r"(?:how\s+(?:can|do|should)\s+(?:i|we)\s+"
+    r"(?:upload|add|submit|invite|add|send))\b",
     re.IGNORECASE,
 )
 
@@ -250,7 +309,7 @@ _CONVERSATION_HISTORY_PATTERN = re.compile(
     r"|(?:what\s+have\s+(?:i|we)\s+(?:been\s+)?(?:asking|discussing|talking))\b"
     r"|(?:what\s+have\s+(?:i|we)\s+(?:been\s+)?discussing\s*(?:recently)?\b)"
     r"|(?:what\s+(?:have|did)\s+(?:i|we)\s+"
-    r"(?:discussed|covered|talked\s+about|covered|spoken\s+about))\b",
+    r"(?:discussed|covered|talked\s+about|spoken\s+about))\b",
     re.IGNORECASE,
 )
 
@@ -349,7 +408,15 @@ def classify_intent(query: str) -> Intent:
             reason="empty_query",
         )
 
-    # --- 0. Ambiguous / anaphoric references ---
+    # --- 0. Greeting (highest priority — obvious single words/phrases) ---
+    if _GREETING_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.GREETING,
+            skip_rewrite=True,
+            reason="greeting",
+        )
+
+    # --- 0b. Ambiguous / anaphoric references ---
     _ANAPHORIC_PATTERN = re.compile(
         r"(?:tell\s+me\s+about\s+(?:that|it|them|this))\b"
         r"|(?:what\s+about\s+(?:that|it|them|this))\b"
@@ -381,7 +448,16 @@ def classify_intent(query: str) -> Intent:
             reason="identity_query",
         )
 
-    # --- 3. Conversation history ---
+    # --- 3. Workspace permission (before app_help to avoid overlap) ---
+    # "How can I upload" is a how-to question, not a permission question.
+    if _WORKSPACE_PERMISSION_PATTERN.search(q) and not _HOW_TO_UPLOAD_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.WORKSPACE_PERMISSION,
+            skip_rewrite=True,
+            reason="workspace_permission_query",
+        )
+
+    # --- 4. Conversation history ---
     if _CONVERSATION_HISTORY_PATTERN.search(q):
         sub = _classify_conversation_history(q)
         return Intent(
@@ -391,7 +467,7 @@ def classify_intent(query: str) -> Intent:
             reason="conversation_history_query",
         )
 
-    # --- 4. App help ---
+    # --- 5. App help ---
     if _APP_HELP_PATTERN.search(q):
         return Intent(
             category=IntentCategory.APP_HELP,
@@ -399,17 +475,26 @@ def classify_intent(query: str) -> Intent:
             reason="app_help_query",
         )
 
-    # --- 5. Metadata: member queries ---
+    # --- 6. Document comparison (before content — comparison is a distinct lane) ---
+    if _is_document_comparison(q):
+        return Intent(
+            category=IntentCategory.DOCUMENT_CONTENT,
+            query_shape=QueryShape.COMPARISON,
+            skip_rewrite=False,
+            reason="document_comparison",
+        )
+
+    # --- 7. Metadata: member queries ---
     member_intent = _classify_member_metadata(q)
     if member_intent is not None:
         return member_intent
 
-    # --- 6. Metadata: document queries ---
+    # --- 8. Metadata: document list/count queries ---
     doc_intent = _classify_document_metadata(q)
     if doc_intent is not None:
         return doc_intent
 
-    # --- 7. Document content (everything else goes to RAG) ---
+    # --- 9. Document content (everything else goes to RAG) ---
     return Intent(
         category=IntentCategory.DOCUMENT_CONTENT,
         reason="default_document_content",
@@ -425,6 +510,11 @@ def _is_out_of_scope(q: str) -> bool:
     if _GENERAL_KNOW_PATTERN.search(q):
         return True
     return False
+
+
+def _is_document_comparison(q: str) -> bool:
+    """Detect document comparison queries."""
+    return bool(_COMPARISON_PATTERNS.search(q))
 
 
 def _classify_conversation_history(q: str) -> ConversationHistorySubIntent:
@@ -483,7 +573,7 @@ def _classify_member_metadata(q: str) -> Intent | None:
                 elif candidate in ("removed", "inactive", "deleted"):
                     status = "REMOVED"
                 return Intent(
-                    category=IntentCategory.METADATA,
+                    category=IntentCategory.WORKSPACE_METADATA,
                     metadata_sub=MetadataSubIntent.MEMBER_COUNT,
                     member_status=status,
                     skip_rewrite=True,
@@ -502,7 +592,7 @@ def _classify_member_metadata(q: str) -> Intent | None:
 
     if is_member_count:
         return Intent(
-            category=IntentCategory.METADATA,
+            category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.MEMBER_COUNT,
             member_status=status,
             skip_rewrite=True,
@@ -510,7 +600,7 @@ def _classify_member_metadata(q: str) -> Intent | None:
         )
     else:
         return Intent(
-            category=IntentCategory.METADATA,
+            category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.MEMBER_LIST,
             member_status=status,
             skip_rewrite=True,
@@ -527,7 +617,7 @@ def _classify_document_metadata(q: str) -> Intent | None:
     # Page count must be checked before general count to avoid false matches.
     if _DOC_PAGE_COUNT_PATTERN.search(q):
         return Intent(
-            category=IntentCategory.METADATA,
+            category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.DOC_PAGE_COUNT,
             skip_rewrite=True,
             reason="doc_page_count",
@@ -535,7 +625,7 @@ def _classify_document_metadata(q: str) -> Intent | None:
 
     if _DOC_COUNT_PATTERN.search(q):
         return Intent(
-            category=IntentCategory.METADATA,
+            category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.DOC_COUNT,
             skip_rewrite=True,
             reason="doc_count",
@@ -543,7 +633,7 @@ def _classify_document_metadata(q: str) -> Intent | None:
 
     if _DOC_LIST_PATTERN.search(q):
         return Intent(
-            category=IntentCategory.METADATA,
+            category=IntentCategory.DOCUMENT_LIST,
             metadata_sub=MetadataSubIntent.DOC_LIST,
             skip_rewrite=True,
             reason="doc_list",
@@ -552,7 +642,7 @@ def _classify_document_metadata(q: str) -> Intent | None:
     # Role query.
     if _ROLE_PATTERN.search(q):
         return Intent(
-            category=IntentCategory.METADATA,
+            category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.ROLE,
             skip_rewrite=True,
             reason="role_query",

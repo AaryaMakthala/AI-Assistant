@@ -186,36 +186,36 @@ class TestIntentClassification:
 
     def test_doc_list(self) -> None:
         intent = classify_intent("What are the names of documents")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.DOCUMENT_LIST
         assert intent.metadata_sub == MetadataSubIntent.DOC_LIST
         assert intent.skip_rewrite is True
 
     def test_doc_count(self) -> None:
         intent = classify_intent("How many documents are there")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
         assert intent.metadata_sub == MetadataSubIntent.DOC_COUNT
 
     def test_member_count_active(self) -> None:
         intent = classify_intent("How many members are in the workspace")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
         assert intent.metadata_sub == MetadataSubIntent.MEMBER_COUNT
         assert intent.member_status is None  # no status filter = all
 
     def test_member_count_invited(self) -> None:
         intent = classify_intent("How many are invited")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
         assert intent.metadata_sub == MetadataSubIntent.MEMBER_COUNT
         assert intent.member_status == "INVITED"
 
     def test_member_count_active_status(self) -> None:
         intent = classify_intent("How many active members are there")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
         assert intent.metadata_sub == MetadataSubIntent.MEMBER_COUNT
         assert intent.member_status == "ACTIVE"
 
     def test_member_list_invited(self) -> None:
         intent = classify_intent("Who is invited")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
         assert intent.metadata_sub == MetadataSubIntent.MEMBER_LIST
         assert intent.member_status == "INVITED"
 
@@ -231,7 +231,7 @@ class TestIntentClassification:
 
     def test_app_help_upload(self) -> None:
         intent = classify_intent("Who can upload documents")
-        assert intent.category == IntentCategory.APP_HELP
+        assert intent.category == IntentCategory.WORKSPACE_PERMISSION
         assert intent.skip_rewrite is True
 
     def test_app_help_howto(self) -> None:
@@ -269,7 +269,7 @@ class TestIntentClassification:
 
     def test_doc_page_count(self) -> None:
         intent = classify_intent("How many pages are there in each document")
-        assert intent.category == IntentCategory.METADATA
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
         assert intent.metadata_sub == MetadataSubIntent.DOC_PAGE_COUNT
 
     def test_content_question_not_metadata(self) -> None:

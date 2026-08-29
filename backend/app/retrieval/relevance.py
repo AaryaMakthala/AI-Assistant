@@ -44,9 +44,13 @@ from app.db.models import Document
 # ---------------------------------------------------------------------------
 
 # Greeting / chitchat patterns — these get a direct friendly response, no RAG.
+# Expanded to handle elongated chars and common non-English greetings,
+# matching the intent classifier's expanded greeting pattern.
 _GREETING_PATTERN = re.compile(
-    r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|thanks|thank you|"
-    r"what'?s\s+up|how\s+are\s+you|help)\s*[!.]?\s*$",
+    r"^(?:hi+|hello+|hey+|good\s+(?:morning|afternoon|evening)|thanks|thank you|"
+    r"what'?s*\s+up|how\s+are\s+you|help|"
+    r"hola|bonjour|salut|guten\s+(?:tag|morgen)|namaste|salaam|shalom|ciao)"
+    r"\s*[!.]?\s*$",
     re.IGNORECASE,
 )
 

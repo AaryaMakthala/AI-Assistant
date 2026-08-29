@@ -27,9 +27,12 @@ lane to route the question into.  Every lane runs through
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
+
+from loguru import logger
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +45,9 @@ class IntentCategory(str, Enum):
     GREETING = "greeting"
     APP_HELP = "app_help"
     IDENTITY = "identity"
+    IDENTITY_ASSISTANT = "identity_assistant"
+    IDENTITY_USER = "identity_user"
+    PERMISSIONS = "permissions"
     WORKSPACE_METADATA = "workspace_metadata"
     WORKSPACE_PERMISSION = "workspace_permission"
     DOCUMENT_LIST = "document_list"
@@ -199,14 +205,17 @@ def classify_query_shape(query: str, *, has_doc_target: bool = False) -> QuerySh
 # ---------------------------------------------------------------------------
 
 # --- Greeting patterns ---
+# Expanded to handle: elongated chars (heyyyy→hey), non-English greetings,
+# casual phrasing, and common variations.
 _GREETING_PATTERN = re.compile(
-    r"^\s*(?:hi|hello|hey|howdy|good\s+(?:morning|afternoon|evening|day)|"
-    r"what'?s\s+up|sup|yo|greetings|how\s+are\s+(?:you|things|it\s+going)|"
+    r"^\s*(?:hi+|hello+|hey+|howdy|good\s+(?:morning|afternoon|evening|day)|"
+    r"what'?s*\s+up|sup|yo+|greetings|how\s+are\s+(?:you|things|it\s+going)|"
     r"how\s+do\s+you\s+do|nice\s+to\s+meet\s+you|"
     r"thank(?:s|\s+you)|thanks\s+a\s+lot|cheers|"
-    r"bye|goodbye|see\s+you|take\s+care|good\s+night|"
-    r"ok|okay|sure|yes|no|yeah|nah|yep|nope|"
-    r"help|/help|/start)\s*[!.?]?\s*$",
+    r"bye+|goodbye|see\s+you|take\s+care|good\s+night|"
+    r"ok+|okay|sure|yes|no+|nah|yep|nope|"
+    r"help|/help|/start|"
+    r"hola|bonjour|salut|guten\s+(?:tag|morgen)|namaste|salaam|shalom|ciao)\s*$",
     re.IGNORECASE,
 )
 
@@ -236,11 +245,17 @@ _GENERAL_KNOW_PATTERN = re.compile(
 )
 
 # --- Identity patterns ---
+# Covers: "who am I", "what is my name", "who are you" (bot identity).
+# NOTE: "what is my role" is handled by _ROLE_PATTERN in metadata, not here.
+# "who is admin" is handled by _IDENTITY_PATTERN as a bot/knowledge question.
 _IDENTITY_PATTERN = re.compile(
     r"(?:what(?:'?s|\s+is)\s+my\s+(?:name|email|username|display\s+name))\b"
     r"|who\s+am\s+i\b"
     r"|my\s+name\b"
-    r"|what\s+(?:is|are)\s+my\s+(?:credentials|profile|account\s+details?)\b",
+    r"|what\s+(?:is|are)\s+my\s+(?:credentials|profile|account\s+details?)\b"
+    r"|who\s+(?:are|is)\s+you\b"
+    r"|what\s+(?:is|are)\s+your\s+(?:name|purpose|function|role)\b"
+    r"|who\s+is\s+(?:the\s+)?(?:admin|owner|manager|lead|administrator)\b",
     re.IGNORECASE,
 )
 
@@ -387,18 +402,165 @@ _ROLE_PATTERN = re.compile(
     r"(?:role|access|permission|level)"
     r"|what(?:'?s|\s+is)\s+my\s+(?:role|access|permission|level)",
     re.IGNORECASE,
-)
+)# ---------------------------------------------------------------------------
+# Text normalization for classification
+# ---------------------------------------------------------------------------
+
+# Common non-English greetings mapped to English equivalents.
+_GREETING_EXPANSIONS: dict[str, str] = {
+    "hola": "hello",
+    "bonjour": "hello",
+    "salut": "hello",
+    "guten tag": "hello",
+    "guten morgen": "good morning",
+    "namaste": "hello",
+    "salaam": "hello",
+    "shalom": "hello",
+    "ciao": "hello",
+    "yo yo": "hey",
+}
+
+
+def normalize_for_classification(query: str) -> str:
+    """Normalize a query for intent classification.
+
+    Handles: repeated/elongated characters (e.g. "heyyyy" → "hey"),
+    extra whitespace, common non-English greetings, and punctuation.
+    Applied *before* regex pattern matching so rigid patterns can match
+    casual, noisy input.
+    """
+    text = query.strip()
+    if not text:
+        return text
+
+    # 1. Unicode normalize (NFKD) to decompose accented characters.
+    text = unicodedata.normalize("NFKD", text)
+
+    # 2. Strip combining marks (accents produced by NFKD decomposition).
+    text = "".join(
+        ch for ch in text
+        if unicodedata.category(ch) != "Mn"
+    )
+
+    # 3. Lowercase for matching.
+    text = text.lower()
+
+    # 4. Collapse runs of 3+ identical letters to 2 (e.g. "heyyy" → "hey").
+    # Preserves natural doubles like "ll" in "hello" or "oo" in "book".
+    text = re.sub(r"(.)\1{2,}", r"\1\1", text)
+
+    # 5. Strip all punctuation (handles "hola!", "hey?", etc.).
+    text = re.sub(r"[\W_]+", " ", text)
+
+    # 6. Collapse whitespace.
+    text = " ".join(text.split())
+
+    # 7. Expand common non-English greetings.
+    for foreign, english in _GREETING_EXPANSIONS.items():
+        if text == foreign or text.startswith(foreign + " "):
+            text = text.replace(foreign, english, 1)
+            break
+
+    return text
 
 
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
 
-def classify_intent(query: str) -> Intent:
-    """Classify a user query into a routing intent.
+# Map LLM router routes to IntentCategory values.
+_LLM_ROUTE_TO_CATEGORY = {
+    "GREETING": IntentCategory.GREETING,
+    "IDENTITY_ASSISTANT": IntentCategory.IDENTITY_ASSISTANT,
+    "IDENTITY_USER": IntentCategory.IDENTITY_USER,
+    "METADATA": IntentCategory.WORKSPACE_METADATA,
+    "PERMISSIONS": IntentCategory.PERMISSIONS,
+    "DOCUMENT_CONTENT": IntentCategory.DOCUMENT_CONTENT,
+    "CONVERSATION_HISTORY": IntentCategory.CONVERSATION_HISTORY,
+    "APP_HELP": IntentCategory.APP_HELP,
+    "OUT_OF_SCOPE": IntentCategory.OUT_OF_SCOPE,
+    "NEEDS_CLARIFICATION": IntentCategory.AMBIGUOUS,
+}
 
-    Deterministic regex patterns handle obvious cases first.  This function
-    is synchronous and does NOT call any LLM — it is pure pattern matching.
+
+def _llm_route_to_intent(
+    route_result: "RouteResult",
+    original_query: str = "",
+) -> Intent:
+    """Map an LLM router RouteResult to an Intent.
+
+    For METADATA routes, uses regex sub-classification to determine the
+    specific metadata sub-intent (member count, doc list, role, etc.).
+    """
+    from app.retrieval.llm_router import CONFIDENCE_THRESHOLD
+
+    category = _LLM_ROUTE_TO_CATEGORY.get(route_result.route)
+    if category is None:
+        return Intent(
+            category=IntentCategory.AMBIGUOUS,
+            needs_clarification=True,
+            reason=f"unknown_route:{route_result.route}",
+        )
+
+    # Low confidence → force clarification.
+    if route_result.confidence < CONFIDENCE_THRESHOLD:
+        return Intent(
+            category=IntentCategory.AMBIGUOUS,
+            needs_clarification=True,
+            reason=f"low_confidence:{route_result.route}={route_result.confidence:.2f}",
+        )
+
+    needs_clarification = category == IntentCategory.AMBIGUOUS
+
+    # For METADATA routes, determine the specific sub-intent via regex.
+    metadata_sub = None
+    member_status = None
+    if category == IntentCategory.WORKSPACE_METADATA and original_query:
+        member_intent = _classify_member_metadata(original_query)
+        if member_intent is not None:
+            return Intent(
+                category=category,
+                metadata_sub=member_intent.metadata_sub,
+                member_status=member_intent.member_status,
+                skip_rewrite=True,
+                reason=f"llm_router:{route_result.route} sub={member_intent.metadata_sub.value} conf={route_result.confidence:.2f}",
+            )
+        doc_intent = _classify_document_metadata(original_query)
+        if doc_intent is not None:
+            return Intent(
+                category=doc_intent.category,
+                metadata_sub=doc_intent.metadata_sub,
+                skip_rewrite=True,
+                reason=f"llm_router:{route_result.route} sub={doc_intent.metadata_sub.value} conf={route_result.confidence:.2f}",
+            )
+
+    return Intent(
+        category=category,
+        needs_clarification=needs_clarification,
+        skip_rewrite=category not in (
+            IntentCategory.DOCUMENT_CONTENT,
+            IntentCategory.DOCUMENT_LIST,
+        ),
+        reason=f"llm_router:{route_result.route} conf={route_result.confidence:.2f}",
+    )
+
+
+def classify_intent_regex(query: str) -> Intent:
+    """Regex-only fast-path classification (synchronous, no LLM).
+
+    Returns an Intent when a high-confidence regex match is found, or
+    ``None`` (as Intent with category=DOCUMENT_CONTENT as fallback) when
+    no pattern matches — signaling the caller should fall through to the
+    LLM router.
+
+    Fast-path cases (no LLM needed):
+    - Greetings (exact or elongated matches)
+    - Out-of-scope (math, geography, obvious general knowledge)
+    - Conversation history (specific question phrasings)
+    - App help (specific application question phrasings)
+    - Workspace permissions (specific action-level questions)
+    - Metadata queries (member count/list, document count/list, role)
+    - Document comparison
     """
     q = query.strip()
     if not q:
@@ -408,8 +570,10 @@ def classify_intent(query: str) -> Intent:
             reason="empty_query",
         )
 
+    q_normalized = normalize_for_classification(q)
+
     # --- 0. Greeting (highest priority — obvious single words/phrases) ---
-    if _GREETING_PATTERN.search(q):
+    if _GREETING_PATTERN.search(q) or _GREETING_PATTERN.search(q_normalized):
         return Intent(
             category=IntentCategory.GREETING,
             skip_rewrite=True,
@@ -425,7 +589,7 @@ def classify_intent(query: str) -> Intent:
         r"|(?:describe\s+(?:that|it|them|this))\b",
         re.IGNORECASE,
     )
-    if _ANAPHORIC_PATTERN.search(q):
+    if _ANAPHORIC_PATTERN.search(q) or _ANAPHORIC_PATTERN.search(q_normalized):
         return Intent(
             category=IntentCategory.AMBIGUOUS,
             needs_clarification=True,
@@ -433,24 +597,22 @@ def classify_intent(query: str) -> Intent:
         )
 
     # --- 1. Out-of-scope (obvious general knowledge) ---
-    if _is_out_of_scope(q):
+    if _is_out_of_scope(q) or _is_out_of_scope(q_normalized):
         return Intent(
             category=IntentCategory.OUT_OF_SCOPE,
             skip_rewrite=True,
             reason="general_knowledge",
         )
 
-    # --- 2. Identity ---
-    if _IDENTITY_PATTERN.search(q):
-        return Intent(
-            category=IntentCategory.IDENTITY,
-            skip_rewrite=True,
-            reason="identity_query",
-        )
+    # NOTE: Identity queries deliberately NOT in the fast-path.
+    # "who are you" (IDENTITY_ASSISTANT) and "my name is X" (IDENTITY_USER)
+    # need different handling that only the LLM router can provide.
+    # The regex _IDENTITY_PATTERN still exists for backward compat in tests
+    # but is not used in the fast-path — all identity queries go to the LLM.
 
-    # --- 3. Workspace permission (before app_help to avoid overlap) ---
-    # "How can I upload" is a how-to question, not a permission question.
-    if _WORKSPACE_PERMISSION_PATTERN.search(q) and not _HOW_TO_UPLOAD_PATTERN.search(q):
+    # --- 2. Workspace permission (before app_help to avoid overlap) ---
+    if ((_WORKSPACE_PERMISSION_PATTERN.search(q) or _WORKSPACE_PERMISSION_PATTERN.search(q_normalized))
+            and not (_HOW_TO_UPLOAD_PATTERN.search(q) or _HOW_TO_UPLOAD_PATTERN.search(q_normalized))):
         return Intent(
             category=IntentCategory.WORKSPACE_PERMISSION,
             skip_rewrite=True,
@@ -458,7 +620,7 @@ def classify_intent(query: str) -> Intent:
         )
 
     # --- 4. Conversation history ---
-    if _CONVERSATION_HISTORY_PATTERN.search(q):
+    if _CONVERSATION_HISTORY_PATTERN.search(q) or _CONVERSATION_HISTORY_PATTERN.search(q_normalized):
         sub = _classify_conversation_history(q)
         return Intent(
             category=IntentCategory.CONVERSATION_HISTORY,
@@ -467,16 +629,16 @@ def classify_intent(query: str) -> Intent:
             reason="conversation_history_query",
         )
 
-    # --- 5. App help ---
-    if _APP_HELP_PATTERN.search(q):
+    # --- 3. App help ---
+    if _APP_HELP_PATTERN.search(q) or _APP_HELP_PATTERN.search(q_normalized):
         return Intent(
             category=IntentCategory.APP_HELP,
             skip_rewrite=True,
             reason="app_help_query",
         )
 
-    # --- 6. Document comparison (before content — comparison is a distinct lane) ---
-    if _is_document_comparison(q):
+    # --- 7. Document comparison (before content — comparison is a distinct lane) ---
+    if _is_document_comparison(q) or _is_document_comparison(q_normalized):
         return Intent(
             category=IntentCategory.DOCUMENT_CONTENT,
             query_shape=QueryShape.COMPARISON,
@@ -484,21 +646,124 @@ def classify_intent(query: str) -> Intent:
             reason="document_comparison",
         )
 
-    # --- 7. Metadata: member queries ---
-    member_intent = _classify_member_metadata(q)
+    # --- 8. Metadata: member queries (exact pattern match) ---
+    member_intent = _classify_member_metadata(q) or _classify_member_metadata(q_normalized)
     if member_intent is not None:
         return member_intent
 
-    # --- 8. Metadata: document list/count queries ---
-    doc_intent = _classify_document_metadata(q)
+    # --- 9. Metadata: document list/count queries (exact pattern match) ---
+    doc_intent = _classify_document_metadata(q) or _classify_document_metadata(q_normalized)
     if doc_intent is not None:
         return doc_intent
 
-    # --- 9. Document content (everything else goes to RAG) ---
+    # --- 10. No regex match — signal to fall through to LLM router ---
+    # Return DOCUMENT_CONTENT as default; the caller replaces this with
+    # the LLM router's result.
     return Intent(
         category=IntentCategory.DOCUMENT_CONTENT,
-        reason="default_document_content",
+        reason="regex_fallback_to_llm",
     )
+
+
+async def classify_intent(
+    query: str,
+    *,
+    history: list[dict[str, str]] | None = None,
+    workspace_id: "uuid.UUID | None" = None,
+) -> Intent:
+    """Classify a user query into a routing intent.
+
+    LLM-first routing:
+    1. Check the routing cache for a previously computed route.
+    2. On cache miss, call the LLM router with workspace knowledge.
+    3. If the LLM call fails, fall back to the regex classifier.
+
+    The regex layer is no longer the default path — it exists only as a
+    failure-mode fallback so the system degrades gracefully when the LLM
+    is unavailable.
+
+    Parameters
+    ----------
+    query:
+        The raw user query.
+    history:
+        Optional recent conversation turns for context.
+    workspace_id:
+        The workspace UUID.  Used for cache keying and to inject
+        workspace-specific knowledge into the LLM router prompt.
+    """
+    import uuid as _uuid
+
+    q_normalized = normalize_for_classification(query)
+
+    # --- Stage 0: Check routing cache ---
+    if workspace_id is not None:
+        from app.retrieval.routing_cache import get_cached_route, set_cached_route
+
+        cached = get_cached_route(workspace_id, q_normalized)
+        if cached is not None:
+            route, reasoning, confidence = cached
+            # Build a synthetic RouteResult and map it.
+            from app.retrieval.llm_router import RouteResult
+            cached_result = RouteResult(
+                route=route,
+                reasoning=f"cache_hit:{reasoning}",
+                confidence=confidence,
+                status="success",
+            )
+            return _llm_route_to_intent(cached_result, original_query=query)
+
+    # --- Stage 1: LLM router (primary path) ---
+    from app.retrieval.llm_router import route_with_llm
+
+    # Build workspace knowledge context for the LLM prompt.
+    ws_knowledge_context: str | None = None
+    if workspace_id is not None:
+        try:
+            from app.retrieval.workspace_knowledge import get_workspace_knowledge
+            from app.security.rls import tenant_session
+
+            async with tenant_session(
+                workspace_id=workspace_id,
+                user_id=_uuid.UUID(int=0),  # system-level read, no user scope needed
+            ) as db:
+                knowledge = await get_workspace_knowledge(db, workspace_id)
+                ws_knowledge_context = knowledge.to_prompt_context()
+        except Exception:
+            # If knowledge loading fails, proceed without workspace context.
+            pass
+
+    llm_result = await route_with_llm(
+        query=q_normalized,
+        history=history,
+        workspace_knowledge_context=ws_knowledge_context,
+    )
+
+    # Cache the LLM result (unless it's degraded).
+    if (
+        workspace_id is not None
+        and llm_result.status == "success"
+        and llm_result.confidence >= 0.3
+    ):
+        from app.retrieval.routing_cache import set_cached_route
+        set_cached_route(
+            workspace_id=workspace_id,
+            normalized_message=q_normalized,
+            route=llm_result.route,
+            reasoning=llm_result.reasoning,
+            confidence=llm_result.confidence,
+        )
+
+    # If the LLM call succeeded, use its result.
+    if llm_result.status == "success":
+        return _llm_route_to_intent(llm_result, original_query=query)
+
+    # --- Stage 2: Regex fallback (LLM failed) ---
+    logger.warning(
+        "LLM router degraded, falling back to regex for query: {query}",
+        query=q_normalized[:100],
+    )
+    return classify_intent_regex(query)
 
 
 def _is_out_of_scope(q: str) -> bool:
@@ -658,5 +923,7 @@ __all__ = [
     "MetadataSubIntent",
     "QueryShape",
     "classify_intent",
+    "classify_intent_regex",
     "classify_query_shape",
+    "normalize_for_classification",
 ]

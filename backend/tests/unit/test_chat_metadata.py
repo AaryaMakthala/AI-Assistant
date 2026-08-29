@@ -252,7 +252,13 @@ def client(
     monkeypatch.setattr(chat_module, "assert_workspace_role", _member)
 
     # Default: no documents in the workspace.
-    _default_session = _FakeSession(responses=[_FakeResult(scalar=0), _FakeResult(rows=[])])
+    # First response is for _load_recent_history (no session found).
+    # Remaining responses are for the actual metadata query.
+    _default_session = _FakeSession(responses=[
+        _FakeResult(scalar=None),  # _load_recent_history: no session found
+        _FakeResult(scalar=0),     # doc count query
+        _FakeResult(rows=[]),      # doc list query
+    ])
 
     def _make_tenant_session(
         *, workspace_id: uuid.UUID, user_id: uuid.UUID | None = None  # noqa: ARG001
@@ -260,6 +266,24 @@ def client(
         return _default_session
 
     monkeypatch.setattr(chat_module, "tenant_session", _make_tenant_session)
+
+    # Mock the LLM router to avoid real API calls for intent classification.
+    from app.retrieval.llm_router import RouteResult as _RouteResult
+
+    async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> _RouteResult:
+        from app.retrieval.intent import normalize_for_classification
+        import re as _re
+        q = normalize_for_classification(query)
+        # Reject topic-qualified questions ("how many documents discuss X" is content, not metadata).
+        if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
+            return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:how\s+many|number\s+of|list|show|what\s+(?:are|is|documents?)\s+(?:the|are|have)?)\s*.*(?:members?|documents?|files?|uploaded)", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:who\s+can|can\s+(?:i|we|members?)\s+(?:upload|add|invite|approve|delete))", q):
+            return _RouteResult(route="PERMISSIONS", confidence=0.9, reasoning="test")
+        return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+
+    monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
 
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client, principal
@@ -278,9 +302,9 @@ def test_count_bypasses_retrieval_and_llm(
     test_client, principal = client
 
     # Stub: document count is 4.
-    # No history lookup needed — metadata intents skip rewrite.
     session = _FakeSession(responses=[
-        _FakeResult(scalar=4),      # metadata count query
+        _FakeResult(scalar=None),  # _load_recent_history: no session found
+        _FakeResult(scalar=4),     # metadata count query
     ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
@@ -314,9 +338,9 @@ def test_list_bypasses_retrieval_and_llm(
     test_client, principal = client
 
     doc_rows = _make_doc_rows("handbook.pdf", "refund_policy.docx", "travel_guide.csv")
-    # No history lookup needed — metadata intents skip rewrite.
     session = _FakeSession(responses=[
-        _FakeResult(rows=doc_rows),  # metadata list query
+        _FakeResult(scalar=None),     # _load_recent_history: no session found
+        _FakeResult(rows=doc_rows),   # metadata list query
     ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
@@ -441,7 +465,7 @@ def test_no_chunks_uses_no_evidence_refusal(
     body = response.json()
     assert body["grounded"] is False
     assert body["answer"] == REFUSAL_NO_EVIDENCE
-    assert "uploaded documents" in body["answer"]
+    assert "documents" in body["answer"].lower()
     assert stub.calls == []
 
 
@@ -452,7 +476,10 @@ def test_cross_workspace_docs_not_in_metadata_results(
     test_client, principal = client
 
     # The session mock returns zero docs for this workspace.
-    session = _FakeSession(responses=[_FakeResult(rows=[])])
+    session = _FakeSession(responses=[
+        _FakeResult(scalar=None),  # _load_recent_history: no session found
+        _FakeResult(rows=[]),      # doc list query: empty
+    ])
     monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
     response = test_client.post(

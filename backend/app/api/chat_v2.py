@@ -49,6 +49,7 @@ from app.retrieval.intent import (
     MetadataSubIntent,
     QueryShape,
     classify_intent,
+    classify_intent_regex,
     classify_query_shape,
 )
 from app.retrieval.pipeline import RetrievedChunk, retrieve
@@ -626,6 +627,85 @@ async def _answer_identity(
 
 
 # ---------------------------------------------------------------------------
+# Identity sub-type handlers (LLM router)
+# ---------------------------------------------------------------------------
+
+
+def _answer_identity_assistant() -> str:
+    """Answer a question about what/who the assistant is.
+
+    No database query, no retrieval, no LLM call.
+    """
+    return (
+        "I'm a company knowledge assistant. I help you find information from "
+        "your workspace's approved documents. You can ask me questions about "
+        "uploaded documents, and I'll answer with citations from the relevant "
+        "sources. I can also help with workspace metadata like member counts, "
+        "document counts, and roles."
+    )
+
+
+async def _answer_identity_user(
+    *,
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    question: str = "",
+) -> tuple[str, ResponseReason]:
+    """Answer a question about the user's own info, or acknowledge a statement.
+
+    Handles both questions ("what is my info") and statements ("my name is X").
+    Returns (answer, refusal_reason).
+    """
+    from app.db.models import Member
+
+    q_lower = question.lower().strip()
+
+    # Detect if this is a statement ("my name is X") vs a question.
+    is_statement = bool(
+        re.match(r"^(?:my\s+name\s+is|i\s+am|i'm|call\s+me)\b", q_lower)
+    )
+
+    if is_statement:
+        # Acknowledge the statement — we can't store it, but we should not
+        # pretend we didn't hear it.
+        return (
+            "Thanks for letting me know! I don't store personal information "
+            "like names, but I can help you find information from your "
+            "workspace's approved documents. What would you like to know?",
+            None,
+        )
+
+    # It's a question about user info.
+    async with tenant_session(workspace_id=workspace_id, user_id=user_id) as db:
+        rows = (
+            await db.execute(
+                select(Member.user_id, Member.role, Member.status).where(
+                    Member.workspace_id == workspace_id,
+                    Member.user_id == user_id,
+                    Member.status == "ACTIVE",
+                )
+            )
+        ).all()
+
+    if not rows:
+        return (
+            "I can see you're using this workspace, but I don't have detailed "
+            "profile information available. I can help you find information from "
+            "your workspace's documents instead.",
+            ResponseReason.IDENTITY_UNAVAILABLE,
+        )
+
+    role = rows[0].role
+    return (
+        f"You're a member of this workspace with the role '{role}'. "
+        "I don't store personal details like your name or email — those come "
+        "from your authentication session. If you need information about "
+        "workspace policies, documents, or members, I can help with that.",
+        None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # App-help handler (Phase A, step 7)
 # ---------------------------------------------------------------------------
 
@@ -854,27 +934,39 @@ async def _stream_chat(
     # This MUST happen before every answer path — INVITED-only users get 403.
     member_role = await assert_workspace_role(workspace_id, principal)
 
-    # 1a. Classify intent deterministically.
-    # For structured intents (metadata, out_of_scope, identity, etc.) we skip
-    # rewriting to preserve constraints like status filters.
-    intent = classify_intent(question)
+    # 1a. Classify intent: LLM-first with cache, regex as failure fallback.
     effective_query = question  # may be overridden by rewrite below
     needs_clarification = False
     refusal_reason: ResponseReason | None = None
+    history_turns: list[ChatTurn] = []
 
-    # 1b. Only rewrite for document_content intents that have conversation history.
+    # Load history for context (needed by LLM router and query rewrite).
+    history_turns = await _load_recent_history(
+        workspace_id=workspace_id,
+        user_id=principal.user_id,
+        session_id=payload.session_id,
+    )
+    history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
+
+    # LLM-first classification with workspace knowledge.
+    intent = await classify_intent(
+        question,
+        history=history_dicts,
+        workspace_id=workspace_id,
+    )
+
+    # 1b. Rewrite for document_content intents.
     if intent.category == IntentCategory.DOCUMENT_CONTENT:
-        history = await _load_recent_history(
-            workspace_id=workspace_id,
-            user_id=principal.user_id,
-            session_id=payload.session_id,
-        )
-        rewrite_result = await rewrite_query(query=question, history=history)
+        rewrite_result = await rewrite_query(query=question, history=history_turns)
         effective_query = rewrite_result.rewritten_query
         needs_clarification = rewrite_result.needs_clarification
         # Re-classify after rewrite in case the rewritten query changed the intent.
         if rewrite_result.status == "success" and effective_query != question:
-            intent = classify_intent(effective_query)
+            intent = await classify_intent(
+                effective_query,
+                history=history_dicts,
+                workspace_id=workspace_id,
+            )
     elif intent.category == IntentCategory.AMBIGUOUS:
         needs_clarification = True
 
@@ -936,13 +1028,43 @@ async def _stream_chat(
             ws=workspace_id,
         )
 
-    elif intent.category == IntentCategory.IDENTITY:
-        answer, refusal_reason = await _answer_identity(
+    elif intent.category == IntentCategory.IDENTITY_ASSISTANT:
+        answer = _answer_identity_assistant()
+        logger.info(
+            "intent=identity_assistant workspace={ws} retrieval_called=False",
+            ws=workspace_id,
+        )
+
+    elif intent.category == IntentCategory.IDENTITY_USER:
+        answer, refusal_reason = await _answer_identity_user(
             workspace_id=workspace_id,
             user_id=principal.user_id,
+            question=effective_query,
+        )
+        logger.info(
+            "intent=identity_user workspace={ws} retrieval_called=False refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+
+    elif intent.category == IntentCategory.IDENTITY:
+        # Legacy identity route (regex fast-path) — treat as user identity.
+        answer, refusal_reason = await _answer_identity_user(
+            workspace_id=workspace_id,
+            user_id=principal.user_id,
+            question=effective_query,
         )
         logger.info(
             "intent=identity workspace={ws} retrieval_called=False refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+
+    elif intent.category == IntentCategory.PERMISSIONS:
+        answer, refusal_reason = _answer_workspace_permission(
+            question=effective_query,
+            principal_role=member_role,
+        )
+        logger.info(
+            "intent=permissions workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
 
@@ -1327,17 +1449,26 @@ async def grounded_chat(
     workspace_id = principal.workspace_id
     member_role = await assert_workspace_role(workspace_id, principal)
 
-    # Classify intent.
-    intent = classify_intent(question)
+    # LLM-first classification with workspace knowledge.
     effective_query = question
+    history_turns: list[ChatTurn] = []
+
+    # Load history for context.
+    history_turns = await _load_recent_history(
+        workspace_id=workspace_id,
+        user_id=principal.user_id,
+    )
+    history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
+
+    intent = await classify_intent(
+        question,
+        history=history_dicts,
+        workspace_id=workspace_id,
+    )
 
     # Only rewrite for document_content intents.
     if intent.category == IntentCategory.DOCUMENT_CONTENT:
-        history = await _load_recent_history(
-            workspace_id=workspace_id,
-            user_id=principal.user_id,
-        )
-        rewrite_result = await rewrite_query(query=question, history=history)
+        rewrite_result = await rewrite_query(query=question, history=history_turns)
         effective_query = rewrite_result.rewritten_query
         if rewrite_result.needs_clarification:
             return GroundedChatResponse(
@@ -1347,7 +1478,11 @@ async def grounded_chat(
                 sources=[],
             )
         if rewrite_result.status == "success" and effective_query != question:
-            intent = classify_intent(effective_query)
+            intent = await classify_intent(
+                effective_query,
+                history=history_dicts,
+                workspace_id=workspace_id,
+            )
     elif intent.category == IntentCategory.AMBIGUOUS:
         return GroundedChatResponse(
             answer=refusal_message(ResponseReason.NEEDS_CLARIFICATION),
@@ -1373,12 +1508,50 @@ async def grounded_chat(
             grounded=True, insufficient_evidence=False, sources=[],
         )
 
-    if intent.category == IntentCategory.IDENTITY:
-        answer, refusal_reason = await _answer_identity(
+    if intent.category == IntentCategory.IDENTITY_ASSISTANT:
+        answer = _answer_identity_assistant()
+        logger.info(
+            "intent=identity_assistant workspace={ws} retrieval_called=False", ws=workspace_id,
+        )
+        return GroundedChatResponse(
+            answer=answer, grounded=True, insufficient_evidence=False, sources=[],
+        )
+
+    if intent.category == IntentCategory.IDENTITY_USER:
+        answer, refusal_reason = await _answer_identity_user(
             workspace_id=workspace_id, user_id=principal.user_id,
+            question=effective_query,
+        )
+        logger.info(
+            "intent=identity_user workspace={ws} retrieval_called=False refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+        return GroundedChatResponse(
+            answer=answer, grounded=True,
+            insufficient_evidence=refusal_reason is not None, sources=[],
+        )
+
+    if intent.category == IntentCategory.IDENTITY:
+        # Legacy identity route (regex fast-path) — treat as user identity.
+        answer, refusal_reason = await _answer_identity_user(
+            workspace_id=workspace_id, user_id=principal.user_id,
+            question=effective_query,
         )
         logger.info(
             "intent=identity workspace={ws} retrieval_called=False refusal={refusal}",
+            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
+        )
+        return GroundedChatResponse(
+            answer=answer, grounded=True,
+            insufficient_evidence=refusal_reason is not None, sources=[],
+        )
+
+    if intent.category == IntentCategory.PERMISSIONS:
+        answer, refusal_reason = _answer_workspace_permission(
+            question=effective_query, principal_role=member_role,
+        )
+        logger.info(
+            "intent=permissions workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
         return GroundedChatResponse(

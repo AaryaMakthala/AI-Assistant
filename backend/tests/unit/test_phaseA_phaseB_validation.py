@@ -25,12 +25,18 @@ from app.retrieval.intent import (
     IntentCategory,
     MetadataSubIntent,
     QueryShape,
-    classify_intent,
+    classify_intent_regex,
     classify_query_shape,
 )
 from app.retrieval.pipeline import RetrievedChunk, RetrievalResult
 from app.retrieval.refusals import ResponseReason, refusal_message
 from app.security.auth import Principal, get_principal
+from tests.unit.conftest import (
+    FakeResult,
+    FakeSession,
+    StubLLM,
+    smart_mock_route,
+)
 
 pytestmark = pytest.mark.usefixtures("valid_env")
 
@@ -61,57 +67,7 @@ def _chunk(
     )
 
 
-class _StubLLM:
-    name = "test-provider"
-    model = "test-model"
 
-    def __init__(self, text: str = "An answer.") -> None:
-        self._text = text
-        self.calls: list[list[Message]] = []
-
-    async def stream(
-        self, messages: list[Message], *, completion: Completion
-    ) -> AsyncIterator[str]:
-        self.calls.append(messages)
-        completion.provider = self.name
-        completion.model = self.model
-        completion.text = self._text
-        completion.usage = TokenUsage(prompt_tokens=10, completion_tokens=5)
-        yield self._text
-
-
-class _FakeResult:
-    def __init__(self, rows: list[Any] | None = None, scalar: Any = None) -> None:
-        self._rows = rows or []
-        self._scalar = scalar
-
-    def scalar_one(self) -> Any:
-        return self._scalar
-
-    def scalar_one_or_none(self) -> Any:
-        return self._scalar
-
-    def all(self) -> list[Any]:
-        return self._rows
-
-
-class _FakeSession:
-    def __init__(self, responses: list[_FakeResult] | None = None) -> None:
-        self._responses = list(responses or [])
-        self._call_index = 0
-
-    async def execute(self, stmt: Any) -> _FakeResult:
-        if self._call_index < len(self._responses):
-            result = self._responses[self._call_index]
-            self._call_index += 1
-            return result
-        return _FakeResult()
-
-    async def __aenter__(self) -> "_FakeSession":
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -139,16 +95,20 @@ def client(
 
     monkeypatch.setattr(chat_module, "assert_workspace_role", _member)
 
-    default_session = _FakeSession(responses=[
-        _FakeResult(scalar=None),
-    ])
+    default_session = FakeSession(
+        responses=[FakeResult(scalar=None)],  # _load_recent_history: no session
+        default=FakeResult(scalar=None),       # extra calls: no session (safe default)
+    )
 
     def _make_tenant_session(
         *, workspace_id: uuid.UUID, user_id: uuid.UUID | None = None
-    ) -> _FakeSession:
+    ) -> FakeSession:
         return default_session
 
     monkeypatch.setattr(chat_module, "tenant_session", _make_tenant_session)
+
+    # Mock the LLM router — shared smart mock from conftest.
+    monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", smart_mock_route)
 
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client, principal
@@ -170,7 +130,10 @@ class TestPhaseAMetadata:
     def test_1_doc_count(self, monkeypatch, client):
         """'How many documents are in the workspace?' -> metadata/doc_count."""
         test_client, _ = client
-        session = _FakeSession(responses=[_FakeResult(scalar=3)])
+        session = FakeSession(responses=[
+            FakeResult(scalar=None),  # _load_recent_history
+            FakeResult(scalar=3),     # doc count
+        ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called = []
@@ -179,7 +142,7 @@ class TestPhaseAMetadata:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -202,7 +165,7 @@ class TestPhaseAMetadata:
             SimpleNamespace(filename="handbook.pdf"),
             SimpleNamespace(filename="policy.docx"),
         ]
-        session = _FakeSession(responses=[_FakeResult(rows=doc_rows)])
+        session = FakeSession(responses=[FakeResult(scalar=None), FakeResult(rows=doc_rows)])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called = []
@@ -211,7 +174,7 @@ class TestPhaseAMetadata:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -236,7 +199,7 @@ class TestPhaseAMetadata:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -253,7 +216,7 @@ class TestPhaseAMetadata:
     def test_4_member_count_active(self, monkeypatch, client):
         """'How many active members are there?' -> metadata/member_count + ACTIVE."""
         test_client, _ = client
-        session = _FakeSession(responses=[_FakeResult(scalar=5)])
+        session = FakeSession(responses=[FakeResult(scalar=None), FakeResult(scalar=5)])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called = []
@@ -262,7 +225,7 @@ class TestPhaseAMetadata:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -284,7 +247,7 @@ class TestPhaseAMetadata:
             SimpleNamespace(user_id=uuid.uuid4(), role="OWNER", status="ACTIVE"),
             SimpleNamespace(user_id=uuid.uuid4(), role="MEMBER", status="ACTIVE"),
         ]
-        session = _FakeSession(responses=[_FakeResult(rows=member_rows)])
+        session = FakeSession(responses=[FakeResult(scalar=None), FakeResult(rows=member_rows)])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called = []
@@ -293,7 +256,7 @@ class TestPhaseAMetadata:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -312,7 +275,7 @@ class TestPhaseAMetadata:
         """'What is my role?' -> metadata/role."""
         test_client, _ = client
         role_row = SimpleNamespace(role="OWNER")
-        session = _FakeSession(responses=[_FakeResult(rows=[role_row])])
+        session = FakeSession(responses=[FakeResult(scalar=None), FakeResult(rows=[role_row])])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called = []
@@ -321,7 +284,7 @@ class TestPhaseAMetadata:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -350,9 +313,11 @@ class TestConversationHistory:
         session_id = uuid.uuid4()
         session_row = SimpleNamespace(id=session_id)
 
-        session = _FakeSession(responses=[
-            _FakeResult(scalar=session_row),
-            _FakeResult(rows=[user_msg, asst_msg]),
+        session = FakeSession(responses=[
+            FakeResult(scalar=session_row),  # _load_recent_history: session lookup
+            FakeResult(rows=[user_msg, asst_msg]),  # _load_recent_history: messages
+            FakeResult(scalar=session_row),  # _answer_conversation_history: session lookup
+            FakeResult(rows=[user_msg, asst_msg]),  # _answer_conversation_history: messages
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
@@ -362,7 +327,7 @@ class TestConversationHistory:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -385,9 +350,11 @@ class TestConversationHistory:
         session_id = uuid.uuid4()
         session_row = SimpleNamespace(id=session_id)
 
-        session = _FakeSession(responses=[
-            _FakeResult(scalar=session_row),
-            _FakeResult(rows=[user_msg, asst_msg]),
+        session = FakeSession(responses=[
+            FakeResult(scalar=session_row),
+            FakeResult(rows=[user_msg, asst_msg]),
+            FakeResult(scalar=session_row),
+            FakeResult(rows=[user_msg, asst_msg]),
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
@@ -397,7 +364,7 @@ class TestConversationHistory:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -419,10 +386,11 @@ class TestConversationHistory:
         asst_msg = SimpleNamespace(role="assistant", content="Kanban is a workflow method.")
         session_id = uuid.uuid4()
         session_row = SimpleNamespace(id=session_id)
-
-        session = _FakeSession(responses=[
-            _FakeResult(scalar=session_row),
-            _FakeResult(rows=[user_msg, asst_msg]),
+        session = FakeSession(responses=[
+            FakeResult(scalar=session_row),
+            FakeResult(rows=[user_msg, asst_msg]),
+            FakeResult(scalar=session_row),
+            FakeResult(rows=[user_msg, asst_msg]),
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
@@ -430,9 +398,10 @@ class TestConversationHistory:
         async def _retrieve(*a, **kw):
             retrieval_called.append("called")
             raise AssertionError("retrieval must NOT run")
+
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -461,7 +430,7 @@ class TestAppHelp:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -485,7 +454,7 @@ class TestAppHelp:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -632,7 +601,7 @@ class TestOutOfScope:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -657,7 +626,7 @@ class TestOutOfScope:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -679,7 +648,7 @@ class TestOutOfScope:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -707,7 +676,7 @@ class TestAmbiguous:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         # Mock rewrite to return needs_clarification
@@ -742,7 +711,7 @@ class TestAmbiguous:
             raise AssertionError("retrieval must NOT run")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         # Mock rewrite to return needs_clarification
@@ -776,7 +745,7 @@ class TestLogging:
     def test_metadata_logs_intent(self, monkeypatch, client):
         """Metadata route should log intent=metadata."""
         test_client, _ = client
-        session = _FakeSession(responses=[_FakeResult(scalar=2)])
+        session = FakeSession(responses=[FakeResult(scalar=2)])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
         retrieval_called = []
@@ -784,7 +753,7 @@ class TestLogging:
             retrieval_called.append("called")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -802,7 +771,7 @@ class TestLogging:
             retrieval_called.append("called")
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM()
+        stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -820,7 +789,7 @@ class TestLogging:
             return RetrievalResult(chunks=[kanban_chunk], grounded=True, top_score=0.9)
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        stub = _StubLLM(text="Kanban is a workflow management method.")
+        stub = StubLLM(text="Kanban is a workflow management method.")
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
         response = test_client.post(
@@ -845,7 +814,8 @@ class TestRegression:
             ("List active members.", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.MEMBER_LIST),
             ("What is my role?", IntentCategory.WORKSPACE_METADATA, MetadataSubIntent.ROLE),
             ("What was my previous question?", IntentCategory.CONVERSATION_HISTORY, None),
-            ("What is my name?", IntentCategory.IDENTITY, None),
+            # Identity queries are NOT in the regex fast-path — they go to LLM router.
+            # ("What is my name?", IntentCategory.IDENTITY, None),
             ("Who can upload documents?", IntentCategory.WORKSPACE_PERMISSION, None),
             ("How do I invite a member?", IntentCategory.APP_HELP, None),
             ("What is 2+2?", IntentCategory.OUT_OF_SCOPE, None),
@@ -855,7 +825,7 @@ class TestRegression:
         ]
 
         for query, expected_category, expected_sub in cases:
-            intent = classify_intent(query)
+            intent = classify_intent_regex(query)
             assert intent.category == expected_category, (
                 f"Query '{query}': expected {expected_category}, got {intent.category}"
             )

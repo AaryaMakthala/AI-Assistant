@@ -209,6 +209,30 @@ def client(
 
     monkeypatch.setattr(chat_module, "tenant_session", _make_tenant_session)
 
+    # Mock the LLM router to avoid real API calls for intent classification.
+    # Returns DOCUMENT_CONTENT by default (most conversational queries are doc queries).
+    from app.retrieval.llm_router import RouteResult as _RouteResult
+
+    async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> _RouteResult:
+        from app.retrieval.intent import normalize_for_classification
+        import re as _re
+        q = normalize_for_classification(query)
+        if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
+            return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:how\s+many|number\s+of)\s+(?:uploaded\s+)?(?:my\s+|the\s+|this\s+)?(?:own\s+)?(?:members?|documents?|files?|uploaded)", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:list|show)\s+(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?(?:my\s+|the\s+|this\s+)?(?:uploaded\s+)?(?:members?|documents?|files?)\b", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"^what\s+(?:are|is)\s+(?:the\s+|my\s+)?(?:uploaded\s+)?(?:documents?|files?)\s*$", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"^how\s+many\s+are\s+(?:invited|pending|active|confirmed|removed)\s*$", q):
+            return _RouteResult(route="METADATA", confidence=0.85, reasoning="test")
+        if _re.search(r"^who\s+(?:is|are)\s+(?:invited|pending|active)\s*$", q):
+            return _RouteResult(route="METADATA", confidence=0.85, reasoning="test")
+        return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+
+    monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client, principal
     app.dependency_overrides.clear()
@@ -388,6 +412,7 @@ class TestMetadataFollowUp:
         # Set up tenant_session with member count response.
         # Only one call: _answer_metadata_question (member_count query).
         session = _FakeSession(responses=[
+            _FakeResult(scalar=None),  # _load_recent_history: no session found
             _FakeResult(scalar=3),     # member_count query result
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)

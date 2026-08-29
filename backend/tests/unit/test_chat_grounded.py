@@ -119,6 +119,14 @@ def client(monkeypatch: pytest.MonkeyPatch, _valid_env: None) -> tuple[TestClien
     monkeypatch.setattr(chat_module, "assert_workspace_role", _member)
     monkeypatch.setattr(chat_module, "tenant_session", _tenant_session)
 
+    # Mock the LLM router to avoid real API calls for intent classification.
+    from app.retrieval.llm_router import RouteResult as _RouteResult
+
+    async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> _RouteResult:
+        return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+
+    monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+
     # raise_server_exceptions=False so a 500 is asserted as an HTTP response
     # (the opaque-body contract) rather than re-raised by the client.
     with TestClient(app, raise_server_exceptions=False) as test_client:

@@ -163,6 +163,33 @@ def client(
 
     monkeypatch.setattr(chat_module, "tenant_session", _make_tenant_session)
 
+    # Mock the LLM router to avoid real API calls for intent classification.
+    from app.retrieval.llm_router import RouteResult as _RouteResult
+
+    async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> _RouteResult:
+        from app.retrieval.intent import normalize_for_classification
+        import re as _re
+        q = normalize_for_classification(query)
+        if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
+            return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:how\s+many|number\s+of)\s+(?:uploaded\s+)?(?:my\s+|the\s+|this\s+)?(?:own\s+)?(?:members?|documents?|files?|uploaded)", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:list|show)\s+(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?(?:my\s+|the\s+|this\s+)?(?:uploaded\s+)?(?:members?|documents?|files?)\b", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"^what\s+(?:are|is)\s+(?:the\s+|my\s+)?(?:uploaded\s+)?(?:documents?|files?)\s*$", q):
+            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
+        if _re.search(r"^how\s+many\s+are\s+(?:invited|pending|active|confirmed|removed)\s*$", q):
+            return _RouteResult(route="METADATA", confidence=0.85, reasoning="test")
+        if _re.search(r"(?:who\s+can|can\s+(?:i|we|members?)\s+(?:upload|add|invite|approve|delete))", q):
+            return _RouteResult(route="PERMISSIONS", confidence=0.9, reasoning="test")
+        if _re.search(r"(?:monitored|tracked|watched|logging)", q):
+            return _RouteResult(route="APP_HELP", confidence=0.8, reasoning="test")
+        if _re.search(r"(?:capital\s+of|weather|joke|python|javascript|\d\s+\d)", q):
+            return _RouteResult(route="OUT_OF_SCOPE", confidence=0.95, reasoning="test")
+        return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+
+    monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client, principal
     app.dependency_overrides.clear()
@@ -188,7 +215,8 @@ class TestGroupAMetadata:
         # Stub: 3 docs created this month.
         # No history lookup needed — metadata intents skip rewrite.
         session = _FakeSession(responses=[
-            _FakeResult(scalar=3),      # metadata count query
+            _FakeResult(scalar=None),  # _load_recent_history: no session found
+            _FakeResult(scalar=3),     # metadata count query
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 
@@ -254,7 +282,8 @@ class TestGroupAMetadata:
         # Stub: 3 ACTIVE members.
         # No history lookup needed — metadata intents skip rewrite.
         session = _FakeSession(responses=[
-            _FakeResult(scalar=3),      # member count query
+            _FakeResult(scalar=None),  # _load_recent_history: no session found
+            _FakeResult(scalar=3),     # member count query
         ])
         monkeypatch.setattr(chat_module, "tenant_session", lambda **kw: session)
 

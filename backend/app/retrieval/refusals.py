@@ -40,25 +40,32 @@ class ResponseReason(str, Enum):
 _RESPONSES: dict[ResponseReason, str] = {
     ResponseReason.NO_EVIDENCE: (
         "I couldn't find any relevant information about that topic "
-        "in your uploaded documents."
+        "in your workspace's approved documents. This might mean the "
+        "question is outside the scope of what's been uploaded, or the "
+        "information hasn't been added yet."
     ),
     ResponseReason.NOT_RELEVANT: (
         "Your workspace contains documents, but none of them contain "
         "information about that specific topic. Try rephrasing your question "
-        "or check that the relevant document has been uploaded."
+        "or check that the relevant document has been uploaded and approved."
     ),
     ResponseReason.OUT_OF_SCOPE: (
-        "That's outside what I can help with here — I answer questions about "
-        "your workspace documents and available workspace information."
+        "That's outside what I can help with here. I answer questions "
+        "about your workspace's approved documents and workspace information "
+        "like members, documents, and roles. I can't help with general "
+        "knowledge questions unrelated to your workspace."
     ),
     ResponseReason.NEEDS_CLARIFICATION: (
-        "I'm not sure what you're referring to. Could you clarify your question?"
+        "I'm not sure what you're referring to. Could you clarify your "
+        "question or provide more detail? For example, are you asking about "
+        "a specific document, a member, or something else in your workspace?"
     ),
     ResponseReason.APP_HELP_UNAVAILABLE: (
         "I don't have authoritative information about that."
     ),
     ResponseReason.IDENTITY_UNAVAILABLE: (
-        "I don't have your name available."
+        "I can see you're a member of this workspace, but I don't have your "
+        "display name available from the current session."
     ),
     ResponseReason.METADATA_EMPTY: (
         "No results found for that query."

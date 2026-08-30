@@ -137,4 +137,66 @@ def prepare_document(
     return PreparedDocument(chunks=prepared, word_count=word_count, page_count=page_count)
 
 
-__all__ = ["IngestionError", "PreparedChunk", "PreparedDocument", "prepare_document"]
+async def generate_document_description(
+    chunks: list[PreparedChunk],
+    *,
+    filename: str,
+) -> str | None:
+    """Generate a 2-4 sentence description of a document using the LLM.
+
+    Uses the first few chunks (up to ~2000 chars) as context.  Returns None
+    if the LLM call fails — description generation is best-effort and must
+    never block ingestion.
+    """
+    # Build a concise text sample from the first 3 chunks.
+    sample_parts: list[str] = []
+    char_budget = 2000
+    for chunk in chunks[:3]:
+        sample_parts.append(chunk.content)
+        if sum(len(p) for p in sample_parts) >= char_budget:
+            break
+    sample = "\n".join(sample_parts)[:char_budget]
+
+    if not sample.strip():
+        return None
+
+    try:
+        from app.llm.base import Completion, Message
+        from app.llm.fallback import FallbackChainProvider
+
+        provider = FallbackChainProvider()
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    "You generate short document descriptions. "
+                    "Given the beginning of a document, write a 2-4 sentence summary "
+                    "of what the document is about. Be factual and concise. "
+                    "Do NOT use markdown. Return ONLY the summary text."
+                ),
+            ),
+            Message(
+                role="user",
+                content=f"Document: {filename}\n\nContent sample:\n{sample}",
+            ),
+        ]
+        completion = Completion()
+        text = ""
+        async for token in provider.stream(messages, completion=completion):
+            text += token
+        description = text.strip()
+        # Basic sanity: the LLM should return a short paragraph.
+        if description and len(description) < 1000:
+            return description
+        return description[:1000] if description else None
+    except Exception as exc:
+        from loguru import logger
+        logger.warning(
+            "Description generation failed for {file}: {error}",
+            file=filename,
+            error=str(exc)[:200],
+        )
+        return None
+
+
+__all__ = ["IngestionError", "PreparedChunk", "PreparedDocument", "generate_document_description", "prepare_document"]

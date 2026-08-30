@@ -1063,15 +1063,23 @@ class TestLLMRouterClassification:
     async def test_who_are_you_routes_to_assistant_identity(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """'who are you' → IDENTITY_ASSISTANT via LLM router."""
-        from app.retrieval.llm_router import RouteResult
+        """'who are you' → IDENTITY_ASSISTANT via regex fast-path.
 
-        async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> RouteResult:
+        This is now caught by the deterministic regex before the LLM router,
+        so the LLM router is never called for this unambiguous case.
+        """
+        llm_calls: list[str] = []
+
+        async def _spy_route(*, query: str, history: list | None = None, **kw: Any) -> Any:
+            llm_calls.append(query)
+            from app.retrieval.llm_router import RouteResult
             return RouteResult(route="IDENTITY_ASSISTANT", confidence=0.95, reasoning="test")
 
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _spy_route)
         intent = await classify_intent("who are you")
         assert intent.category == IntentCategory.IDENTITY_ASSISTANT
+        # Regex fast-path caught it — LLM router was NOT called.
+        assert llm_calls == [], f"LLM router called {len(llm_calls)} time(s), expected 0"
 
     @pytest.mark.asyncio
     async def test_who_iam_talking_ot_routes_to_assistant_identity(
@@ -1191,37 +1199,37 @@ class TestLLMRouterClassification:
     async def test_llm_first_routing_every_message(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Every message goes through the LLM router (LLM-first architecture)."""
-        llm_called: list[str] = []
+        """Deterministic fast-path catches obvious cases; LLM handles ambiguous.
 
-        # Map normalized queries to routes for the mock.
-        # Note: normalize_for_classification strips punctuation, so
-        # "what is 2+2" becomes "what is 2 2".
-        _route_map = {
-            "hello": "GREETING",
-            "what is 2 2": "OUT_OF_SCOPE",
-            "how many members are there": "METADATA",
-        }
+        Obvious cases (greeting, out-of-scope, metadata, identity) are caught
+        by the regex fast-path and never reach the LLM router — this avoids
+        unnecessary LLM latency for unambiguous inputs.  Only ambiguous or
+        complex cases go to the LLM router.
+        """
+        llm_called: list[str] = []
 
         async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> "RouteResult":
             from app.retrieval.llm_router import RouteResult
             llm_called.append(query)
-            route = _route_map.get(query, "DOCUMENT_CONTENT")
-            return RouteResult(route=route, confidence=0.9, reasoning="test")
+            return RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
 
         monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
 
-        # Greeting — goes through LLM router.
+        # Greeting — caught by regex fast-path, LLM NOT called.
         intent = await classify_intent("hello")
         assert intent.category == IntentCategory.GREETING
-        assert len(llm_called) == 1  # LLM router was called
+        assert len(llm_called) == 0  # fast-path short-circuits
 
-        # Out-of-scope — goes through LLM router.
+        # Out-of-scope — caught by regex fast-path, LLM NOT called.
         intent = await classify_intent("what is 2+2")
         assert intent.category == IntentCategory.OUT_OF_SCOPE
-        assert len(llm_called) == 2
+        assert len(llm_called) == 0
 
-        # Metadata — goes through LLM router.
-        intent = await classify_intent("how many members are there")
-        assert intent.category == IntentCategory.WORKSPACE_METADATA
-        assert len(llm_called) == 3  # LLM router called for all three
+        # Identity — caught by regex fast-path, LLM NOT called.
+        intent = await classify_intent("who are you")
+        assert intent.category == IntentCategory.IDENTITY_ASSISTANT
+        assert len(llm_called) == 0
+
+        # Ambiguous case — falls through to LLM router.
+        intent = await classify_intent("tell me something interesting")
+        assert len(llm_called) == 1  # LLM router called for ambiguous

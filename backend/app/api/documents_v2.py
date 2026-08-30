@@ -54,7 +54,9 @@ from sqlalchemy import delete, func, insert, select, update
 from app.api.workspace_deps import assert_workspace_role
 from app.config import get_settings
 from app.db.models import Document, DocumentChunk
-from app.ingestion.pipeline import IngestionError, prepare_document
+from app.ingestion.pipeline import IngestionError, generate_document_description, prepare_document
+from app.retrieval.routing_cache import invalidate_workspace_cache
+from app.retrieval.workspace_knowledge import invalidate_workspace_knowledge
 from app.security.auth import CurrentPrincipal
 from app.security.rate_limit import UPLOAD_RATE_LIMIT, limiter
 from app.security.rls import tenant_session
@@ -80,6 +82,7 @@ class DocumentResponse(BaseModel):
     checksum: str
     status: str
     error_message: str | None = None
+    description: str | None = None
     approved_at: datetime | None = None
     created_at: datetime
 
@@ -160,6 +163,16 @@ async def _ensure_unique_in_workspace(session, workspace_id: uuid.UUID, checksum
             status_code=status.HTTP_409_CONFLICT,
             detail="A document with identical content already exists in this workspace.",
         )
+
+
+def _invalidate_workspace_caches(workspace_id: uuid.UUID) -> None:
+    """Invalidate routing cache and workspace knowledge after a document change.
+
+    Call after any successful document state change (upload, approve, reject,
+    delete) so the LLM router and knowledge context reflect the new reality.
+    """
+    invalidate_workspace_cache(workspace_id)
+    invalidate_workspace_knowledge(workspace_id)
 
 
 @router.post(
@@ -303,6 +316,24 @@ async def upload_document(
         n=len(prepared.chunks),
         ws=workspace_id,
     )
+
+    # Generate description asynchronously — best-effort, never blocks ingestion.
+    description = await generate_document_description(
+        prepared.chunks,
+        filename=row.filename,
+    )
+    if description:
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
+            await session.execute(
+                update(Document)
+                .where(Document.id == row.id)
+                .values(description=description)
+            )
+        logger.debug(
+            "Generated description for {file}", file=row.filename,
+        )
+
+    _invalidate_workspace_caches(workspace_id)
     return UploadAcceptedResponse(
         document=DocumentResponse.model_validate(row),
         chunk_count=len(prepared.chunks),
@@ -496,6 +527,24 @@ async def approve_document(
         n=len(prepared.chunks),
         ws=workspace_id,
     )
+
+    # Generate description asynchronously — best-effort, never blocks approval.
+    description = await generate_document_description(
+        prepared.chunks,
+        filename=updated.filename,
+    )
+    if description:
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
+            await session.execute(
+                update(Document)
+                .where(Document.id == document_id)
+                .values(description=description)
+            )
+        logger.debug(
+            "Generated description for approved doc {doc}", doc=document_id,
+        )
+
+    _invalidate_workspace_caches(workspace_id)
     return UploadAcceptedResponse(
         document=DocumentResponse.model_validate(updated),
         chunk_count=len(prepared.chunks),
@@ -565,6 +614,7 @@ async def reject_document(
         ws=workspace_id,
         user=principal.user_id,
     )
+    _invalidate_workspace_caches(workspace_id)
     return DocumentResponse.model_validate(updated)
 
 
@@ -622,6 +672,7 @@ async def delete_document(principal: CurrentPrincipal, document_id: uuid.UUID) -
         ws=workspace_id,
         user=principal.user_id,
     )
+    _invalidate_workspace_caches(workspace_id)
 
 
 __all__ = ["router"]

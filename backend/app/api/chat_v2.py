@@ -48,6 +48,7 @@ from app.retrieval.intent import (
     IntentCategory,
     MetadataSubIntent,
     QueryShape,
+    _DOC_SPECIFIC_DESCRIPTION_PATTERN,
     classify_intent,
     classify_intent_regex,
     classify_query_shape,
@@ -444,6 +445,83 @@ async def _answer_metadata_question(
                 return "You are not an active member of this workspace.", None
             return f"Your role in this workspace is {rows[0].role}.", None
 
+        if sub == MetadataSubIntent.COMPANY_NAME:
+            from app.db.models import Workspace as WorkspaceModel
+            ws_row = (
+                await db.execute(
+                    select(WorkspaceModel.name).where(
+                        WorkspaceModel.id == workspace_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if ws_row:
+                return f"Your workspace is named \"{ws_row}\".", None
+            return "This workspace does not have a name configured.", None
+
+        if sub == MetadataSubIntent.DOC_DESCRIPTION:
+            # Check if a specific document name was mentioned.
+            desc_match = _DOC_SPECIFIC_DESCRIPTION_PATTERN.search(question)
+            target_name = desc_match.group(1).strip() if desc_match else None
+
+            if target_name:
+                # Typo-tolerant filename match for a specific document.
+                from app.retrieval.hybrid import _normalize_filename_for_match
+                norm_target = _normalize_filename_for_match(target_name)
+                doc_rows = (
+                    await db.execute(
+                        select(Document.filename, Document.description)
+                        .where(
+                            Document.workspace_id == workspace_id,
+                            Document.status == "READY",
+                        )
+                    )
+                ).all()
+                best_match = None
+                best_score = 0.0
+                for row in doc_rows:
+                    norm_doc = _normalize_filename_for_match(row.filename)
+                    # Simple containment check: if normalized target is contained in
+                    # doc name or vice versa.
+                    if norm_target in norm_doc or norm_doc in norm_target:
+                        score = len(norm_target) / max(len(norm_doc), 1)
+                        if score > best_score:
+                            best_score = score
+                            best_match = row
+                if best_match:
+                    if best_match.description:
+                        return best_match.description, None
+                    return (
+                        f"The document \"{best_match.filename}\" does not have a generated description yet.",
+                        ResponseReason.METADATA_EMPTY,
+                    )
+                return (
+                    f"I could not find a document matching \"{target_name}\" in this workspace.",
+                    ResponseReason.METADATA_EMPTY,
+                )
+
+            # No specific document — return descriptions for all.
+            doc_rows = (
+                await db.execute(
+                    select(Document.filename, Document.description)
+                    .where(
+                        Document.workspace_id == workspace_id,
+                        Document.status == "READY",
+                    )
+                    .order_by(Document.created_at.desc())
+                )
+            ).all()
+            if not doc_rows:
+                return "You have no uploaded documents in this workspace.", ResponseReason.METADATA_EMPTY
+
+            items = []
+            for row in doc_rows:
+                if row.description:
+                    items.append(f"**{row.filename}**: {row.description}")
+                else:
+                    items.append(f"**{row.filename}**: No description available.")
+            header = f"Here are the descriptions of your {len(doc_rows)} document(s):"
+            return header + "\n\n" + "\n\n".join(items), None
+
     return "I could not determine what metadata you are asking about.", ResponseReason.METADATA_EMPTY
 
 
@@ -578,6 +656,50 @@ def _answer_greeting(*, question: str) -> str:
 
     # Default greeting
     return "Hello! I'm your company knowledge assistant. How can I help you today?"
+
+
+# ---------------------------------------------------------------------------
+# General conversation handler
+# ---------------------------------------------------------------------------
+
+
+def _answer_general_conversation(*, question: str) -> str:
+    """Return a friendly response for casual/general conversation.
+
+    No database query, no retrieval, no LLM call.
+    Handles statements like "I have a doubt", "can you help me", casual
+    chat that doesn't fit any specific lane.
+    """
+    q = question.strip().lower()
+
+    # Specific patterns
+    if re.search(r"(?:i\s+have\s+(?:an?\s+)?(?:doubt|question|query|issue|problem|concern))", q):
+        return (
+            "Of course! I'm here to help. Could you tell me more about what"
+            " you'd like to know? I can answer questions about your workspace's"
+            " approved documents, help with member or document counts, and more."
+        )
+
+    if re.search(r"(?:can\s+you\s+(?:help|assist|guide)\s+me)", q):
+        return (
+            "Absolutely! I can help you find information from your workspace's"
+            " approved documents. Just ask a question about your documents,"
+            " policies, or workspace — I'll search and answer with citations."
+        )
+
+    if re.search(r"(?:i\s+need\s+(?:some\s+)?(?:help|assistance|guidance))", q):
+        return (
+            "I'm here to help! I can answer questions about your workspace's"
+            " approved documents, list documents, show member counts, and more."
+            " What would you like to know?"
+        )
+
+    # Default general conversation
+    return (
+        "I'm a company knowledge assistant. I help you find information from"
+        " your workspace's approved documents. Try asking a question about"
+        " your documents, policies, or workspace members!"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1017,6 +1139,13 @@ async def _stream_chat(
         answer = _answer_greeting(question=effective_query)
         logger.info(
             "intent=greeting workspace={ws} retrieval_called=False",
+            ws=workspace_id,
+        )
+
+    elif intent.category == IntentCategory.GENERAL_CONVERSATION:
+        answer = _answer_general_conversation(question=effective_query)
+        logger.info(
+            "intent=general_conversation workspace={ws} retrieval_called=False",
             ws=workspace_id,
         )
 
@@ -1496,6 +1625,15 @@ async def grounded_chat(
         answer = _answer_greeting(question=effective_query)
         logger.info(
             "intent=greeting workspace={ws} retrieval_called=False", ws=workspace_id,
+        )
+        return GroundedChatResponse(
+            answer=answer, grounded=True, insufficient_evidence=False, sources=[],
+        )
+
+    if intent.category == IntentCategory.GENERAL_CONVERSATION:
+        answer = _answer_general_conversation(question=effective_query)
+        logger.info(
+            "intent=general_conversation workspace={ws} retrieval_called=False", ws=workspace_id,
         )
         return GroundedChatResponse(
             answer=answer, grounded=True, insufficient_evidence=False, sources=[],

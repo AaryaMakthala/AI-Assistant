@@ -36,6 +36,31 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings = get_settings()
     logger.info("Starting up in {environment} mode", environment=settings.environment)
+
+    # Auto-apply pending Alembic migrations on startup so a missed
+    # ``alembic upgrade head`` can never silently break an endpoint.
+    if settings.environment != "test":
+        try:
+            import subprocess
+            import sys
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                # Only log if there were pending migrations (non-empty stdout).
+                output = result.stdout.strip()
+                if output and "Running upgrade" in output:
+                    logger.info("Applied pending migrations: {output}", output=output)
+            else:
+                logger.error(
+                    "Migration failed: {stderr}", stderr=result.stderr[:500],
+                )
+        except Exception as exc:
+            logger.error("Migration runner error: {error}", error=str(exc)[:200])
+
     yield
     await dispose_engine()
     logger.info("Shutdown complete")

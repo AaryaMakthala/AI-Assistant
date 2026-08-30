@@ -49,7 +49,7 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
-        "model": "google/gemini-2.0-flash-001",
+        "model": "google/gemini-2.5-flash",
     },
 }
 

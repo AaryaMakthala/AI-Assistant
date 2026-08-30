@@ -43,6 +43,8 @@ ROUTE_NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
 ROUTE_CONVERSATION_HISTORY = "CONVERSATION_HISTORY"
 # App-help route (questions about the application itself).
 ROUTE_APP_HELP = "APP_HELP"
+# General conversation route (casual chat, greetings, etc.).
+ROUTE_GENERAL_CONVERSATION = "GENERAL_CONVERSATION"
 
 # All valid route strings.
 _VALID_ROUTES = frozenset({
@@ -56,6 +58,7 @@ _VALID_ROUTES = frozenset({
     ROUTE_NEEDS_CLARIFICATION,
     ROUTE_CONVERSATION_HISTORY,
     ROUTE_APP_HELP,
+    ROUTE_GENERAL_CONVERSATION,
 })
 
 # Below this confidence threshold, force NEEDS_CLARIFICATION.
@@ -108,6 +111,9 @@ classify the message into exactly ONE of these routes:
   whether it tracks/monitors activity, features and capabilities.
 - OUT_OF_SCOPE: General knowledge unrelated to the workspace
   (math, geography, weather, programming, jokes, etc.).
+- GENERAL_CONVERSATION: Casual chat, statements like "I have a doubt",
+  "can you help me", testing messages, or any non-specific interaction that
+  doesn't fit another category.
 - NEEDS_CLARIFICATION: Genuinely ambiguous — cannot determine the route.
 
 Rules:
@@ -118,8 +124,18 @@ Rules:
    the assistant, not themselves).
 4. "who is admin" / "who is the owner" → METADATA (a workspace data question).
 5. "can I add someone" / "can I upload" → PERMISSIONS.
-6. "what are the file names" / "what files are present" → METADATA (document listing).
+6. "what are the file names" / "what files are present" / "what are the
+   document names" → METADATA (document listing).
 7. When unsure, prefer NEEDS_CLARIFICATION over guessing.
+8. Document-name-aware routing: If the user's message mentions or approximates
+   a document title listed in the workspace context above (even with typos),
+   route to DOCUMENT_CONTENT — the retrieval pipeline will find the matching
+   document. For example, "what does devops contain" targets the DevOps
+   document, "tell me about the resume" targets the resume, etc.
+9. Vague content questions ("what does it say", "what about that", "tell me
+   about it") with no document name or topic should be NEEDS_CLARIFICATION
+   if the context doesn't resolve the reference, or DOCUMENT_CONTENT if the
+   conversation history makes the target clear.
 
 Return ONLY:
 {{"route": "<route>", "reasoning": "<brief>", "confidence": <0.0-1.0>}}

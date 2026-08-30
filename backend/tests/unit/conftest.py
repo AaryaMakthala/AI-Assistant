@@ -212,6 +212,10 @@ async def smart_mock_route(
     if _re.search(r"(?:what\s+(?:are|were)\s+(?:the\s+)?(?:questions?|things?)|what\s+(?:did|was)\s+(?:my|the)\s+(?:previous|last)|what\s+did\s+(?:i|we)\s+(?:ask|say)|what\s+did\s+you\s+(?:just\s+)?(?:answer|say)|what\s+have\s+(?:i|we)\s+(?:been|discussed|talked)|show\s+(?:me\s+)?(?:my\s+)?(?:previous|recent|last))", q):
         return RouteResult(route="CONVERSATION_HISTORY", confidence=0.9, reasoning="mock")
 
+    # Vague content questions — ask for clarification (must be BEFORE 'about' pattern)
+    if _re.search(r"(?:what\s+(?:theu|they|it|does\s+it)\s+(?:say|sau|mean|about))", q):
+        return RouteResult(route="NEEDS_CLARIFICATION", confidence=0.8, reasoning="mock")
+
     # Topic-qualified content questions go to DOCUMENT_CONTENT
     if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
         return RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="mock")
@@ -263,6 +267,16 @@ async def smart_mock_route(
 
     # Metadata — page count
     if _re.search(r"(?:how\s+many|number\s+of|total)\s+\w*\s*(?:pages?|sheets?)", q):
+        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+
+    # Metadata — document description/summary
+    if _re.search(r"(?:description|summary|summery|descrption|descriction)", q):
+        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+
+    # Metadata — company/workspace name
+    if _re.search(r"(?:company|workspace|organization|org|team)\s+(?:name|is\s+(?:called|named))", q):
+        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+    if _re.search(r"what(?:'?s|\s+is)\s+(?:the\s+)?(?:name\s+(?:of|for)\s+(?:the\s+|this\s+|our\s+)?)?(?:company|workspace|organization|org|team)", q):
         return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
 
     # Default: document content (RAG path)

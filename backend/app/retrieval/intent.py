@@ -65,9 +65,11 @@ class MetadataSubIntent(str, Enum):
     DOC_LIST = "doc_list"
     DOC_COUNT = "doc_count"
     DOC_PAGE_COUNT = "doc_page_count"
+    DOC_DESCRIPTION = "doc_description"
     MEMBER_COUNT = "member_count"
     MEMBER_LIST = "member_list"
     ROLE = "role"
+    COMPANY_NAME = "company_name"
 
 
 class ConversationHistorySubIntent(str, Enum):
@@ -259,6 +261,43 @@ _IDENTITY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Identity: greeting + name statement ("hi my name is X", "hey my name is Y")
+# Must be checked BEFORE the greeting pattern to avoid "hi" matching as greeting.
+_GREETING_NAME_PATTERN = re.compile(
+    r"^(?:hi+|hey+|hello+)\s+.*?\bmy\s+name\b",
+    re.IGNORECASE,
+)
+
+# General conversation: casual statements/questions not matching any specific lane.
+# "i have a doubt", "i need help", "can you assist me", etc.
+_GENERAL_CONVERSATION_PATTERNS = [
+    re.compile(r"^\s*(?:i\s+have\s+(?:an?\s+)?(?:doubt|question|query|issue|problem|concern))\b", re.IGNORECASE),
+    re.compile(r"\b(?:can\s+you\s+(?:help|assist|guide)\s+me)\b", re.IGNORECASE),
+    re.compile(r"\b(?:i\s+need\s+(?:some\s+)?(?:help|assistance|guidance))\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:hey\s+(?:there|buddy|bot|assistant))\s*[!.?]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:what(?:'?s|\s+is)\s+up)\s*[!.?]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:sup)\s*[!.?]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:yo+)\s*[!.?]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:um+|umm+|hmm+|uh+)\s*[!.?]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:ok(?:ay)?|sure|yep|nope|nah|cool|nice|great|awesome|alright)\s*[!.?]*\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:test(?:ing)?|ping)\s*[!.?]*\s*$", re.IGNORECASE),
+]
+
+# Out-of-scope: code/programming requests (catches typos like "pyathon")
+_CODE_REQUEST_PATTERN = re.compile(
+    r"\bwrite\s+(?:me\s+)?(?:a\s+)?\w*\s*(?:code|program|script|function|game|app)\b"
+    r"|(?:create|make|build|generate)\s+(?:me\s+)?(?:a\s+)?\w*\s*(?:code|program|script|function|game|app)\b",
+    re.IGNORECASE,
+)
+
+# Metadata: document count with common typos ("how manu", "how manyy", etc.)
+_DOC_COUNT_TYPO_PATTERN = re.compile(
+    r"(?:how\s+man+[uy]+|how\s+many|number\s+of|count\s+of|total\s+(?:number\s+of)?)\s+"
+    r"(?:uploaded\s+)?(?:my\s+|the\s+|this\s+)?(?:own\s+)?"
+    r"(?:files|docs?|documents?)\s*(?:there|are\s+there|do\s+i\s+have)?\s*$",
+    re.IGNORECASE,
+)
+
 # --- App-help patterns (questions about the application itself) ---
 _APP_HELP_PATTERN = re.compile(
     r"(?:what\s+(?:does|do)\s+(?:this|the)\s+(?:chatbot|assistant|app(?:lication)?|bot)\s+"
@@ -388,6 +427,15 @@ _DOC_LIST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Typo-tolerant variant: catches "what are doucuments names"
+_DOC_LIST_TYPO_PATTERN = re.compile(
+    r"what\s+(?:are\s+(?:the\s+)?)?"
+    r"(?:my\s+|the\s+|this\s+)?"
+    r"(?:files|docs?|doucuments?|documents?)"
+    r"\s+names?\s*$",
+    re.IGNORECASE,
+)
+
 _DOC_PAGE_COUNT_PATTERN = re.compile(
     r"(?:how\s+many|number\s+of|total)\s+"
     r"(?:pages?|sheets?)\s+"
@@ -402,7 +450,40 @@ _ROLE_PATTERN = re.compile(
     r"(?:role|access|permission|level)"
     r"|what(?:'?s|\s+is)\s+my\s+(?:role|access|permission|level)",
     re.IGNORECASE,
-)# ---------------------------------------------------------------------------
+)
+
+# Description/summary patterns: "description", "give me a description of each document",
+# "summary of each document", "summary of [specific doc name]".
+_DOC_DESCRIPTION_PATTERN = re.compile(
+    r"(?:can\s+you\s+)?(?:give\s+(?:me\s+)?(?:a\s+)?)?"
+    r"(?:description|summary|summery|descrption|descriction)"
+    r"\s*(?:of|for|about|on)?\s*"
+    r"(?:\d+\s+(?:lines?|sentences?|paragraphs?)\s+(?:of\s+)?)?"
+    r"(?:each|every|all|the|this|my)?\s*"
+    r"(?:uploaded\s+)?(?:own\s+)?(?:document|file|doc)?s?\s*$",
+    re.IGNORECASE,
+)
+
+# Company name pattern: "what is the name of this company", "what's our company name".
+_COMPANY_NAME_PATTERN = re.compile(
+    r"what(?:'?s|\s+is)\s+(?:the\s+)?(?:name\s+(?:of\s+(?:the\s+|this\s+|our\s+)?)?"
+    r"(?:company|workspace|organization|org|team)"
+    r"|(?:the\s+|this\s+|our\s+)?(?:company|workspace|organization|org|team)\s+name)"
+    r"|(?:what\s+(?:is|are)\s+(?:the\s+)?(?:company|workspace|organization|org|team)\s+name)"
+    r"|(?:company|workspace|organization|org|team)\s+(?:is\s+)?(?:called|named)",
+    re.IGNORECASE,
+)
+
+# Specific document summary: "summary of [docname]", "description of [docname]".
+_DOC_SPECIFIC_DESCRIPTION_PATTERN = re.compile(
+    r"(?:give\s+(?:me\s+)?(?:a\s+)?)?"
+    r"(?:description|summary|summery|descrption|descriction)"
+    r"\s+(?:of|for|about|on)\s+"
+    r"(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
 # Text normalization for classification
 # ---------------------------------------------------------------------------
 
@@ -479,6 +560,7 @@ _LLM_ROUTE_TO_CATEGORY = {
     "CONVERSATION_HISTORY": IntentCategory.CONVERSATION_HISTORY,
     "APP_HELP": IntentCategory.APP_HELP,
     "OUT_OF_SCOPE": IntentCategory.OUT_OF_SCOPE,
+    "GENERAL_CONVERSATION": IntentCategory.GENERAL_CONVERSATION,
     "NEEDS_CLARIFICATION": IntentCategory.AMBIGUOUS,
 }
 
@@ -572,6 +654,16 @@ def classify_intent_regex(query: str) -> Intent:
 
     q_normalized = normalize_for_classification(q)
 
+    # --- 0a. Greeting + name statement ("hi my name is X") — before greeting ---
+    # Must be checked BEFORE the greeting pattern because "hi my name is aarya"
+    # starts with "hi" which would match as a greeting.
+    if _GREETING_NAME_PATTERN.search(q) or _GREETING_NAME_PATTERN.search(q_normalized):
+        return Intent(
+            category=IntentCategory.IDENTITY_USER,
+            skip_rewrite=True,
+            reason="greeting_name_statement",
+        )
+
     # --- 0. Greeting (highest priority — obvious single words/phrases) ---
     if _GREETING_PATTERN.search(q) or _GREETING_PATTERN.search(q_normalized):
         return Intent(
@@ -603,6 +695,34 @@ def classify_intent_regex(query: str) -> Intent:
             skip_rewrite=True,
             reason="general_knowledge",
         )
+
+    # --- 1b. Bot identity fast-path ("who are you", "what are you") ---
+    # Unambiguous — no LLM call needed.  Must be the full question,
+    # not a prefix like "what is you doing" which is a different intent.
+    if re.search(r"(?:who|what)\s+(?:are|is)\s+you\s*[?!.,]*\s*$", q, re.IGNORECASE) or \
+       re.search(r"(?:who|what)\s+(?:are|is)\s+you\s*[?!.,]*\s*$", q_normalized, re.IGNORECASE):
+        return Intent(
+            category=IntentCategory.IDENTITY_ASSISTANT,
+            skip_rewrite=True,
+            reason="identity_bot_fast_path",
+        )
+
+    # --- 1c. Code/programming requests (catches typos like "pyathon") ---
+    if _CODE_REQUEST_PATTERN.search(q) or _CODE_REQUEST_PATTERN.search(q_normalized):
+        return Intent(
+            category=IntentCategory.OUT_OF_SCOPE,
+            skip_rewrite=True,
+            reason="code_request",
+        )
+
+    # --- 1d. General conversation (casual statements/questions) ---
+    for _gcp in _GENERAL_CONVERSATION_PATTERNS:
+        if _gcp.search(q) or _gcp.search(q_normalized):
+            return Intent(
+                category=IntentCategory.GENERAL_CONVERSATION,
+                skip_rewrite=True,
+                reason="general_conversation",
+            )
 
     # NOTE: Identity queries deliberately NOT in the fast-path.
     # "who are you" (IDENTITY_ASSISTANT) and "my name is X" (IDENTITY_USER)
@@ -655,6 +775,15 @@ def classify_intent_regex(query: str) -> Intent:
     doc_intent = _classify_document_metadata(q) or _classify_document_metadata(q_normalized)
     if doc_intent is not None:
         return doc_intent
+
+    # --- 9b. Metadata: document count with common typos ("how manu docs") ---
+    if _DOC_COUNT_TYPO_PATTERN.search(q) or _DOC_COUNT_TYPO_PATTERN.search(q_normalized):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_COUNT,
+            skip_rewrite=True,
+            reason="doc_count_typo",
+        )
 
     # --- 10. No regex match — signal to fall through to LLM router ---
     # Return DOCUMENT_CONTENT as default; the caller replaces this with
@@ -712,6 +841,17 @@ async def classify_intent(
                 status="success",
             )
             return _llm_route_to_intent(cached_result, original_query=query)
+
+    # --- Stage 0.5: Deterministic fast-path for obvious cases ---
+    # These patterns are unambiguous and should never need an LLM call.
+    # Checking them here avoids unnecessary LLM latency and prevents
+    # misclassification for common, obvious inputs.
+    fast_path = classify_intent_regex(query)
+    if fast_path.category not in (
+        IntentCategory.DOCUMENT_CONTENT,  # regex fallback, not a real match
+        IntentCategory.AMBIGUOUS,           # needs LLM disambiguation
+    ):
+        return fast_path
 
     # --- Stage 1: LLM router (primary path) ---
     from app.retrieval.llm_router import route_with_llm
@@ -904,6 +1044,15 @@ def _classify_document_metadata(q: str) -> Intent | None:
             reason="doc_list",
         )
 
+    # Typo-tolerant: "what are doucuments names"
+    if _DOC_LIST_TYPO_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.DOCUMENT_LIST,
+            metadata_sub=MetadataSubIntent.DOC_LIST,
+            skip_rewrite=True,
+            reason="doc_list_typo",
+        )
+
     # Role query.
     if _ROLE_PATTERN.search(q):
         return Intent(
@@ -911,6 +1060,34 @@ def _classify_document_metadata(q: str) -> Intent | None:
             metadata_sub=MetadataSubIntent.ROLE,
             skip_rewrite=True,
             reason="role_query",
+        )
+
+    # Company/workspace name query.
+    if _COMPANY_NAME_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.COMPANY_NAME,
+            skip_rewrite=True,
+            reason="company_name",
+        )
+
+    # Document description/summary (generic: "description", "summary of each document").
+    if _DOC_DESCRIPTION_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
+            skip_rewrite=True,
+            reason="doc_description",
+        )
+
+    # Specific document description: "summary of [docname]".
+    desc_match = _DOC_SPECIFIC_DESCRIPTION_PATTERN.search(q)
+    if desc_match:
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
+            skip_rewrite=True,
+            reason="doc_description_specific",
         )
 
     return None

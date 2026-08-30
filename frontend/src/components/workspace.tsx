@@ -85,7 +85,7 @@ export function Workspace() {
           if (id === chat.sessionId) chat.reset();
           void sessions.remove(id);
         }}
-        onUpload={(file) => void documents.upload(file)}
+        onUpload={(file, description) => void documents.upload(file, description)}
         onDismissUpload={documents.dismissUpload}
         onDeleteDocument={(id) => void documents.remove(id)}
         onReprocessDocument={(id) => void documents.reprocess(id)}

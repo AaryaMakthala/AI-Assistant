@@ -236,10 +236,13 @@ export async function rejectDocument(
 
 export async function uploadDocument(
   file: File,
-  options: RequestOptions = {},
+  options: RequestOptions & { description?: string } = {},
 ): Promise<UploadAcceptedResponse> {
   const form = new FormData();
   form.append("file", file);
+  if (options.description) {
+    form.append("description", options.description);
+  }
 
   // No Content-Type header: the browser must set it so the multipart boundary matches.
   const response = await fetch(`${BASE_URL}/documents`, {
@@ -255,6 +258,8 @@ export async function uploadDocument(
 export interface UploadProgressOptions extends RequestOptions {
   /** Fraction of bytes sent, 0–1. Called repeatedly while the body uploads. */
   onProgress?: (fraction: number) => void;
+  /** Optional description for the document. */
+  description?: string;
 }
 
 /**
@@ -276,6 +281,9 @@ export function uploadDocumentWithProgress(
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append("file", file);
+    if (options.description) {
+      form.append("description", options.description);
+    }
 
     const request = new XMLHttpRequest();
     request.open("POST", `${BASE_URL}/documents`);

@@ -124,7 +124,7 @@ export function useDocuments(token?: string) {
   }, [refresh]);
 
   const upload = useCallback(
-    async (file: File) => {
+    async (file: File, description?: string) => {
       uploadCounter += 1;
       const id = `upload-${uploadCounter}`;
 
@@ -166,6 +166,7 @@ export function useDocuments(token?: string) {
         const accepted = await uploadDocumentWithProgress(file, {
           token,
           onProgress: (fraction) => patch({ progress: fraction }),
+          description,
         });
         // Ingestion is synchronous — if the document is READY, it's done; if PENDING,
         // it waits for owner approval. No polling needed.

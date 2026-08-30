@@ -453,24 +453,26 @@ _ROLE_PATTERN = re.compile(
 )
 
 # Description/summary patterns: "description", "give me a description of each document",
-# "summary of each document", "summary of [specific doc name]".
+# "summary of each document", "summary of each file", "summary of [specific doc name]".
 _DOC_DESCRIPTION_PATTERN = re.compile(
     r"(?:can\s+you\s+)?(?:give\s+(?:me\s+)?(?:a\s+)?)?"
     r"(?:description|summary|summery|descrption|descriction)"
     r"\s*(?:of|for|about|on)?\s*"
     r"(?:\d+\s+(?:lines?|sentences?|paragraphs?)\s+(?:of\s+)?)?"
     r"(?:each|every|all|the|this|my)?\s*"
-    r"(?:uploaded\s+)?(?:own\s+)?(?:document|file|doc)?s?\s*$",
+    r"(?:uploaded\s+)?(?:own\s+)?(?:document|file|doc|files|documents)?s?\s*$",
     re.IGNORECASE,
 )
 
 # Company name pattern: "what is the name of this company", "what's our company name".
+# Includes common typo variants for "company" (comapny, compnay, etc.).
+_COMPANY_WORDS = r"(?:comapny|compnay|company|workspace|organization|org|team)"
 _COMPANY_NAME_PATTERN = re.compile(
     r"what(?:'?s|\s+is)\s+(?:the\s+)?(?:name\s+(?:of\s+(?:the\s+|this\s+|our\s+)?)?"
-    r"(?:company|workspace|organization|org|team)"
-    r"|(?:the\s+|this\s+|our\s+)?(?:company|workspace|organization|org|team)\s+name)"
-    r"|(?:what\s+(?:is|are)\s+(?:the\s+)?(?:company|workspace|organization|org|team)\s+name)"
-    r"|(?:company|workspace|organization|org|team)\s+(?:is\s+)?(?:called|named)",
+    + _COMPANY_WORDS
+    + r"|(?:the\s+|this\s+|our\s+)?" + _COMPANY_WORDS + r"\s+name)"
+    r"|(?:what\s+(?:is|are)\s+(?:the\s+)?" + _COMPANY_WORDS + r"\s+name)"
+    r"|" + _COMPANY_WORDS + r"\s+(?:is\s+)?(?:called|named)",
     re.IGNORECASE,
 )
 
@@ -794,6 +796,121 @@ def classify_intent_regex(query: str) -> Intent:
     )
 
 
+async def _llm_classify_metadata_subintent(
+    query: str,
+    history: list[dict[str, str]] | None = None,
+) -> MetadataSubIntent | None:
+    """LLM fallback for metadata sub-classification when regex doesn't match.
+
+    When the outer LLM router identifies a question as METADATA but the
+    regex sub-classifier can't determine the specific operation (doc_list,
+    doc_count, member_count, etc.), this function asks the LLM — including
+    recent conversation history for pronoun/reference resolution.
+
+    Returns the specific MetadataSubIntent, or None if the LLM call fails.
+    """
+    import json as _json
+
+    from app.llm.base import Completion, Message
+    from app.config import get_settings
+
+    settings = get_settings()
+    chain_count = sum(
+        1
+        for key in (
+            settings.gemini_api_key,
+            settings.groq_api_key,
+            settings.openrouter_api_key,
+        )
+        if key is not None
+    )
+    if chain_count > 1:
+        from app.llm.fallback import FallbackChainProvider
+        provider = FallbackChainProvider()
+    else:
+        from app.llm.generic import GenericProvider
+        provider = GenericProvider()
+
+    system_prompt = (
+        "You are a metadata sub-classifier for a company knowledge assistant.\n"
+        "A question has been identified as a metadata/workspace question.\n"
+        "Determine which specific metadata operation is being requested.\n\n"
+        "Possible operations (use the EXACT key):\n"
+        "- doc_list: List, show, or name document filenames/names.\n"
+        "  Includes: 'what are the documents', 'what documents are there',\n"
+        "  'name any documents', 'documents details', 'what are they' (when\n"
+        "  history shows a document-related question), etc.\n"
+        "- doc_count: Count how many documents exist.\n"
+        "- doc_page_count: Count pages in documents.\n"
+        "- doc_description: Get description or summary of documents.\n"
+        "- member_count: Count workspace members.\n"
+        "- member_list: List workspace members.\n"
+        "- role: Ask about the user's own role/permissions.\n"
+        "- company_name: Ask about the workspace or company name.\n\n"
+        "Rules:\n"
+        "1. If the question uses pronouns (they, those, these, it), use the\n"
+        "   conversation history to resolve what they refer to.\n"
+        "2. 'what are they' after a document count question → doc_list\n"
+        "3. 'what are those documents' / 'what are documents present' → doc_list\n"
+        "4. 'name any two documents' / 'name these 7 documents' → doc_list\n"
+        "5. 'documents details' / 'give me 3 document uploaded' → doc_list\n"
+        "6. Return ONLY a JSON object, no markdown fences.\n\n"
+        'Return: {"sub_intent": "<key>", "confidence": <0.0-1.0>}'
+    )
+
+    # Build context with history for pronoun resolution.
+    context_lines: list[str] = []
+    if history:
+        for turn in history[-4:]:  # last 2 pairs max
+            label = "User" if turn.get("role") == "user" else "Assistant"
+            context_lines.append(f"{label}: {turn.get('content', '')}")
+
+    user_msg = f"User question: {query}"
+    if context_lines:
+        user_msg = (
+            "Recent conversation:\n"
+            + "\n".join(context_lines)
+            + f"\n\n{user_msg}"
+        )
+
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=user_msg),
+    ]
+    completion = Completion()
+
+    try:
+        async for _token in provider.stream(messages, completion=completion):
+            pass
+
+        response_text = completion.text.strip()
+        if not response_text:
+            return None
+
+        # Parse structured output.
+        import re as _re
+        json_match = _re.search(r'\{[^}]+\}', response_text)
+        if json_match:
+            data = _json.loads(json_match.group())
+            sub = str(data.get("sub_intent", "")).strip()
+            try:
+                return MetadataSubIntent(sub)
+            except ValueError:
+                logger.warning(
+                    "LLM metadata sub-classifier returned unknown sub_intent '{sub}'",
+                    sub=sub,
+                )
+                return None
+
+    except Exception as exc:
+        logger.warning(
+            "LLM metadata sub-classifier failed: {error}",
+            error=str(exc)[:200],
+        )
+
+    return None
+
+
 async def classify_intent(
     query: str,
     *,
@@ -896,7 +1013,25 @@ async def classify_intent(
 
     # If the LLM call succeeded, use its result.
     if llm_result.status == "success":
-        return _llm_route_to_intent(llm_result, original_query=query)
+        intent = _llm_route_to_intent(llm_result, original_query=query)
+
+        # If METADATA but no sub-intent resolved via regex, try LLM sub-classification.
+        # This handles pronouns ("what are they") and unusual phrasings
+        # ("documents details", "name any two documents") that regex misses.
+        if (
+            intent.category == IntentCategory.WORKSPACE_METADATA
+            and intent.metadata_sub is None
+        ):
+            sub = await _llm_classify_metadata_subintent(query, history)
+            if sub is not None:
+                return Intent(
+                    category=intent.category,
+                    metadata_sub=sub,
+                    skip_rewrite=True,
+                    reason=f"llm_metadata_sub:{sub.value}",
+                )
+
+        return intent
 
     # --- Stage 2: Regex fallback (LLM failed) ---
     logger.warning(

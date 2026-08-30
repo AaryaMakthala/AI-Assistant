@@ -213,8 +213,25 @@ async def smart_mock_route(
         return RouteResult(route="CONVERSATION_HISTORY", confidence=0.9, reasoning="mock")
 
     # Vague content questions — ask for clarification (must be BEFORE 'about' pattern)
-    if _re.search(r"(?:what\s+(?:theu|they|it|does\s+it)\s+(?:say|sau|mean|about))", q):
+    if _re.search(r"(?:what\s+(?:theu|it|does\s+it)\s+(?:say|sau|mean|about))", q):
         return RouteResult(route="NEEDS_CLARIFICATION", confidence=0.8, reasoning="mock")
+
+    # Bare pronoun references — check history first for document context.
+    # 'what are they' after a document question → METADATA (doc_list).
+    bare_pronoun_match = _re.search(
+        r"^(?:wh(?:at|o|ere|en|ich)|hwat|ho(?:w)?)\s+(?:are|is|was|were)\s+(?:they|them|it|he|she|that|this)\s*[?.!]*\s*$",
+        q,
+    )
+    if bare_pronoun_match:
+        # Check if history has a recent document-related question.
+        _DOC_HISTORY_RE = _re.compile(
+            r"(?:document|file|upload|doc|count)\s*", _re.IGNORECASE,
+        )
+        if history:
+            for turn in history[-4:]:
+                if turn.get("role") == "user" and _DOC_HISTORY_RE.search(turn.get("content", "")):
+                    return RouteResult(route="METADATA", confidence=0.85, reasoning="mock_pronoun_doc_history")
+        return RouteResult(route="NEEDS_CLARIFICATION", confidence=0.85, reasoning="mock")
 
     # Topic-qualified content questions go to DOCUMENT_CONTENT
     if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
@@ -276,7 +293,21 @@ async def smart_mock_route(
     # Metadata — company/workspace name
     if _re.search(r"(?:company|workspace|organization|org|team)\s+(?:name|is\s+(?:called|named))", q):
         return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
-    if _re.search(r"what(?:'?s|\s+is)\s+(?:the\s+)?(?:name\s+(?:of|for)\s+(?:the\s+|this\s+|our\s+)?)?(?:company|workspace|organization|org|team)", q):
+    if _re.search(r"what(?:'?s|\s+is)\s+(?:the\s+)?(?:(?:name\s+(?:of|for)\s+(?:the\s+|this\s+|our\s+)?)?(?:company|workspace|organization|org|team)(?:\s+name)?|(?:company|workspace|organization|org|team)\s+name)", q):
+        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+
+    # Metadata — broad document listing phrasings ("what are documents present",
+    # "documents details", "give me 3 document uploaded", etc.)
+    if _re.search(
+        r"(?:what\s+(?:are|is)\s+(?:.*\s+)?(?:document|file|doc|doucument)s?\s+(?:present|there|presents?)\b"
+        r"|document(?:s)?\s+detail"
+        r"|give\s+(?:me\s+)?(?:\d+\s+)?(?:.*\s+)?(?:document|file|doc)s?\s+upload"
+        r"|(?:name|list|show)\s+(?:any|these|those|the|all|\d+)\s+.*(?:document|file|doc)s?"
+        r"|what\s+(?:are|is)\s+(?:.*\s+)?(?:recent|latest|newest)\s+(?:document|file|doc)s?"
+        r"|what\s+(?:are|is)\s+(?:those|these|the|my|all)\s+(?:document|file|doc)s?"
+        r")",
+        q,
+    ):
         return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
 
     # Default: document content (RAG path)

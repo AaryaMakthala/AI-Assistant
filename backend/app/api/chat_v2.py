@@ -463,6 +463,17 @@ async def _answer_metadata_question(
             desc_match = _DOC_SPECIFIC_DESCRIPTION_PATTERN.search(question)
             target_name = desc_match.group(1).strip() if desc_match else None
 
+            # Reject quantifier phrases as "specific" document names.
+            # "summary of each file" → "each file" is not a real document name.
+            _QUANTIFIER_ONLY_RE = re.compile(
+                r"^(?:(?:each|every|all|the|this|my|some|any)\s+)*"
+                r"(?:uploaded\s+)?(?:own\s+)?"
+                r"(?:document|file|doc|files|documents)s?$",
+                re.IGNORECASE,
+            )
+            if target_name and _QUANTIFIER_ONLY_RE.match(target_name):
+                target_name = None
+
             if target_name:
                 # Typo-tolerant filename match for a specific document.
                 from app.retrieval.hybrid import _normalize_filename_for_match

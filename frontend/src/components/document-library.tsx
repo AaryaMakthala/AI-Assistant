@@ -52,7 +52,7 @@ export function DocumentLibrary({
   currentUserId?: string;
   /** Owners and admins only. Presentation; the server gates the action independently. */
   canManageOrg?: boolean;
-  onUpload: (file: File) => void;
+  onUpload: (file: File, description?: string) => void;
   onDismissUpload: (id: string) => void;
   onDelete: (id: string) => void;
   onReprocess: (id: string) => void;
@@ -63,6 +63,7 @@ export function DocumentLibrary({
   const [section, setSection] = useState<Section>("company");
   const [isDragging, setIsDragging] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
+  const [uploadDescription, setUploadDescription] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
 
@@ -84,7 +85,9 @@ export function DocumentLibrary({
 
   const handleFiles = (files: FileList | null) => {
     if (!files || isUploadDisabled) return;
-    for (const file of Array.from(files)) onUpload(file);
+    const desc = uploadDescription.trim() || undefined;
+    for (const file of Array.from(files)) onUpload(file, desc);
+    setUploadDescription("");
   };
 
   // Uploads still in flight are listed separately above the library.
@@ -174,6 +177,14 @@ export function DocumentLibrary({
             ? "Visible to everyone in your organization"
             : "Visible only to you"}
         </p>
+        <input
+          type="text"
+          placeholder="Optional description…"
+          value={uploadDescription}
+          onChange={(e) => setUploadDescription(e.target.value)}
+          disabled={isUploadDisabled}
+          className="mt-2 w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+        />
         <input
           ref={inputRef}
           type="file"

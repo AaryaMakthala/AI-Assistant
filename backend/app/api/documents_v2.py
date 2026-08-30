@@ -36,11 +36,12 @@ import asyncio
 import hashlib
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
@@ -186,6 +187,7 @@ async def upload_document(
     request: Request,  # noqa: ARG001 — required by slowapi's decorator
     principal: CurrentPrincipal,
     file: Annotated[UploadFile, File(description="PDF, DOCX or CSV")],
+    description: Annotated[str | None, Form(description="Optional description for the document")] = None,
 ) -> UploadAcceptedResponse:
     """Validate, store, and ingest a document for the principal's workspace.
 
@@ -202,10 +204,12 @@ async def upload_document(
 
     is_owner = role == "OWNER"
 
+    user_desc = description.strip() if description else None
     if not is_owner:
         # Member upload: store the row PENDING, nothing more. No extraction, no
         # chunks — approval (Phase 4) is what makes a member's upload searchable,
         # and RLS structurally forbids this request from doing it itself.
+        # If a description was provided, store it with the document.
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
             await _ensure_unique_in_workspace(session, workspace_id, checksum)
             row = (
@@ -220,6 +224,7 @@ async def upload_document(
                         checksum=checksum,
                         file_data=data,
                         status="PENDING",
+                        description=user_desc,
                     )
                     .returning(Document)
                 )
@@ -274,6 +279,9 @@ async def upload_document(
     # Success: the document row and its chunks are written atomically, with the
     # status READY set before the chunk inserts (document_chunks_write policy
     # requires a READY document, same-transaction visibility).
+    # If the user provided a description at upload time, store it directly
+    # and skip auto-generation.
+    user_desc = description.strip() if description else None
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
         await _ensure_unique_in_workspace(session, workspace_id, checksum)
         row = (
@@ -288,6 +296,7 @@ async def upload_document(
                     checksum=checksum,
                     file_data=data,
                     status="READY",
+                    description=user_desc,
                 )
                 .returning(Document)
             )
@@ -318,19 +327,21 @@ async def upload_document(
     )
 
     # Generate description asynchronously — best-effort, never blocks ingestion.
-    description = await generate_document_description(
-        prepared.chunks,
-        filename=row.filename,
-    )
-    if description:
-        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
-            await session.execute(
-                update(Document)
-                .where(Document.id == row.id)
-                .values(description=description)
-            )
-        logger.debug(
-            "Generated description for {file}", file=row.filename,
+    # Skip if the user provided a description at upload time.
+    if not user_desc:
+        auto_description = await generate_document_description(
+            prepared.chunks,
+            filename=row.filename,
+        )
+        if auto_description:
+            async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
+                await session.execute(
+                    update(Document)
+                    .where(Document.id == row.id)
+                    .values(description=auto_description)
+                )
+            logger.debug(
+                "Generated description for {file}", file=row.filename,
         )
 
     _invalidate_workspace_caches(workspace_id)
@@ -397,6 +408,12 @@ async def get_document(principal: CurrentPrincipal, document_id: uuid.UUID) -> D
     return DocumentResponse.model_validate(row)
 
 
+class ApproveDocumentRequest(BaseModel):
+    """Optional fields when approving a pending document."""
+    model_config = ConfigDict(extra="forbid")
+    description: str | None = Field(default=None, description="Optional description for the document")
+
+
 @router.post(
     "/{document_id}/approve",
     response_model=UploadAcceptedResponse,
@@ -405,6 +422,7 @@ async def get_document(principal: CurrentPrincipal, document_id: uuid.UUID) -> D
 async def approve_document(
     principal: CurrentPrincipal,
     document_id: uuid.UUID,
+    payload: ApproveDocumentRequest | None = None,
 ) -> UploadAcceptedResponse:
     """Approve a member's PENDING upload: ingest inline and flip to READY.
 
@@ -485,7 +503,16 @@ async def approve_document(
     # Success: flip PENDING → READY and insert chunks in one transaction. The
     # guarded UPDATE doubles as the idempotency check: if another request already
     # transitioned this document, no row is returned and nothing is written.
+    # If the owner provided a description, store it and skip auto-generation.
+    approve_desc = payload.description.strip() if payload and payload.description else None
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
+        update_values: dict[str, Any] = {
+            "status": "READY",
+            "error_message": None,
+            "approved_at": func.now(),
+        }
+        if approve_desc is not None:
+            update_values["description"] = approve_desc
         updated = (
             await session.execute(
                 update(Document)
@@ -494,7 +521,7 @@ async def approve_document(
                     Document.workspace_id == workspace_id,
                     Document.status == "PENDING",
                 )
-                .values(status="READY", error_message=None, approved_at=func.now())
+                .values(**update_values)
                 .returning(Document)
             )
         ).scalar_one_or_none()
@@ -529,20 +556,22 @@ async def approve_document(
     )
 
     # Generate description asynchronously — best-effort, never blocks approval.
-    description = await generate_document_description(
-        prepared.chunks,
-        filename=updated.filename,
-    )
-    if description:
-        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
-            await session.execute(
-                update(Document)
-                .where(Document.id == document_id)
-                .values(description=description)
-            )
-        logger.debug(
-            "Generated description for approved doc {doc}", doc=document_id,
+    # Skip if the owner provided a description at approval time.
+    if not approve_desc:
+        auto_description = await generate_document_description(
+            prepared.chunks,
+            filename=updated.filename,
         )
+        if auto_description:
+            async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
+                await session.execute(
+                    update(Document)
+                    .where(Document.id == document_id)
+                    .values(description=auto_description)
+                )
+            logger.debug(
+                "Generated description for approved doc {doc}", doc=document_id,
+            )
 
     _invalidate_workspace_caches(workspace_id)
     return UploadAcceptedResponse(

@@ -58,7 +58,7 @@ export function Sidebar({
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
-  onUpload: (file: File) => void;
+  onUpload: (file: File, description?: string) => void;
   onDismissUpload: (id: string) => void;
   onDeleteDocument: (id: string) => void;
   onReprocessDocument: (id: string) => void;

@@ -81,6 +81,7 @@ export interface DocumentSummary {
   checksum: string;
   status: DocumentStatus;
   error_message: string | null;
+  description: string | null;
   approved_at: string | null;
   created_at: string;
 }

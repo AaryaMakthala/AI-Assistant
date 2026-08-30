@@ -159,10 +159,10 @@ async def _llm_relevance_check(
     (Layer 1 grounding) is the backstop.
     """
     try:
-        # Fetch workspace document titles/topics (workspace-scoped).
+        # Fetch workspace document titles + descriptions (workspace-scoped).
         rows = (
             await session.execute(
-                select(Document.filename).where(
+                select(Document.filename, Document.description).where(
                     Document.workspace_id == workspace_id,
                     Document.status == "READY",
                 )
@@ -181,12 +181,22 @@ async def _llm_relevance_check(
             )
 
         # Build a lightweight relevance-classification prompt.
-        titles_context = "\n".join(f"- {title}" for title in doc_titles)
+        # Include descriptions where available — they provide a cheap, accurate
+        # summary of what each document is about, helping borderline cases.
+        titles_context_lines: list[str] = []
+        for row in rows:
+            if row.description:
+                titles_context_lines.append(f"- {row.filename}: {row.description}")
+            else:
+                titles_context_lines.append(f"- {row.filename}")
+        titles_context = "\n".join(titles_context_lines)
         classification_prompt = (
-            f"Workspace document titles:\n{titles_context}\n\n"
+            f"Workspace documents (filename and description where available):\n"
+            f"{titles_context}\n\n"
             f"User question: {question}\n\n"
             "Is this question plausibly about content that might be found in one of "
-            "these documents? Answer with ONLY a JSON object: "
+            "these documents? Use both filenames AND descriptions to judge relevance. "
+            "Answer with ONLY a JSON object: "
             '{"relevant": true/false, "confidence": 0.0-1.0, "reason": "..."}'
         )
 

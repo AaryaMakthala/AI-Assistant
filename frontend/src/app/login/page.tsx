@@ -4,6 +4,7 @@ import { Loader2, LogIn, Eye, EyeOff } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
+import { checkEmail } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
@@ -98,6 +99,24 @@ export default function LoginPage() {
 
     try {
       if (mode === "signin") {
+        // Check if the email is registered before attempting sign-in.
+        // Supabase returns the same generic "Invalid login credentials" for both
+        // wrong email and wrong password, so we need to distinguish them.
+        let emailExists = true;
+        try {
+          const result = await checkEmail(email);
+          emailExists = result.exists;
+        } catch {
+          // If the check fails (network, backend down), proceed with sign-in
+          // anyway — the normal error handling will catch any issues.
+          emailExists = true;
+        }
+
+        if (!emailExists) {
+          setError("No account found with this email address.");
+          return;
+        }
+
         const { error: failure } = await supabase.auth.signInWithPassword({
           email,
           password,
@@ -109,7 +128,7 @@ export default function LoginPage() {
             setIsUnverified(true);
             setError("Your email address has not been verified.");
           } else if (msg.includes("Invalid login credentials")) {
-            setError("Incorrect email or password. Please try again.");
+            setError("Incorrect password. Please try again.");
           } else {
             setError(msg);
           }

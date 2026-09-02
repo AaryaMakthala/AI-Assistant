@@ -482,3 +482,26 @@ export async function createWorkspace(
   if (!response.ok) throw await failure(response);
   return (await response.json()) as Workspace;
 }
+
+/**
+ * Check whether an email address has a registered account in Supabase Auth.
+ *
+ * Used by the login form to distinguish "email not registered" from
+ * "wrong password" — Supabase returns the same generic error for both.
+ * Returns only a boolean; no user IDs, timestamps, or metadata.
+ */
+export async function checkEmail(
+  email: string,
+  options: RequestOptions = {},
+): Promise<{ exists: boolean }> {
+  const response = await fetch(`${BASE_URL}/auth/check-email`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email }),
+    signal: options.signal,
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as { exists: boolean };
+}

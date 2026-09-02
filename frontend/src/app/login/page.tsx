@@ -4,7 +4,7 @@ import { Loader2, LogIn, Eye, EyeOff } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
-import { checkEmail } from "@/lib/api";
+import { checkEmail, listWorkspaces } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
@@ -117,7 +117,7 @@ export default function LoginPage() {
           return;
         }
 
-        const { error: failure } = await supabase.auth.signInWithPassword({
+        const { data: signInData, error: failure } = await supabase.auth.signInWithPassword({
           email,
           password,
         });
@@ -134,6 +134,27 @@ export default function LoginPage() {
           }
           return;
         }
+
+        // Check whether the user has at least one organization/workspace.
+        // A user who authenticated but has zero workspaces should not enter
+        // the main application — they would see a broken/empty state.
+        try {
+          const token = signInData.session?.access_token;
+          if (token) {
+            const { workspaces } = await listWorkspaces({ token });
+            if (workspaces.length === 0) {
+              // Sign out so the user is not stuck in a half-authenticated state.
+              await supabase.auth.signOut();
+              setError("No organization is associated with this account. Please contact your administrator or create an organization to continue.");
+              return;
+            }
+          }
+        } catch {
+          // If the workspace check fails (network, backend down), proceed
+          // with the normal redirect — the workspace recovery mechanism in
+          // the main app will handle stale/missing workspaces.
+        }
+
         router.replace(postSignInTarget());
         return;
       }

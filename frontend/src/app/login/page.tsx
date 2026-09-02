@@ -1,10 +1,10 @@
 "use client";
 
-import { Loader2, LogIn, Eye, EyeOff } from "lucide-react";
+import { Building2, Loader2, LogIn, Eye, EyeOff } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
-import { checkEmail, listWorkspaces } from "@/lib/api";
+import { checkEmail, createWorkspace, listWorkspaces } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
@@ -39,6 +39,13 @@ export default function LoginPage() {
   const [isUnverified, setIsUnverified] = useState(false);
   const [resendSuccess, setResendSuccess] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+
+  // Zero-workspace state: user authenticated but has no organizations.
+  const [needsOrg, setNeedsOrg] = useState(false);
+  const [newOrgName, setNewOrgName] = useState("");
+  const [orgSessionToken, setOrgSessionToken] = useState<string | undefined>();
+  const [isCreatingOrg, setIsCreatingOrg] = useState(false);
+  const [orgError, setOrgError] = useState<string | undefined>();
 
   // Password visibility
   const [showPassword, setShowPassword] = useState(false);
@@ -138,14 +145,16 @@ export default function LoginPage() {
         // Check whether the user has at least one organization/workspace.
         // A user who authenticated but has zero workspaces should not enter
         // the main application — they would see a broken/empty state.
+        // Instead, keep them authenticated and show a workspace creation form
+        // so they can create an organization without going through signup
+        // (which would trigger an unnecessary verification email).
         try {
           const token = signInData.session?.access_token;
           if (token) {
             const { workspaces } = await listWorkspaces({ token });
             if (workspaces.length === 0) {
-              // Sign out so the user is not stuck in a half-authenticated state.
-              await supabase.auth.signOut();
-              setError("No organization is associated with this account. Please contact your administrator or create an organization to continue.");
+              setOrgSessionToken(token);
+              setNeedsOrg(true);
               return;
             }
           }
@@ -203,6 +212,82 @@ export default function LoginPage() {
     setIsUnverified(false);
     setResendSuccess(false);
   };
+
+  const handleCreateOrg = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!orgSessionToken || !newOrgName.trim()) return;
+    setIsCreatingOrg(true);
+    setOrgError(undefined);
+    try {
+      const ws = await createWorkspace(newOrgName.trim(), { token: orgSessionToken });
+      router.replace(postSignInTarget());
+    } catch (err) {
+      setOrgError(
+        err instanceof Error ? err.message : "Failed to create organization.",
+      );
+    } finally {
+      setIsCreatingOrg(false);
+    }
+  };
+
+  // Zero-workspace state: user is authenticated but has no organizations.
+  if (needsOrg) {
+    return (
+      <Shell>
+        <div className="space-y-4">
+          <div className="rounded-md bg-warning/10 p-3 text-sm text-warning border border-warning/20">
+            <p role="alert">No organization is associated with this account.</p>
+            <p className="mt-1 text-xs text-warning/80">Please contact your administrator or create an organization to continue.</p>
+          </div>
+          <form onSubmit={handleCreateOrg} className="space-y-4">
+            <Field
+              label="Organization name"
+              type="text"
+              value={newOrgName}
+              onChange={setNewOrgName}
+              autoComplete="organization"
+              required
+            />
+            {orgError && (
+              <div className="rounded-md bg-danger/10 p-3 text-sm text-danger border border-danger/20">
+                <p role="alert">{orgError}</p>
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={isCreatingOrg || !newOrgName.trim()}
+              className={cn(
+                "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
+                "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
+                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
+                "disabled:opacity-60 disabled:pointer-events-none",
+              )}
+            >
+              {isCreatingOrg ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+              ) : (
+                <Building2 className="size-4" aria-hidden />
+              )}
+              Create organization
+            </button>
+          </form>
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={() => {
+                setNeedsOrg(false);
+                setNewOrgName("");
+                setOrgError(undefined);
+              }}
+              className="text-sm font-medium text-muted hover:text-foreground transition-colors"
+            >
+              Back to sign in
+            </button>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
 
   return (
     <Shell>

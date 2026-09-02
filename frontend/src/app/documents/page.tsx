@@ -14,10 +14,10 @@
  * Auth is enforced by the backend on every call (CLAUDE.md 4.6).
  */
 
-import { AlertCircle, ArrowLeft, CheckCircle2, FileText, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, FileText, Loader2, Plus, RotateCw, Trash2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import type { DocumentSummary } from "@/lib/api";
@@ -25,6 +25,7 @@ import { useAuth } from "@/lib/auth";
 import {
   ACCEPTED_EXTENSIONS,
   MAX_UPLOAD_BYTES,
+  validateFile,
   useDocuments,
   type UploadState,
 } from "@/lib/hooks/use-documents";
@@ -33,16 +34,24 @@ import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 const ADMIN_ROLES = ["OWNER", "owner"];
 
+/** A file queued for upload with its required description. */
+interface PendingFile {
+  id: string;
+  file: File;
+  description: string;
+}
+
+let pendingCounter = 0;
+
 export default function DocumentsPage() {
   const router = useRouter();
   const { token, isAuthenticated, isLoading: isAuthLoading, role } = useAuth();
   const library = useDocuments(token);
   const canManageOrg = Boolean(role && ADMIN_ROLES.includes(role));
 
-  const [isDragging, setIsDragging] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
-  const dragDepth = useRef(0);
 
   useEffect(() => {
     if (isAuthLoading) return;
@@ -53,10 +62,38 @@ export default function DocumentsPage() {
     if (role && !canManageOrg) router.replace("/");
   }, [isAuthLoading, isAuthenticated, role, canManageOrg, router]);
 
-  const handleFiles = (files: FileList | null) => {
-    if (!files || !isAuthenticated || !canManageOrg) return;
-    for (const file of Array.from(files)) void library.upload(file);
-  };
+  const addFiles = useCallback((files: FileList | null) => {
+    if (!files) return;
+    const newItems: PendingFile[] = [];
+    for (const file of Array.from(files)) {
+      if (validateFile(file)) continue;
+      pendingCounter += 1;
+      newItems.push({ id: `pf-${pendingCounter}`, file, description: "" });
+    }
+    setPendingFiles((current) => [...current, ...newItems]);
+  }, []);
+
+  const updateDescription = useCallback((id: string, value: string) => {
+    setPendingFiles((current) =>
+      current.map((item) => (item.id === id ? { ...item, description: value } : item)),
+    );
+  }, []);
+
+  const removePending = useCallback((id: string) => {
+    setPendingFiles((current) => current.filter((item) => item.id !== id));
+  }, []);
+
+  const canUploadPending =
+    pendingFiles.length > 0 &&
+    pendingFiles.every((item) => item.description.trim().length > 0);
+
+  const handleUploadPending = useCallback(() => {
+    if (!canUploadPending) return;
+    for (const item of pendingFiles) {
+      void library.upload(item.file, item.description.trim());
+    }
+    setPendingFiles([]);
+  }, [canUploadPending, pendingFiles, library]);
 
   const activeUploads = library.uploads.filter(
     (upload) => upload.phase !== "ready" || !upload.documentId,
@@ -126,64 +163,105 @@ export default function DocumentsPage() {
         </div>
       )}
 
-      <div
-        onDragEnter={(event) => {
-          event.preventDefault();
-          dragDepth.current += 1;
-          setIsDragging(true);
-        }}
-        onDragOver={(event) => event.preventDefault()}
-        onDragLeave={(event) => {
-          event.preventDefault();
-          dragDepth.current -= 1;
-          if (dragDepth.current <= 0) {
-            dragDepth.current = 0;
-            setIsDragging(false);
-          }
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          dragDepth.current = 0;
-          setIsDragging(false);
-          handleFiles(event.dataTransfer.files);
-        }}
-        className={cn(
-          "rounded-xl border border-dashed p-8 text-center transition-colors",
-          isDragging ? "border-accent bg-accent-subtle" : "border-border bg-surface",
-          !isAuthenticated && "opacity-50",
+      {/* Upload area with per-file descriptions */}
+      <div className="rounded-xl border border-border bg-surface p-4">
+        <div className="flex items-center gap-2">
+          <Upload className="size-4 text-muted" aria-hidden />
+          <span className="text-sm font-medium">Upload documents</span>
+        </div>
+        <p className="mt-1 text-xs text-muted">
+          {ACCEPTED_EXTENSIONS.join(", ")} · up to {Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB
+          · Each file requires a description.
+        </p>
+
+        {/* Pending file list */}
+        {pendingFiles.length > 0 && (
+          <ul className="mt-3 space-y-2">
+            {pendingFiles.map((item) => (
+              <li key={item.id} className="rounded-lg border border-border bg-background p-3">
+                <div className="flex items-center gap-2">
+                  <FileText className="size-4 shrink-0 text-muted" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                    {item.file.name}
+                  </span>
+                  <span className="shrink-0 text-xs text-muted">
+                    {formatBytes(item.file.size)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removePending(item.id)}
+                    aria-label={`Remove ${item.file.name}`}
+                    className="flex size-5 shrink-0 items-center justify-center rounded text-muted hover:text-foreground"
+                  >
+                    <X className="size-3" aria-hidden />
+                  </button>
+                </div>
+                <div className="mt-2">
+                  <label htmlFor={`desc-${item.id}`} className="mb-1 block text-xs text-muted">
+                    Description <span className="text-danger">*</span>
+                  </label>
+                  <input
+                    id={`desc-${item.id}`}
+                    type="text"
+                    value={item.description}
+                    onChange={(e) => updateDescription(item.id, e.target.value)}
+                    placeholder="e.g. Company employee policies"
+                    className={cn(
+                      "w-full rounded-md border bg-background px-2.5 py-1.5 text-sm text-foreground",
+                      "placeholder:text-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent",
+                      item.description.trim().length === 0 ? "border-warning/50" : "border-border",
+                    )}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
-      >
-        <Upload className="mx-auto size-5 text-muted" aria-hidden />
-        <p className="mt-2 text-sm">
-          Drop files here, or{" "}
+
+        <div className="mt-3 flex items-center gap-2">
           <button
             type="button"
             disabled={!isAuthenticated}
             onClick={() => inputRef.current?.click()}
             className={cn(
-              "font-medium text-accent underline underline-offset-2",
+              "flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted",
+              "transition-colors hover:text-foreground",
               "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              "disabled:cursor-not-allowed",
+              "disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >
-            browse
+            <Plus className="size-3.5" aria-hidden />
+            Add File
           </button>
-        </p>
-        <p className="mt-1 text-xs text-muted">
-          {ACCEPTED_EXTENSIONS.join(", ")} · up to{" "}
-          {Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)} MB
-        </p>
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept={ACCEPT_ATTRIBUTE}
-          className="hidden"
-          onChange={(event) => {
-            handleFiles(event.target.files);
-            event.target.value = "";
-          }}
-        />
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            accept={ACCEPT_ATTRIBUTE}
+            className="hidden"
+            onChange={(event) => {
+              addFiles(event.target.files);
+              event.target.value = "";
+            }}
+          />
+          <div className="flex-1" />
+          {pendingFiles.length > 0 && (
+            <button
+              type="button"
+              onClick={handleUploadPending}
+              disabled={!canUploadPending}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground",
+                "transition-opacity hover:opacity-90",
+                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+                "disabled:cursor-not-allowed disabled:opacity-50",
+              )}
+            >
+              <Upload className="size-3.5" aria-hidden />
+              Upload ({pendingFiles.length})
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Pending approval queue */}

@@ -13,17 +13,14 @@
  */
 
 import { AlertCircle, CheckCircle2, FileText, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { ConfirmDialog } from "./confirm-dialog";
 import { StatusBadge } from "./status-badge";
 import {
-  ACCEPTED_EXTENSIONS,
   type UploadState,
 } from "@/lib/hooks/use-documents";
 import type { DocumentSummary } from "@/lib/api";
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
-
-const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 
 type Section = "company" | "mine";
 
@@ -52,7 +49,7 @@ export function DocumentLibrary({
   currentUserId?: string;
   /** Owners and admins only. Presentation; the server gates the action independently. */
   canManageOrg?: boolean;
-  onUpload: (file: File, description?: string) => void;
+  onUpload: () => void;
   onDismissUpload: (id: string) => void;
   onDelete: (id: string) => void;
   onReprocess: (id: string) => void;
@@ -61,11 +58,7 @@ export function DocumentLibrary({
   disabled?: boolean;
 }) {
   const [section, setSection] = useState<Section>("company");
-  const [isDragging, setIsDragging] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
-  const [uploadDescription, setUploadDescription] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const dragDepth = useRef(0);
 
   const { company, mine, pending } = useMemo(
     () => ({
@@ -79,16 +72,6 @@ export function DocumentLibrary({
   );
 
   const visible = section === "company" ? company : mine;
-  // Only owners can upload to Company; members always upload as personal.
-  // Since the backend doesn't have a visibility concept, all uploads go to the workspace.
-  const isUploadDisabled = disabled;
-
-  const handleFiles = (files: FileList | null) => {
-    if (!files || isUploadDisabled) return;
-    const desc = uploadDescription.trim() || undefined;
-    for (const file of Array.from(files)) onUpload(file, desc);
-    setUploadDescription("");
-  };
 
   // Uploads still in flight are listed separately above the library.
   const activeUploads = uploads.filter(
@@ -127,75 +110,22 @@ export function DocumentLibrary({
         ))}
       </div>
 
-      <div
-        onDragEnter={(event) => {
-          event.preventDefault();
-          dragDepth.current += 1;
-          setIsDragging(true);
-        }}
-        onDragOver={(event) => event.preventDefault()}
-        onDragLeave={(event) => {
-          event.preventDefault();
-          dragDepth.current -= 1;
-          if (dragDepth.current <= 0) {
-            dragDepth.current = 0;
-            setIsDragging(false);
-          }
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          dragDepth.current = 0;
-          setIsDragging(false);
-          handleFiles(event.dataTransfer.files);
-        }}
-        className={cn(
-          "m-3 mt-0 rounded-lg border border-dashed p-4 text-center transition-colors",
-          isDragging && !isUploadDisabled
-            ? "border-accent bg-accent-subtle"
-            : "border-border bg-background",
-          isUploadDisabled && "opacity-50",
-        )}
-      >
-        <Upload className="mx-auto size-4 text-muted" aria-hidden />
-        <p className="mt-2 text-xs text-muted">
-          Drop files here, or{" "}
-          <button
-            type="button"
-            disabled={isUploadDisabled}
-            onClick={() => inputRef.current?.click()}
-            className={cn(
-              "font-medium text-accent underline underline-offset-2",
-              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              "disabled:cursor-not-allowed",
-            )}
-          >
-            browse
-          </button>
-        </p>
-        <p className="mt-1 text-[0.6875rem] text-muted">
-          {section === "company"
-            ? "Visible to everyone in your organization"
-            : "Visible only to you"}
-        </p>
-        <input
-          type="text"
-          placeholder="Optional description…"
-          value={uploadDescription}
-          onChange={(e) => setUploadDescription(e.target.value)}
-          disabled={isUploadDisabled}
-          className="mt-2 w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
-        />
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept={ACCEPT_ATTRIBUTE}
-          className="hidden"
-          onChange={(event) => {
-            handleFiles(event.target.files);
-            event.target.value = "";
-          }}
-        />
+      <div className="m-3 mt-0">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={onUpload}
+          className={cn(
+            "flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed p-4 text-center transition-colors",
+            "border-border bg-background text-xs text-muted",
+            "hover:border-accent hover:bg-accent-subtle hover:text-foreground",
+            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            "disabled:cursor-not-allowed disabled:opacity-50",
+          )}
+        >
+          <Upload className="size-4" aria-hidden />
+          Upload files
+        </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">

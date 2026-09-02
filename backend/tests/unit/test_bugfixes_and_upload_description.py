@@ -718,3 +718,90 @@ class TestDocumentResponseFieldAudit:
         param = sig.parameters.get("description")
         assert param is not None, "upload_document should have a 'description' parameter"
         assert param.default is None, "description should default to None"
+
+
+# ---------------------------------------------------------------------------
+# Part 8: Required description — upload validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredDescription:
+    """Upload must store and return the description; frontend enforces it is required."""
+
+    def test_upload_description_stored_in_document_response(self) -> None:
+        """When a description is provided, DocumentResponse returns it."""
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from app.api.documents_v2 import DocumentResponse
+
+        now = datetime.now(timezone.utc)
+        resp = DocumentResponse(
+            id=_uuid.uuid4(),
+            workspace_id=_uuid.uuid4(),
+            uploaded_by=_uuid.uuid4(),
+            filename="test.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="abc123",
+            status="READY",
+            description="Company employee policies",
+            created_at=now,
+        )
+        assert resp.description == "Company employee policies"
+
+    def test_upload_description_none_when_not_provided(self) -> None:
+        """When no description is provided, DocumentResponse has description=None."""
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from app.api.documents_v2 import DocumentResponse
+
+        now = datetime.now(timezone.utc)
+        resp = DocumentResponse(
+            id=_uuid.uuid4(),
+            workspace_id=_uuid.uuid4(),
+            uploaded_by=_uuid.uuid4(),
+            filename="test.pdf",
+            mime_type="application/pdf",
+            file_size=1024,
+            checksum="abc123",
+            status="READY",
+            description=None,
+            created_at=now,
+        )
+        assert resp.description is None
+
+    def test_upload_description_in_list_response(self) -> None:
+        """DocumentListResponse should carry description for each document."""
+        import uuid as _uuid
+        from datetime import datetime, timezone
+        from app.api.documents_v2 import DocumentListResponse, DocumentResponse
+
+        now = datetime.now(timezone.utc)
+        doc = DocumentResponse(
+            id=_uuid.uuid4(),
+            workspace_id=_uuid.uuid4(),
+            uploaded_by=_uuid.uuid4(),
+            filename="handbook.pdf",
+            mime_type="application/pdf",
+            file_size=2048,
+            checksum="def456",
+            status="READY",
+            description="Employee handbook",
+            created_at=now,
+        )
+        resp = DocumentListResponse(documents=[doc], total=1)
+        assert resp.documents[0].description == "Employee handbook"
+
+    def test_approve_endpoint_accepts_description_in_payload(self) -> None:
+        """The approve endpoint's ApproveDocumentRequest should accept description."""
+        from app.api.documents_v2 import ApproveDocumentRequest
+
+        req = ApproveDocumentRequest(description="Approved description")
+        assert req.description == "Approved description"
+
+    def test_approve_endpoint_description_optional(self) -> None:
+        """ApproveDocumentRequest description defaults to None."""
+        from app.api.documents_v2 import ApproveDocumentRequest
+
+        req = ApproveDocumentRequest()
+        assert req.description is None

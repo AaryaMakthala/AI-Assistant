@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { DocumentLibrary } from "./document-library";
 import { MembersPanel } from "./members-panel";
+import { WorkspaceSwitcher } from "./workspace-switcher";
 import type { ChatSession, DocumentSummary } from "@/lib/api";
 import type { UploadState } from "@/lib/hooks/use-documents";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -34,12 +35,14 @@ export function Sidebar({
   onNewChat,
   onSelectSession,
   onDeleteSession,
-  onUpload,
+  onOpenUpload,
   onDismissUpload,
   onDeleteDocument,
   onReprocessDocument,
   onApproveDocument,
   onRejectDocument,
+  onSwitchWorkspace,
+  onDeleteWorkspace,
 }: {
   sessions: ChatSession[];
   activeSessionId?: string;
@@ -58,12 +61,14 @@ export function Sidebar({
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
-  onUpload: (file: File, description?: string) => void;
+  onOpenUpload: () => void;
   onDismissUpload: (id: string) => void;
   onDeleteDocument: (id: string) => void;
   onReprocessDocument: (id: string) => void;
   onApproveDocument: (id: string) => void;
   onRejectDocument: (id: string) => void;
+  onSwitchWorkspace: (workspaceId: string) => void;
+  onDeleteWorkspace?: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("chats");
 
@@ -82,7 +87,12 @@ export function Sidebar({
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
-      <div className="p-3">
+      <div className="p-3 space-y-2">
+        <WorkspaceSwitcher
+          token={token}
+          currentWorkspaceId={workspaceId}
+          onSwitch={onSwitchWorkspace}
+        />
         <button
           type="button"
           onClick={onNewChat}
@@ -155,7 +165,7 @@ export function Sidebar({
             rejectingIds={rejectingDocumentIds}
             currentUserId={currentUserId}
             canManageOrg={canManageOrg}
-            onUpload={onUpload}
+            onUpload={() => onOpenUpload()}
             onDismissUpload={onDismissUpload}
             onDelete={onDeleteDocument}
             onReprocess={onReprocessDocument}
@@ -183,7 +193,7 @@ export function Sidebar({
 
       {activeTab === "members" && (
         <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-          <MembersPanel token={token} workspaceId={workspaceId} />
+          <MembersPanel token={token} workspaceId={workspaceId} onDeleteWorkspace={onDeleteWorkspace} />
         </nav>
       )}
     </aside>

@@ -8,12 +8,14 @@
  * the data flow readable.
  */
 
-import { LogOut, PanelRightOpen } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Building2, LogOut, PanelRightOpen, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatPane } from "@/components/chat-pane";
 import { Sidebar } from "@/components/sidebar";
 import { SourcesPanel } from "@/components/sources-panel";
+import { UploadInterface } from "@/components/upload-interface";
 import { useAuth } from "@/lib/auth";
+import { listWorkspaces, isWorkspaceNotFound } from "@/lib/api";
 import { useChat } from "@/lib/hooks/use-chat";
 import { useDocuments } from "@/lib/hooks/use-documents";
 import { useSessions } from "@/lib/hooks/use-sessions";
@@ -26,18 +28,65 @@ export function Workspace() {
   const { token, isAuthenticated, isLoading, me, role, signOut } = useAuth();
   const [activeChunkId, setActiveChunkId] = useState<string | undefined>();
   const [isPanelOpen, setIsPanelOpen] = useState(false);
+  // Active workspace — starts from the server-confirmed default, but can be
+  // overridden by the workspace switcher.  When switching, the X-Workspace-ID
+  // header tells the backend which workspace to scope requests to.
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | undefined>();
+  const workspaceId = activeWorkspaceId ?? me?.workspace_id;
 
   const canManageOrg = Boolean(role && ADMIN_ROLES.includes(role));
-  const workspaceId = me?.workspace_id;
 
-  const sessions = useSessions(token);
-  const documents = useDocuments(token);
+  const sessions = useSessions(token, workspaceId);
+  const documents = useDocuments(token, workspaceId);
 
   const chat = useChat({
     token,
+    workspaceId,
     onSessionCreated: () => void sessions.refresh(),
     onTurnComplete: () => void sessions.refresh(),
   });
+
+  // Upload view toggle: when true, the main area shows the upload interface
+  // instead of the chat pane.
+  const [showUpload, setShowUpload] = useState(false);
+
+  // --- Stale-workspace recovery ---
+  // When the active workspace is deleted (or the user's membership removed),
+  // every workspace-scoped API call returns 404 "Workspace not found.".
+  // Instead of showing a dead-end error, we auto-switch to a valid workspace.
+  const recoveryInFlight = useRef(false);
+  const [hasNoWorkspaces, setHasNoWorkspaces] = useState(false);
+
+  const combinedError = chat.transportError ?? sessions.error ?? documents.error;
+  const attemptRecovery = useCallback(async () => {
+    if (recoveryInFlight.current || !token) return;
+    recoveryInFlight.current = true;
+    try {
+      const { workspaces } = await listWorkspaces({ token });
+      if (workspaces.length > 0) {
+        // Switch to the first available workspace.
+        setActiveWorkspaceId(workspaces[0].id);
+        setHasNoWorkspaces(false);
+        chat.reset();
+        setActiveChunkId(undefined);
+        setIsPanelOpen(false);
+      } else {
+        // Zero workspaces — show the create-organization flow.
+        setHasNoWorkspaces(true);
+      }
+    } catch {
+      // If listing workspaces also fails (e.g. network), leave the error
+      // state as-is — the user can retry manually.
+    } finally {
+      recoveryInFlight.current = false;
+    }
+  }, [token, chat]);
+
+  useEffect(() => {
+    if (combinedError && isWorkspaceNotFound(combinedError)) {
+      void attemptRecovery();
+    }
+  }, [combinedError, attemptRecovery]);
 
   // The panel follows the most recent assistant turn: that is the answer the user is
   // reading, and the one whose citations the chips belong to.
@@ -75,22 +124,39 @@ export function Workspace() {
           chat.reset();
           setActiveChunkId(undefined);
           setIsPanelOpen(false);
+          setShowUpload(false);
         }}
         onSelectSession={(id) => {
           setActiveChunkId(undefined);
           setIsPanelOpen(false);
+          setShowUpload(false);
           void chat.loadSession(id);
         }}
         onDeleteSession={(id) => {
           if (id === chat.sessionId) chat.reset();
           void sessions.remove(id);
         }}
-        onUpload={(file, description) => void documents.upload(file, description)}
+        onOpenUpload={() => setShowUpload(true)}
         onDismissUpload={documents.dismissUpload}
         onDeleteDocument={(id) => void documents.remove(id)}
         onReprocessDocument={(id) => void documents.reprocess(id)}
         onApproveDocument={(id) => void documents.approve(id)}
         onRejectDocument={(id) => void documents.reject(id)}
+        onSwitchWorkspace={(id) => {
+          // Clear chat state so stale turns from the old workspace don't persist.
+          chat.reset();
+          setActiveChunkId(undefined);
+          setIsPanelOpen(false);
+          setShowUpload(false);
+          setActiveWorkspaceId(id);
+          setHasNoWorkspaces(false);
+        }}
+        onDeleteWorkspace={() => {
+          // Organization was deleted AND the owner's auth account was removed
+          // by the backend. Sign out and redirect to the login page — do NOT
+          // show the zero-org view, because the account itself is now gone.
+          void signOut();
+        }}
       />
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -139,17 +205,37 @@ export function Workspace() {
 
         {!isAuthenticated && !isLoading && <AuthNotice />}
 
-        <ChatPane
-          turns={chat.turns}
-          isStreaming={chat.isStreaming}
-          isLoadingHistory={chat.isLoadingHistory}
-          transportError={chat.transportError ?? sessions.error ?? documents.error}
-          activeChunkId={activeChunkId}
-          onSend={(message) => void chat.send(message)}
-          onStop={chat.stop}
-          onSelectCitation={(citation) => handleSelectCitation(citation.chunk_id)}
-          disabled={!isAuthenticated}
-        />
+        {hasNoWorkspaces && <NoWorkspacesNotice onCreated={(id) => {
+          setActiveWorkspaceId(id);
+          setHasNoWorkspaces(false);
+          chat.reset();
+          setActiveChunkId(undefined);
+          setIsPanelOpen(false);
+        }} token={token} />}
+
+        {!hasNoWorkspaces && showUpload && (
+          <UploadInterface
+            onUpload={(file, description) => void documents.upload(file, description)}
+            onDismissUpload={documents.dismissUpload}
+            uploads={documents.uploads}
+            onBack={() => setShowUpload(false)}
+            disabled={!isAuthenticated}
+          />
+        )}
+
+        {!hasNoWorkspaces && !showUpload && (
+          <ChatPane
+            turns={chat.turns}
+            isStreaming={chat.isStreaming}
+            isLoadingHistory={chat.isLoadingHistory}
+            transportError={chat.transportError ?? sessions.error ?? documents.error}
+            activeChunkId={activeChunkId}
+            onSend={(message) => void chat.send(message)}
+            onStop={chat.stop}
+            onSelectCitation={(citation) => handleSelectCitation(citation.chunk_id)}
+            disabled={!isAuthenticated}
+          />
+        )}
       </main>
 
       {isPanelOpen && (
@@ -197,6 +283,74 @@ function AuthNotice() {
         Sign out
       </button>
       <span>to clear your session, then sign in again.</span>
+    </div>
+  );
+}
+
+/**
+ * Shown when the user has no workspaces (all deleted, or membership removed).
+ * Prompts them to create their first organization.
+ */
+function NoWorkspacesNotice({
+  onCreated,
+  token,
+}: {
+  onCreated: (workspaceId: string) => void;
+  token?: string;
+}) {
+  const [name, setName] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleCreate = async () => {
+    if (!token || !name.trim()) return;
+    setIsCreating(true);
+    setError(null);
+    try {
+      const { createWorkspace } = await import("@/lib/api");
+      const ws = await createWorkspace(name.trim(), { token });
+      onCreated(ws.id);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to create organization.",
+      );
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-1 items-center justify-center p-8">
+      <div className="w-full max-w-sm space-y-4 text-center">
+        <Building2 className="mx-auto size-10 text-muted" aria-hidden />
+        <h2 className="text-lg font-semibold">No organizations yet</h2>
+        <p className="text-sm text-muted">
+          You don't belong to any organizations. Create one to get started.
+        </p>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreate();
+            }}
+            placeholder="Organization name"
+            maxLength={200}
+            disabled={isCreating}
+            className="flex-1 rounded-md border border-border bg-surface-raised px-3 py-2 text-sm text-foreground placeholder:text-muted/60 focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none disabled:opacity-60"
+          />
+          <button
+            type="button"
+            onClick={() => void handleCreate()}
+            disabled={isCreating || !name.trim()}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
+          >
+            {isCreating ? "Creating..." : "Create"}
+          </button>
+        </div>
+        {error && <p className="text-xs text-danger">{error}</p>}
+      </div>
     </div>
   );
 }

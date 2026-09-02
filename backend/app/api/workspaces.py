@@ -20,9 +20,10 @@ Invitation flow (CLAUDE.md section 9, Phase 2):
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException, status
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -33,13 +34,13 @@ from app.api.workspace_deps import (
     WorkspaceMemberAny,
     WorkspaceOwner,
 )
+from app.config import get_settings
 from app.db.models import (
     Document,
     Invitation,
     Member,
     Workspace,
 )
-from app.email import generate_verification_token, send_verification_email
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
 
@@ -63,7 +64,6 @@ class WorkspaceResponse(BaseModel):
     id: uuid.UUID
     name: str
     owner_id: uuid.UUID
-    verified_at: datetime | None = None
     created_at: datetime
 
 
@@ -166,16 +166,11 @@ async def create_workspace(
     Uses the Phase 1C ``app.create_workspace()`` SQL function, which atomically creates
     both the workspace and the OWNER membership row. The function reads the calling user's
     ``sub`` claim from the RLS context, so it is scoped to the authenticated user.
-
-    Organization-level verification:
-    - Each new organization gets a unique verification token.
-    - A verification email is sent to the owner's email.
-    - Duplicate organization names (case-insensitive) are rejected.
     """
     async with tenant_session(
         workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
-        # Use the canonical SQL function created by migration 0014.
+        # Use the canonical SQL function created by migration 0008.
         try:
             ws_id = (
                 await session.execute(
@@ -184,25 +179,15 @@ async def create_workspace(
             ).scalar_one()
         except DBAPIError as exc:
             state = getattr(getattr(exc, "orig", None), "sqlstate", None)
-            if state == "W1007":
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="This email already has an organization with this name. Please try a different organization name.",
-                ) from exc
             if state == "W1006":
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="This email is already registered with an organization. Please try again with a different email.",
+                    detail=(
+                        "This email is already registered with an organization."
+                        " Please try again with a different email."
+                    ),
                 ) from exc
             raise
-
-        # Generate verification token and update the workspace.
-        verification_token = generate_verification_token()
-        await session.execute(
-            update(Workspace)
-            .where(Workspace.id == ws_id)
-            .values(verification_token=verification_token)
-        )
 
         row = (
             await session.execute(
@@ -211,16 +196,8 @@ async def create_workspace(
         ).scalar_one()
         workspace = WorkspaceResponse.model_validate(row)
 
-    # Send verification email (outside the transaction).
-    if principal.email:
-        await send_verification_email(
-            to_email=principal.email,
-            organization_name=workspace.name,
-            verification_token=verification_token,
-        )
-
     logger.info(
-        "Workspace {ws} created by user {user}, verification email sent",
+        "Workspace {ws} created by user {user}",
         ws=workspace.id,
         user=principal.user_id,
     )
@@ -309,20 +286,106 @@ async def update_workspace(ctx: WorkspaceOwner, payload: WorkspaceUpdate) -> Wor
     summary="Delete a workspace",
 )
 async def delete_workspace(ctx: WorkspaceOwner) -> None:
-    """Remove a workspace and, by cascade, its memberships, documents, and chats."""
-    async with tenant_session(
-        workspace_id=ctx.workspace_id,
-        user_id=ctx.principal.user_id,
-    ) as session:
-        deleted = (
-            await session.execute(delete(Workspace).where(Workspace.id == ctx.workspace_id))
-        ).rowcount
+    """Remove a workspace and, by cascade, its memberships, documents, and chats,
+    then permanently delete the owner's Supabase Auth account.
+
+    The DB deletion runs first in a transaction so all workspace-scoped data
+    (members, documents, chunks, chat_sessions, chat_messages, invitations) is
+    removed atomically via CASCADE.  Only after the DB commit succeeds does the
+    backend call the Supabase Admin Auth API to permanently delete the user —
+    this is a separate HTTP call and cannot participate in the DB transaction.
+
+    Failure safety:
+    - DB failure → rollback, auth user untouched, 500 returned.
+    - Auth-user deletion failure → DB changes already committed, the workspace
+      and its data are gone, but the owner's auth account may still exist.
+      We return 500 so the frontend does not claim success, and log the failure.
+      The user can retry (the workspace is already gone, so retry returns 404).
+    """
+    owner_id = ctx.principal.user_id
+    workspace_id = ctx.workspace_id
+
+    # --- Phase 1: DB deletion (transactional) ---
+    try:
+        async with tenant_session(
+            workspace_id=workspace_id,
+            user_id=owner_id,
+        ) as session:
+            deleted = (
+                await session.execute(
+                    delete(Workspace).where(Workspace.id == workspace_id)
+                )
+            ).rowcount
+    except Exception as exc:
+        logger.exception(
+            "DB error deleting workspace {ws} by user {user}",
+            ws=workspace_id,
+            user=owner_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete organization.",
+        ) from exc
+
     if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found.",
+        )
+
     logger.info(
         "Workspace {ws} deleted by user {user}",
-        ws=ctx.workspace_id,
-        user=ctx.principal.user_id,
+        ws=workspace_id,
+        user=owner_id,
+    )
+
+    # --- Phase 2: Permanently delete the owner's Supabase Auth account ---
+    settings = get_settings()
+    supabase_url = str(settings.supabase_url).rstrip("/")
+    service_key = settings.supabase_service_role_key.get_secret_value()
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.delete(
+                f"{supabase_url}/auth/v1/admin/users/{owner_id}",
+                headers={
+                    "apikey": service_key,
+                    "Authorization": f"Bearer {service_key}",
+                },
+                params={"gotrue": "true"},
+            )
+            if response.status_code >= 400:
+                # Auth user deletion failed — log but do not expose Supabase
+                # internals to the user.  The workspace is already gone from the
+                # DB; this is a non-atomic two-phase operation (see docstring).
+                logger.error(
+                    "Supabase Admin API failed to delete auth user {uid} "
+                    "(status {status}): {body}",
+                    uid=owner_id,
+                    status=response.status_code,
+                    body=response.text[:300],
+                )
+                # Raise outside the httpx.HTTPError catch so it propagates
+                # as an HTTP 500, not swallowed by the network-error handler.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to delete account. Please contact support.",
+                ) from None
+    except httpx.HTTPError as exc:
+        logger.error(
+            "Network error deleting auth user {uid}: {err}",
+            uid=owner_id,
+            err=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete account. Please contact support.",
+        ) from exc
+
+    logger.info(
+        "Owner auth user {uid} permanently deleted after workspace {ws} removal",
+        uid=owner_id,
+        ws=workspace_id,
     )
 
 
@@ -678,73 +741,4 @@ async def workspace_stats(ctx: WorkspaceMemberAny) -> WorkspaceStatsResponse:
     )
 
 
-# ---------------------------------------------------------------------------
-# Organization verification
-# ---------------------------------------------------------------------------
-
-verify_router = APIRouter(tags=["verification"])
-
-
-class VerifyOrganizationResponse(BaseModel):
-    """Response after successful organization verification."""
-
-    organization_id: uuid.UUID
-    name: str
-    verified_at: datetime
-
-
-@verify_router.get(
-    "/verify-organization",
-    response_model=VerifyOrganizationResponse,
-    summary="Verify an organization using the verification token",
-)
-async def verify_organization(token: str) -> VerifyOrganizationResponse:
-    """Verify an organization using the token from the verification email.
-
-    The token is single-use and expires after 24 hours. Verifying one organization
-    does not affect any other organization.
-    """
-    async with tenant_session(
-        workspace_id=uuid.UUID(int=0),  # Placeholder, RLS not needed for verification
-        user_id=None,
-    ) as session:
-        # Find the workspace with this verification token.
-        ws = (
-            await session.execute(
-                select(Workspace).where(
-                    Workspace.verification_token == token,
-                    Workspace.verified_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-
-        if ws is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Invalid or expired verification link.",
-            )
-
-        # Mark as verified and clear the token (single-use).
-        now = datetime.now(timezone.utc)
-        await session.execute(
-            update(Workspace)
-            .where(Workspace.id == ws.id)
-            .values(
-                verified_at=now,
-                verification_token=None,
-            )
-        )
-
-        logger.info(
-            "Organization {ws} verified by token",
-            ws=ws.id,
-        )
-
-        return VerifyOrganizationResponse(
-            organization_id=ws.id,
-            name=ws.name,
-            verified_at=now,
-        )
-
-
-__all__ = ["accept_router", "router", "verify_router"]
+__all__ = ["accept_router", "router"]

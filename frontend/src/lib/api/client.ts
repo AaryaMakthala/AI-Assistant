@@ -18,6 +18,8 @@ import type {
   MeResponse,
   OrgMemberListResponse,
   UploadAcceptedResponse,
+  Workspace,
+  WorkspaceListResponse,
 } from "./types";
 
 const BASE_URL = (
@@ -36,13 +38,44 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Check whether an error is a 404 "Workspace not found." response.
+ *
+ * This signals that the active workspace was deleted or the user's membership was
+ * removed.  Callers can use this to trigger recovery (re-fetch workspaces, switch
+ * to a valid one, or show the create-organization flow).
+ */
+export function isWorkspaceNotFound(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return (
+      error.status === 404 &&
+      /Workspace not found\.?/i.test(error.message)
+    );
+  }
+  // Hooks store the error message string (not the ApiError instance),
+  // so combinedError is often a plain string by the time this runs.
+  if (typeof error === "string") {
+    return /Workspace not found\.?/i.test(error);
+  }
+  return false;
+}
+
 export interface RequestOptions {
   token?: string;
   signal?: AbortSignal;
+  /** Optional workspace override — sends X-Workspace-ID header. */
+  workspaceId?: string;
 }
 
-function authHeaders(token?: string): HeadersInit {
-  return token ? { Authorization: `Bearer ${token}` } : {};
+function authHeaders(options: RequestOptions): HeadersInit {
+  const headers: HeadersInit = {};
+  if (options.token) {
+    headers["Authorization"] = `Bearer ${options.token}`;
+  }
+  if (options.workspaceId) {
+    headers["X-Workspace-ID"] = options.workspaceId;
+  }
+  return headers;
 }
 
 async function failure(response: Response): Promise<ApiError> {
@@ -63,7 +96,7 @@ async function failure(response: Response): Promise<ApiError> {
 
 async function getJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
-    headers: authHeaders(options.token),
+    headers: authHeaders(options),
     signal: options.signal,
   });
   if (!response.ok) throw await failure(response);
@@ -88,11 +121,12 @@ export async function* sendMessage({
   sessionId,
   token,
   signal,
+  workspaceId,
 }: SendMessageArgs): AsyncGenerator<ChatStreamEvent> {
   const response = await fetch(`${BASE_URL}/chat`, {
     method: "POST",
     headers: {
-      ...authHeaders(token),
+      ...authHeaders({ token, workspaceId }),
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
@@ -140,7 +174,7 @@ export async function deleteSession(
     `${BASE_URL}/chat/sessions/${encodeURIComponent(sessionId)}`,
     {
       method: "DELETE",
-      headers: authHeaders(options.token),
+      headers: authHeaders(options),
       signal: options.signal,
     },
   );
@@ -185,7 +219,7 @@ export async function deleteDocument(
     `${BASE_URL}/documents/${encodeURIComponent(documentId)}`,
     {
       method: "DELETE",
-      headers: authHeaders(options.token),
+      headers: authHeaders(options),
       signal: options.signal,
     },
   );
@@ -205,7 +239,7 @@ export async function approveDocument(
     `${BASE_URL}/documents/${encodeURIComponent(documentId)}/approve`,
     {
       method: "POST",
-      headers: authHeaders(options.token),
+      headers: authHeaders(options),
       signal: options.signal,
     },
   );
@@ -226,7 +260,7 @@ export async function rejectDocument(
     `${BASE_URL}/documents/${encodeURIComponent(documentId)}/reject`,
     {
       method: "POST",
-      headers: authHeaders(options.token),
+      headers: authHeaders(options),
       signal: options.signal,
     },
   );
@@ -247,7 +281,7 @@ export async function uploadDocument(
   // No Content-Type header: the browser must set it so the multipart boundary matches.
   const response = await fetch(`${BASE_URL}/documents`, {
     method: "POST",
-    headers: authHeaders(options.token),
+    headers: authHeaders(options),
     body: form,
     signal: options.signal,
   });
@@ -289,6 +323,9 @@ export function uploadDocumentWithProgress(
     request.open("POST", `${BASE_URL}/documents`);
     if (options.token) {
       request.setRequestHeader("Authorization", `Bearer ${options.token}`);
+    }
+    if (options.workspaceId) {
+      request.setRequestHeader("X-Workspace-ID", options.workspaceId);
     }
 
     const abort = () => request.abort();
@@ -384,7 +421,7 @@ export async function createInvitation(
     {
       method: "POST",
       headers: {
-        ...authHeaders(options.token),
+        ...authHeaders(options),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ email }),
@@ -406,10 +443,42 @@ export async function acceptInvitation(
     `${BASE_URL}/invitations/${encodeURIComponent(invitationId)}/accept`,
     {
       method: "POST",
-      headers: authHeaders(options.token),
+      headers: authHeaders(options),
       signal: options.signal,
     },
   );
   if (!response.ok) throw await failure(response);
   return (await response.json()) as OrgMemberListResponse["members"][number];
+}
+
+/**
+ * List workspaces the authenticated user belongs to.
+ */
+export function listWorkspaces(
+  options: RequestOptions = {},
+): Promise<WorkspaceListResponse> {
+  return getJson<WorkspaceListResponse>("/workspaces", options);
+}
+
+/**
+ * Create a new workspace. The caller becomes its OWNER.
+ *
+ * Returns 409 with the message "You can create a maximum of 4 organizations per account."
+ * when the per-user limit is reached.
+ */
+export async function createWorkspace(
+  name: string,
+  options: RequestOptions = {},
+): Promise<Workspace> {
+  const response = await fetch(`${BASE_URL}/workspaces`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(options),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name }),
+    signal: options.signal,
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as Workspace;
 }

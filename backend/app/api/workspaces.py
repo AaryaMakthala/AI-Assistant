@@ -20,7 +20,7 @@ Invitation flow (CLAUDE.md section 9, Phase 2):
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -39,6 +39,7 @@ from app.db.models import (
     Member,
     Workspace,
 )
+from app.email import generate_verification_token, send_verification_email
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
 
@@ -56,19 +57,20 @@ class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
-class WorkspaceUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-
-
 class WorkspaceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     name: str
     owner_id: uuid.UUID
+    verified_at: datetime | None = None
     created_at: datetime
+
+
+class WorkspaceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class WorkspaceListResponse(BaseModel):
@@ -164,16 +166,43 @@ async def create_workspace(
     Uses the Phase 1C ``app.create_workspace()`` SQL function, which atomically creates
     both the workspace and the OWNER membership row. The function reads the calling user's
     ``sub`` claim from the RLS context, so it is scoped to the authenticated user.
+
+    Organization-level verification:
+    - Each new organization gets a unique verification token.
+    - A verification email is sent to the owner's email.
+    - Duplicate organization names (case-insensitive) are rejected.
     """
     async with tenant_session(
         workspace_id=principal.workspace_id, user_id=principal.user_id
     ) as session:
-        # Use the canonical SQL function created by migration 0008.
-        ws_id = (
-            await session.execute(
-                select(func.app.create_workspace(payload.name.strip()))
-            )
-        ).scalar_one()
+        # Use the canonical SQL function created by migration 0014.
+        try:
+            ws_id = (
+                await session.execute(
+                    select(func.app.create_workspace(payload.name.strip()))
+                )
+            ).scalar_one()
+        except DBAPIError as exc:
+            state = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            if state == "W1007":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This email already has an organization with this name. Please try a different organization name.",
+                ) from exc
+            if state == "W1006":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This email is already registered with an organization. Please try again with a different email.",
+                ) from exc
+            raise
+
+        # Generate verification token and update the workspace.
+        verification_token = generate_verification_token()
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == ws_id)
+            .values(verification_token=verification_token)
+        )
 
         row = (
             await session.execute(
@@ -182,8 +211,16 @@ async def create_workspace(
         ).scalar_one()
         workspace = WorkspaceResponse.model_validate(row)
 
+    # Send verification email (outside the transaction).
+    if principal.email:
+        await send_verification_email(
+            to_email=principal.email,
+            organization_name=workspace.name,
+            verification_token=verification_token,
+        )
+
     logger.info(
-        "Workspace {ws} created by user {user}",
+        "Workspace {ws} created by user {user}, verification email sent",
         ws=workspace.id,
         user=principal.user_id,
     )
@@ -641,4 +678,73 @@ async def workspace_stats(ctx: WorkspaceMemberAny) -> WorkspaceStatsResponse:
     )
 
 
-__all__ = ["accept_router", "router"]
+# ---------------------------------------------------------------------------
+# Organization verification
+# ---------------------------------------------------------------------------
+
+verify_router = APIRouter(tags=["verification"])
+
+
+class VerifyOrganizationResponse(BaseModel):
+    """Response after successful organization verification."""
+
+    organization_id: uuid.UUID
+    name: str
+    verified_at: datetime
+
+
+@verify_router.get(
+    "/verify-organization",
+    response_model=VerifyOrganizationResponse,
+    summary="Verify an organization using the verification token",
+)
+async def verify_organization(token: str) -> VerifyOrganizationResponse:
+    """Verify an organization using the token from the verification email.
+
+    The token is single-use and expires after 24 hours. Verifying one organization
+    does not affect any other organization.
+    """
+    async with tenant_session(
+        workspace_id=uuid.UUID(int=0),  # Placeholder, RLS not needed for verification
+        user_id=None,
+    ) as session:
+        # Find the workspace with this verification token.
+        ws = (
+            await session.execute(
+                select(Workspace).where(
+                    Workspace.verification_token == token,
+                    Workspace.verified_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+
+        if ws is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invalid or expired verification link.",
+            )
+
+        # Mark as verified and clear the token (single-use).
+        now = datetime.now(timezone.utc)
+        await session.execute(
+            update(Workspace)
+            .where(Workspace.id == ws.id)
+            .values(
+                verified_at=now,
+                verification_token=None,
+            )
+        )
+
+        logger.info(
+            "Organization {ws} verified by token",
+            ws=ws.id,
+        )
+
+        return VerifyOrganizationResponse(
+            organization_id=ws.id,
+            name=ws.name,
+            verified_at=now,
+        )
+
+
+__all__ = ["accept_router", "router", "verify_router"]

@@ -11,6 +11,7 @@ from app.api.chat_v2 import router as grounded_chat_router
 from app.api.documents_v2 import router as documents_router
 from app.api.workspaces import accept_router
 from app.api.workspaces import router as workspaces_router
+from app.api.workspaces import verify_router
 from app.config import get_settings
 from app.db.session import dispose_engine
 from app.errors import register_exception_handlers, register_request_context
@@ -43,11 +44,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             import subprocess
             import sys
+            from pathlib import Path
+            _backend_dir = str(Path(__file__).resolve().parent.parent)
             result = subprocess.run(
                 [sys.executable, "-m", "alembic", "upgrade", "head"],
                 capture_output=True,
                 text=True,
                 timeout=60,
+                cwd=_backend_dir,
             )
             if result.returncode == 0:
                 # Only log if there were pending migrations (non-empty stdout).
@@ -56,10 +60,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     logger.info("Applied pending migrations: {output}", output=output)
             else:
                 logger.error(
-                    "Migration failed: {stderr}", stderr=result.stderr[:500],
+                    "Migration failed (exit code {code}):\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}",
+                    code=result.returncode,
+                    stdout=result.stdout[:2000] if result.stdout else "(empty)",
+                    stderr=result.stderr[:2000] if result.stderr else "(empty)",
                 )
         except Exception as exc:
-            logger.error("Migration runner error: {error}", error=str(exc)[:200])
+            logger.exception("Migration runner error: {error}", error=exc)
 
     yield
     await dispose_engine()
@@ -93,12 +100,18 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-Workspace-ID"],
     )
 
     register_request_context(app)
     register_rate_limiting(app)
     register_exception_handlers(app)
+
+    # Workspace-switching middleware: reads X-Workspace-ID header and stores
+    # the override in request state for get_principal to pick up.
+    from app.security.workspace_switch import workspace_switch_middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+    app.add_middleware(BaseHTTPMiddleware, dispatch=workspace_switch_middleware)
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -114,6 +127,7 @@ def create_app() -> FastAPI:
     app.include_router(grounded_chat_router)
     app.include_router(workspaces_router)
     app.include_router(accept_router)
+    app.include_router(verify_router)
     return app
 
 

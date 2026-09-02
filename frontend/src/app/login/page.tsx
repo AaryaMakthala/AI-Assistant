@@ -213,6 +213,8 @@ export default function LoginPage() {
     setResendSuccess(false);
   };
 
+  const [orgSuccess, setOrgSuccess] = useState(false);
+
   const handleCreateOrg = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!orgSessionToken || !newOrgName.trim()) return;
@@ -220,7 +222,7 @@ export default function LoginPage() {
     setOrgError(undefined);
     try {
       const ws = await createWorkspace(newOrgName.trim(), { token: orgSessionToken });
-      router.replace(postSignInTarget());
+      setOrgSuccess(true);
     } catch (err) {
       setOrgError(
         err instanceof Error ? err.message : "Failed to create organization.",
@@ -235,42 +237,57 @@ export default function LoginPage() {
     return (
       <Shell>
         <div className="space-y-4">
-          <div className="rounded-md bg-warning/10 p-3 text-sm text-warning border border-warning/20">
-            <p role="alert">No organization is associated with this account.</p>
-            <p className="mt-1 text-xs text-warning/80">Please contact your administrator or create an organization to continue.</p>
-          </div>
-          <form onSubmit={handleCreateOrg} className="space-y-4">
-            <Field
-              label="Organization name"
-              type="text"
-              value={newOrgName}
-              onChange={setNewOrgName}
-              autoComplete="organization"
-              required
-            />
-            {orgError && (
-              <div className="rounded-md bg-danger/10 p-3 text-sm text-danger border border-danger/20">
-                <p role="alert">{orgError}</p>
+          {orgSuccess ? (
+            <div className="rounded-md bg-accent/10 p-3 text-sm text-accent border border-accent/20">
+              <p role="status">Organization created. We've sent a verification email to your email address.</p>
+              <button
+                type="button"
+                onClick={() => router.replace(postSignInTarget())}
+                className="mt-2 text-xs font-medium underline hover:text-accent/80"
+              >
+                Continue to application
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="rounded-md bg-warning/10 p-3 text-sm text-warning border border-warning/20">
+                <p role="alert">No organization is associated with this account.</p>
+                <p className="mt-1 text-xs text-warning/80">Please contact your administrator or create an organization to continue.</p>
               </div>
-            )}
-            <button
-              type="submit"
-              disabled={isCreatingOrg || !newOrgName.trim()}
-              className={cn(
-                "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
-                "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
-                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
-                "disabled:opacity-60 disabled:pointer-events-none",
-              )}
-            >
-              {isCreatingOrg ? (
-                <Loader2 className="size-4 animate-spin" aria-hidden />
-              ) : (
-                <Building2 className="size-4" aria-hidden />
-              )}
-              Create organization
-            </button>
-          </form>
+              <form onSubmit={handleCreateOrg} className="space-y-4">
+                <Field
+                  label="Organization name"
+                  type="text"
+                  value={newOrgName}
+                  onChange={setNewOrgName}
+                  autoComplete="organization"
+                  required
+                />
+                {orgError && (
+                  <div className="rounded-md bg-danger/10 p-3 text-sm text-danger border border-danger/20">
+                    <p role="alert">{orgError}</p>
+                  </div>
+                )}
+                <button
+                  type="submit"
+                  disabled={isCreatingOrg || !newOrgName.trim()}
+                  className={cn(
+                    "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
+                    "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
+                    "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
+                    "disabled:opacity-60 disabled:pointer-events-none",
+                  )}
+                >
+                  {isCreatingOrg ? (
+                    <Loader2 className="size-4 animate-spin" aria-hidden />
+                  ) : (
+                    <Building2 className="size-4" aria-hidden />
+                  )}
+                  Create organization
+                </button>
+              </form>
+            </>
+          )}
           <div className="text-center">
             <button
               type="button"
@@ -278,6 +295,7 @@ export default function LoginPage() {
                 setNeedsOrg(false);
                 setNewOrgName("");
                 setOrgError(undefined);
+                setOrgSuccess(false);
               }}
               className="text-sm font-medium text-muted hover:text-foreground transition-colors"
             >

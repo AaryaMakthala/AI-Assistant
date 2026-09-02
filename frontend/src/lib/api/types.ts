@@ -222,3 +222,16 @@ export interface Invitation {
 export interface InvitationListResponse {
   invitations: Invitation[];
 }
+
+/** A workspace. Mirrors the backend `WorkspaceResponse`. */
+export interface Workspace {
+  id: string;
+  name: string;
+  owner_id: string;
+  verified_at: string | null;
+  created_at: string;
+}
+
+export interface WorkspaceListResponse {
+  workspaces: Workspace[];
+}

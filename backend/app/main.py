@@ -8,10 +8,10 @@ from pydantic import BaseModel
 
 from app.api.auth import router as auth_router
 from app.api.chat_v2 import router as grounded_chat_router
+from app.api.demo import router as demo_router
 from app.api.documents_v2 import router as documents_router
 from app.api.workspaces import accept_router
 from app.api.workspaces import router as workspaces_router
-from app.api.workspaces import verify_router
 from app.config import get_settings
 from app.db.session import dispose_engine
 from app.errors import register_exception_handlers, register_request_context
@@ -68,7 +68,47 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as exc:
             logger.exception("Migration runner error: {error}", error=exc)
 
+    # Seed the demo workspace (idempotent) and start the cleanup task.
+    cleanup_task = None
+    if settings.demo_enabled and settings.environment != "test":
+        try:
+            from app.demo.seed import seed_demo_workspace
+            ws_id = await seed_demo_workspace()
+            if ws_id is not None:
+                logger.info("Demo workspace ready: {ws}", ws=ws_id)
+        except Exception as exc:
+            logger.exception("Demo seed failed (non-fatal): {error}", error=exc)
+
+        # Schedule periodic guest cleanup.
+        import asyncio
+
+        async def _run_cleanup_loop():
+            from app.demo.cleanup import cleanup_demo_guests
+
+            interval = settings.demo_guest_ttl_hours * 3600  # Run once per TTL period
+            # First cleanup after a short delay to avoid startup contention.
+            await asyncio.sleep(60)
+            while True:
+                try:
+                    removed = await cleanup_demo_guests()
+                    if removed > 0:
+                        logger.info("Demo cleanup: removed {n} guest(s)", n=removed)
+                except Exception as exc:
+                    logger.warning("Demo cleanup failed: {error}", error=str(exc)[:200])
+                await asyncio.sleep(interval)
+
+        cleanup_task = asyncio.create_task(_run_cleanup_loop())
+
     yield
+
+    # Cancel the cleanup task on shutdown.
+    if cleanup_task is not None:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
     await dispose_engine()
     logger.info("Shutdown complete")
 
@@ -127,7 +167,7 @@ def create_app() -> FastAPI:
     app.include_router(grounded_chat_router)
     app.include_router(workspaces_router)
     app.include_router(accept_router)
-    app.include_router(verify_router)
+    app.include_router(demo_router)
     return app
 
 

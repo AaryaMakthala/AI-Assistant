@@ -550,7 +550,7 @@ async def create_invitation(ctx: WorkspaceOwner, payload: InvitationCreate) -> I
         # query auth.users through RLS, we check invitations only. The accept flow will
         # check actual membership.
 
-        row = (
+        invitation_obj = (
             await session.execute(
                 insert(Invitation)
                 .values(
@@ -561,8 +561,8 @@ async def create_invitation(ctx: WorkspaceOwner, payload: InvitationCreate) -> I
                 )
                 .returning(Invitation)
             )
-        ).one()
-        invitation = InvitationResponse.model_validate(row)
+        ).scalars().first()
+        invitation = InvitationResponse.model_validate(invitation_obj)
 
     logger.info(
         "Invitation {inv} created for {email} in workspace {ws} by {actor}",

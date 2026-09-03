@@ -87,9 +87,6 @@ class Workspace(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False
     )
-    normalized_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    verification_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

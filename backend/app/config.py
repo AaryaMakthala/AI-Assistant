@@ -269,6 +269,20 @@ class Settings(BaseSettings):
     #: into memory.
     max_upload_size_mb: int = Field(default=10, ge=1)
 
+    # --- Demo mode ---
+
+    #: Whether the demo entry endpoint is enabled. Disable in production
+    #: deployments that should not offer anonymous guest access.
+    demo_enabled: bool = True
+    #: Name of the pre-seeded demo workspace.
+    demo_workspace_name: str = "Office Brain Demo"
+    #: Optional: point the demo flow at an existing workspace instead of provisioning a new one.
+    #: When set, seed_demo_workspace() looks up this workspace by ID (must exist) and skips
+    #: owner creation / workspace provisioning entirely.
+    demo_workspace_id: str | None = None
+    #: How long (hours) a guest demo session lives before cleanup.
+    demo_guest_ttl_hours: int = 24
+
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 4096
     #: Time budget for the whole generation. A stalled provider must surface as an error

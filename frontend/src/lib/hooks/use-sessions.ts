@@ -10,7 +10,7 @@ import {
   type ChatSession,
 } from "@/lib/api";
 
-export function useSessions(token?: string) {
+export function useSessions(token?: string, workspaceId?: string) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -27,7 +27,7 @@ export function useSessions(token?: string) {
     if (!token) return;
     setIsLoading(true);
     try {
-      const { sessions: rows } = await listSessions({ token, limit: 50 });
+      const { sessions: rows } = await listSessions({ token, workspaceId, limit: 50 });
       if (mountedRef.current) {
         setSessions(rows);
         setError(undefined);
@@ -43,7 +43,7 @@ export function useSessions(token?: string) {
     } finally {
       if (mountedRef.current) setIsLoading(false);
     }
-  }, [token]);
+  }, [token, workspaceId]);
 
   useEffect(() => {
     // Fetch-on-mount: `refresh` flips the loading flag before awaiting, which the rule
@@ -60,7 +60,7 @@ export function useSessions(token?: string) {
       const previous = sessions;
       setSessions((current) => current.filter((session) => session.id !== id));
       try {
-        await deleteSessionRequest(id, { token });
+        await deleteSessionRequest(id, { token, workspaceId });
       } catch (caught) {
         if (!mountedRef.current) return;
         setSessions(previous);
@@ -71,7 +71,7 @@ export function useSessions(token?: string) {
         );
       }
     },
-    [sessions, token],
+    [sessions, token, workspaceId],
   );
 
   return { sessions, isLoading, error, refresh, remove };

@@ -1057,15 +1057,17 @@ async def _stream_chat(
     principal: CurrentPrincipal,
     payload: ChatStreamRequest,
     llm: LLMProvider,
+    member_role: str,
 ) -> AsyncIterator[str]:
-    """SSE generator: intent → (metadata | history | identity | help | RAG) → stream."""
+    """SSE generator: intent → (metadata | history | identity | help | RAG) → stream.
+
+    ``member_role`` must be resolved *before* this generator is passed to
+    ``StreamingResponse`` — raising ``HTTPException`` inside an already-
+    streaming response triggers a ``RuntimeError``.
+    """
 
     workspace_id = principal.workspace_id
     question = payload.message.strip()
-
-    # 1. Workspace membership check (before any DB write).
-    # This MUST happen before every answer path — INVITED-only users get 403.
-    member_role = await assert_workspace_role(workspace_id, principal)
 
     # 1a. Classify intent: LLM-first with cache, regex as failure fallback.
     effective_query = question  # may be overridden by rewrite below
@@ -1547,8 +1549,13 @@ async def chat_stream(
     is appended.  If it refers to a session that no longer exists, a new one
     is created.
     """
+    # Workspace membership check must happen BEFORE streaming starts.
+    # StreamingResponse sends HTTP headers as soon as iteration begins;
+    # raising HTTPException after that point triggers a RuntimeError.
+    member_role = await assert_workspace_role(principal.workspace_id, principal)
+
     return StreamingResponse(
-        _stream_chat(principal, payload, llm),
+        _stream_chat(principal, payload, llm, member_role),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

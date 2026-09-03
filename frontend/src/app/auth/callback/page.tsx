@@ -4,14 +4,13 @@
  * Where Supabase's emailed links land — verification, and the recovery link that leads to
  * a password reset.
  *
- * This page deliberately does *not* call `exchangeCodeForSession`. The browser client is
- * built by `@supabase/ssr` with `detectSessionInUrl` enabled, so it already consumes the
- * `?code=` during its own initialization. A second exchange would race the first and lose:
- * the PKCE verifier is single-use, so whichever call arrives second fails, and the user is
- * shown an authentication error for a link that actually worked.
+ * The `?code=` query parameter is a single-use PKCE authorization code. We explicitly
+ * call `exchangeCodeForSession` to exchange it for a Supabase session. The session
+ * cookies are persisted by the `@supabase/ssr` browser client's cookie storage.
  *
- * So the job here is only to wait for that built-in exchange to settle. `getSession()`
- * awaits the client's initialization promise, which makes it the join point.
+ * If `detectSessionInUrl` already consumed the code during client initialisation,
+ * `getSession()` will return the established session and we skip the manual exchange.
+ * Otherwise we fall through to an explicit `exchangeCodeForSession` call.
  */
 
 import { Suspense, useEffect, useState } from "react";
@@ -50,18 +49,46 @@ function AuthCallback() {
         return;
       }
 
+      // 1. Check if detectSessionInUrl already exchanged the code during client
+      //    initialisation (the common path for @supabase/ssr browser clients).
       const {
         data: { session },
       } = await supabase.auth.getSession();
       if (!active) return;
 
-      if (!session) {
-        setError("This link is invalid or has expired. Request a new one and try again.");
+      if (session) {
+        const next = safeNext(searchParams.get("next"));
+        router.replace(next ?? "/");
         return;
       }
 
-      // A recovery link produces a real session, which is what authorizes the password
-      // change on the next page.
+      // 2. No session yet — explicitly exchange the PKCE code for a session.
+      //    This covers the case where detectSessionInUrl didn't run or failed
+      //    to pick up the code (e.g. a cold navigation where the client was
+      //    initialised before the URL was fully resolved).
+      const code = searchParams.get("code");
+      if (!code) {
+        if (active) {
+          setError("No authorization code found. Please use the link from your email.");
+        }
+        return;
+      }
+
+      const { error: exchangeError } =
+        await supabase.auth.exchangeCodeForSession(code);
+      if (!active) return;
+
+      if (exchangeError) {
+        if (active) {
+          setError(
+            exchangeError.message ||
+              "This link is invalid or has expired. Request a new one and try again.",
+          );
+        }
+        return;
+      }
+
+      // Exchange succeeded — persist and redirect.
       const next = safeNext(searchParams.get("next"));
       router.replace(next ?? "/");
     };

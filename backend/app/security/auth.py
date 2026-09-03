@@ -31,6 +31,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 from loguru import logger
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.observability.context import bind_principal
@@ -292,6 +293,41 @@ async def get_principal(
             )
 
     principal = Principal(user_id=user_id, workspace_id=workspace_id, email=email)
+
+    # Check for workspace-switch override (set by workspace_switch middleware).
+    try:
+        from app.security.workspace_switch import get_requested_workspace_id
+        requested_ws = get_requested_workspace_id()
+        if requested_ws is not None and requested_ws != workspace_id:
+            # Validate membership in the requested workspace.
+            from app.db.models import Member
+            from app.security.rls import tenant_session
+
+            async with tenant_session(
+                workspace_id=workspace_id, user_id=user_id
+            ) as session:
+                member = (
+                    await session.execute(
+                        select(Member.role).where(
+                            Member.workspace_id == requested_ws,
+                            Member.user_id == user_id,
+                            Member.status == "ACTIVE",
+                        )
+                    )
+                ).scalar_one_or_none()
+
+            if member is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not a member of the requested workspace.",
+                )
+
+            principal = Principal(
+                user_id=user_id, workspace_id=requested_ws, email=email
+            )
+    except ImportError:
+        pass  # workspace_switch module not available
+
     # Tag this request's error reports and traces with who made it — after verification, so
     # the tags reflect claims the server checked rather than ones the client asserted. Only
     # opaque ids travel; see app/observability/context.py.

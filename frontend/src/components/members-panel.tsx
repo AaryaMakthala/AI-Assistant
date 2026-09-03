@@ -13,25 +13,30 @@
  * to anyone else regardless of what the UI chose to render (CLAUDE.md 4.6).
  */
 
-import { AlertCircle, Check, Loader2, Send, ShieldCheck, UserRound, X } from "lucide-react";
+import { AlertCircle, Check, Loader2, Send, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   createInvitation,
+  deleteWorkspace,
   listInvitations,
   listWorkspaceMembers,
   type Invitation,
   type OrgMember,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 export function MembersPanel({
   token,
   workspaceId,
+  onDeleteWorkspace,
 }: {
   token?: string;
   workspaceId?: string;
+  onDeleteWorkspace?: () => void;
 }) {
+  const { signOut } = useAuth();
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [error, setError] = useState<string | undefined>();
@@ -40,6 +45,9 @@ export function MembersPanel({
   const [isInviting, setIsInviting] = useState(false);
   const [inviteSuccess, setInviteSuccess] = useState<string | undefined>();
   const [activeTab, setActiveTab] = useState<"members" | "invitations">("members");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | undefined>();
 
   const fetchData = useCallback(async () => {
     if (!token || !workspaceId) return;
@@ -106,6 +114,31 @@ export function MembersPanel({
       }
     },
     [token, workspaceId, inviteEmail],
+  );
+
+  const handleDeleteOrganization = useCallback(async () => {
+    if (!token || !workspaceId) return;
+    setIsDeleting(true);
+    setDeleteError(undefined);
+    try {
+      await deleteWorkspace(workspaceId, { token });
+      setShowDeleteConfirm(false);
+      // The owner's account is deleted by the backend. Clear the session
+      // and redirect to the login page — do NOT show the zero-org view.
+      await signOut();
+    } catch (caught) {
+      setDeleteError(
+        caught instanceof ApiError
+          ? caught.message
+          : "Failed to delete organization.",
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [token, workspaceId, onDeleteWorkspace]);
+
+  const isOwner = members.some(
+    (m) => m.role === "OWNER" && m.status === "ACTIVE",
   );
 
   if (isLoading) {
@@ -276,6 +309,67 @@ export function MembersPanel({
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+
+      {/* Delete Organization - Owner only */}
+      {isOwner && (
+        <div className="border-t border-border px-3 py-3">
+          {showDeleteConfirm ? (
+            <div className="space-y-3">
+              <div className="rounded-md bg-danger/10 p-3 text-xs text-danger border border-danger/20">
+                <p className="font-medium">Delete organization?</p>
+                <p className="mt-1 text-danger/80">
+                  This will permanently delete the organization, its associated data, and your account. This action cannot be undone.
+                </p>
+              </div>
+              {deleteError && (
+                <p className="text-xs text-danger">{deleteError}</p>
+              )}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteOrganization()}
+                  disabled={isDeleting}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium",
+                    "bg-danger text-white transition-opacity hover:opacity-90",
+                    "disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                >
+                  {isDeleting ? (
+                    <Loader2 className="size-3 animate-spin" aria-hidden />
+                  ) : (
+                    <Trash2 className="size-3" aria-hidden />
+                  )}
+                  Delete organization
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowDeleteConfirm(false);
+                    setDeleteError(undefined);
+                  }}
+                  disabled={isDeleting}
+                  className="rounded-md px-3 py-1.5 text-xs text-muted hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShowDeleteConfirm(true)}
+              className={cn(
+                "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs",
+                "text-danger/70 transition-colors hover:text-danger hover:bg-danger/5",
+              )}
+            >
+              <Trash2 className="size-3.5" aria-hidden />
+              Delete organization
+            </button>
           )}
         </div>
       )}

@@ -228,7 +228,6 @@ export interface Workspace {
   id: string;
   name: string;
   owner_id: string;
-  verified_at: string | null;
   created_at: string;
 }
 

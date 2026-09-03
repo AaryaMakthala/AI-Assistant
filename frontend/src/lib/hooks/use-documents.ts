@@ -75,7 +75,7 @@ export function validateFile(file: File): string | null {
   return null;
 }
 
-export function useDocuments(token?: string) {
+export function useDocuments(token?: string, workspaceId?: string) {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [uploads, setUploads] = useState<UploadState[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -100,7 +100,7 @@ export function useDocuments(token?: string) {
     if (!token) return;
     setIsLoading(true);
     try {
-      const { documents: rows } = await listDocuments({ token, limit: 100 });
+      const { documents: rows } = await listDocuments({ token, workspaceId, limit: 100 });
       if (mountedRef.current) {
         setDocuments(rows);
         setError(undefined);
@@ -116,7 +116,7 @@ export function useDocuments(token?: string) {
     } finally {
       if (mountedRef.current) setIsLoading(false);
     }
-  }, [token]);
+    }, [token, workspaceId]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -165,6 +165,7 @@ export function useDocuments(token?: string) {
       try {
         const accepted = await uploadDocumentWithProgress(file, {
           token,
+          workspaceId,
           onProgress: (fraction) => patch({ progress: fraction }),
           description,
         });
@@ -196,7 +197,7 @@ export function useDocuments(token?: string) {
         });
       }
     },
-    [token],
+    [token, workspaceId],
   );
 
   /** Discard a finished or failed upload row. */
@@ -212,7 +213,7 @@ export function useDocuments(token?: string) {
       if (!token) return;
       setDeletingIds((current) => new Set(current).add(documentId));
       try {
-        await deleteDocument(documentId, { token });
+        await deleteDocument(documentId, { token, workspaceId });
       } catch (caught) {
         if (!(caught instanceof ApiError && caught.status === 404)) {
           if (mountedRef.current) {
@@ -241,7 +242,7 @@ export function useDocuments(token?: string) {
       );
       setError(undefined);
     },
-    [token],
+    [token, workspaceId],
   );
 
   /**
@@ -254,7 +255,7 @@ export function useDocuments(token?: string) {
       if (!token) return;
       setApprovingIds((current) => new Set(current).add(documentId));
       try {
-        const result = await approveDocument(documentId, { token });
+        const result = await approveDocument(documentId, { token, workspaceId });
         if (!mountedRef.current) return;
         setDocuments((current) =>
           current.map((row) =>
@@ -280,7 +281,7 @@ export function useDocuments(token?: string) {
         }
       }
     },
-    [token],
+    [token, workspaceId],
   );
 
   /**
@@ -293,7 +294,7 @@ export function useDocuments(token?: string) {
       if (!token) return;
       setRejectingIds((current) => new Set(current).add(documentId));
       try {
-        const updated = await rejectDocument(documentId, { token });
+        const updated = await rejectDocument(documentId, { token, workspaceId });
         if (!mountedRef.current) return;
         setDocuments((current) =>
           current.map((row) =>
@@ -319,7 +320,7 @@ export function useDocuments(token?: string) {
         }
       }
     },
-    [token],
+    [token, workspaceId],
   );
 
   /** Re-run ingestion for a document that failed. (Not supported by the current
@@ -331,7 +332,7 @@ export function useDocuments(token?: string) {
       // A failed document needs to be re-uploaded.
       if (!token) return;
       try {
-        const doc = await getDocument(documentId, { token });
+        const doc = await getDocument(documentId, { token, workspaceId });
         if (!mountedRef.current) return;
         setDocuments((current) =>
           current.map((row) => (row.id === documentId ? doc : row)),
@@ -347,7 +348,7 @@ export function useDocuments(token?: string) {
         }
       }
     },
-    [token],
+    [token, workspaceId],
   );
 
   return {

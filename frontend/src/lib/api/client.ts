@@ -484,6 +484,29 @@ export async function createWorkspace(
 }
 
 /**
+ * Delete a workspace, all its associated data, AND the owner's auth account.
+ *
+ * Only the workspace OWNER can delete. The backend cascades the deletion
+ * to all workspace-scoped data (members, documents, chunks, chats, invitations),
+ * then permanently removes the owner's Supabase Auth account via the Admin API.
+ * On success the frontend must sign out and redirect to login.
+ */
+export async function deleteWorkspace(
+  workspaceId: string,
+  options: RequestOptions = {},
+): Promise<void> {
+  const response = await fetch(
+    `${BASE_URL}/workspaces/${encodeURIComponent(workspaceId)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(options),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+}
+
+/**
  * Check whether an email address has a registered account in Supabase Auth.
  *
  * Used by the login form to distinguish "email not registered" from
@@ -504,4 +527,33 @@ export async function checkEmail(
   });
   if (!response.ok) throw await failure(response);
   return (await response.json()) as { exists: boolean };
+}
+
+/** Response from POST /demo/enter. */
+export interface DemoEnterResponse {
+  user_id: string;
+  email: string;
+  password: string;
+  workspace_id: string;
+  redirect_url: string;
+}
+
+/**
+ * Enter the demo as a guest member.
+ *
+ * Creates an ephemeral guest user in the demo workspace and returns credentials
+ * the frontend uses to sign in via Supabase.
+ */
+export async function enterDemo(
+  options: RequestOptions = {},
+): Promise<DemoEnterResponse> {
+  const response = await fetch(`${BASE_URL}/demo/enter`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    signal: options.signal,
+  });
+  if (!response.ok) throw await failure(response);
+  return (await response.json()) as DemoEnterResponse;
 }

@@ -84,6 +84,8 @@ function emptyAssistantTurn(): Turn {
 
 export interface UseChatOptions {
   token?: string;
+  /** Active workspace ID — sent as X-Workspace-ID header on every chat request. */
+  workspaceId?: string;
   /** Fires when the backend creates a session, so the sidebar can refresh. */
   onSessionCreated?: (sessionId: string) => void;
   /** Fires when a turn completes, so the session list can re-sort by recency. */
@@ -92,6 +94,7 @@ export interface UseChatOptions {
 
 export function useChat({
   token,
+  workspaceId,
   onSessionCreated,
   onTurnComplete,
 }: UseChatOptions = {}) {
@@ -169,6 +172,7 @@ export function useChat({
           message: question,
           sessionId,
           token,
+          workspaceId,
           signal: controller.signal,
         });
 
@@ -276,7 +280,7 @@ export function useChat({
         }
       }
     },
-    [sessionId, token, updateStreamingTurn],
+    [sessionId, token, workspaceId, updateStreamingTurn],
   );
 
   /** Stop generation, keeping whatever text has already arrived.
@@ -311,7 +315,7 @@ export function useChat({
       setTurns([]);
 
       try {
-        const { messages } = await listMessages(id, { token });
+        const { messages } = await listMessages(id, { token, workspaceId });
         setTurns(
           messages
             .filter((message) => message.role === "user" || message.role === "assistant")
@@ -343,7 +347,7 @@ export function useChat({
         setIsLoadingHistory(false);
       }
     },
-    [token],
+    [token, workspaceId],
   );
 
   return {

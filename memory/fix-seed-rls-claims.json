@@ -1,0 +1,9 @@
+{
+  "name": "fix-seed-rls-claims",
+  "description": "Fixed seed.py to set RLS claims before create_workspace to prevent 'requires an authenticated sub claim' error",
+  "metadata": {
+    "type": "feedback"
+  },
+  "Why": "The demo workspace seed script was failing with 'requires an authenticated sub claim' because the app.create_workspace() SQL function reads app.current_user_id() which depends on RLS claims being set in the session. The fix ensures claims are set before the call.",
+  "How to apply": "In backend/app/demo/seed.py, import set_tenant_claims from app.security.rls and call it with the demo owner's user ID before calling func.app.create_workspace() in the same transaction/session. The set_tenant_claims function uses set_config(..., is_local=True) which is transaction-scoped and won't leak to other connections."
+}

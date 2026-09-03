@@ -45,6 +45,11 @@ CANONICAL_TABLES = frozenset(
     }
 )
 
+#: Stub table registered in Base.metadata so SQLAlchemy can resolve
+#: ForeignKey("auth.users.id") at flush time.  Supabase owns the real
+#: ``auth.users`` table; this is a minimal echo for ORM FK resolution only.
+AUTH_USERS_STUB = "auth.users"
+
 #: Tables from the retired org-centric schema that must never enter the canonical metadata.
 LEGACY_ONLY_TABLES = frozenset(
     {
@@ -89,13 +94,15 @@ def test_canonical_metadata_constructs() -> None:
 
 def test_canonical_metadata_contains_exactly_target_tables() -> None:
     """One authoritative mapping per target table — no strays from the legacy schema."""
-    assert set(Base.metadata.tables) == CANONICAL_TABLES
+    # The stub auth.users table is expected alongside the canonical tables.
+    assert set(Base.metadata.tables) == CANONICAL_TABLES | {AUTH_USERS_STUB}
 
 
 def test_no_duplicate_table_definitions() -> None:
     for name in CANONICAL_TABLES:
         assert len([t for t in Base.metadata.tables if t == name]) == 1
-    assert len(Base.metadata.tables) == len(CANONICAL_TABLES)
+    # auth.users is a stub — one extra table beyond the canonical seven.
+    assert len(Base.metadata.tables) == len(CANONICAL_TABLES) + 1
 
 
 def test_legacy_tables_are_not_in_canonical_metadata() -> None:
@@ -189,9 +196,10 @@ def test_chunk_metadata_column_is_named_metadata() -> None:
 def _fk_targets(table: str, column: str) -> list[tuple[str, str | None]]:
     """(referred table, ondelete) for a column's inline foreign keys.
 
-    Uses ``target_fullname`` rather than ``fk.column``: the referenced ``auth.users``
-    table lives in Supabase and is deliberately absent from our metadata, so resolving
-    the column would raise ``NoReferencedTableError``.
+    ``auth.users`` is now registered as a stub table in Base.metadata so
+    SQLAlchemy can resolve FK targets at flush time.  We can safely use
+    ``fk.column`` here, but ``target_fullname`` is kept for consistency
+    with the rest of the test suite.
     """
     return [
         (fk.target_fullname, fk.ondelete) for fk in _table(table).c[column].foreign_keys
@@ -444,3 +452,38 @@ def test_membership_lookup_is_covered_by_the_unique_index() -> None:
     redundant standalone index is declared (documented in models.py)."""
     assert frozenset({"workspace_id", "user_id"}) in _unique_constraints("members")
     assert _indexes("members") == {}
+
+
+# ---------------------------------------------------------------------------
+# auth.users stub — FK resolution
+# ---------------------------------------------------------------------------
+
+
+def test_auth_users_stub_registered_in_metadata() -> None:
+    """A stub Table for auth.users must exist so SQLAlchemy can resolve
+    ForeignKey("auth.users.id") at flush time without NoReferencedTableError."""
+    assert AUTH_USERS_STUB in Base.metadata.tables
+    stub = Base.metadata.tables[AUTH_USERS_STUB]
+    assert stub.schema == "auth"
+    assert "id" in stub.c
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("workspaces", "owner_id"),
+        ("members", "user_id"),
+        ("documents", "uploaded_by"),
+        ("chat_sessions", "user_id"),
+        ("invitations", "invited_by"),
+    ],
+)
+def test_auth_users_fk_resolves_without_error(table: str, column: str) -> None:
+    """Accessing fk.column must not raise NoReferencedTableError — the stub
+    table makes the target resolvable."""
+    tbl = _table(table)
+    fks = [fk for fk in tbl.c[column].foreign_keys if fk.target_fullname == "auth.users.id"]
+    assert len(fks) == 1, f"expected exactly one auth.users FK on {table}.{column}"
+    # This line raises NoReferencedTableError before the fix.
+    assert fks[0].column.table.name == "users"
+    assert fks[0].column.table.schema == "auth"

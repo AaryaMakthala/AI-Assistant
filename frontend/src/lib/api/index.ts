@@ -6,6 +6,8 @@ export {
   createWorkspace,
   deleteDocument,
   deleteSession,
+  deleteWorkspace,
+  enterDemo,
   getDocument,
   getMe,
   isWorkspaceNotFound,
@@ -21,6 +23,7 @@ export {
   uploadDocumentWithProgress,
 } from "./client";
 export type {
+  DemoEnterResponse,
   RequestOptions,
   SendMessageArgs,
   UploadProgressOptions,

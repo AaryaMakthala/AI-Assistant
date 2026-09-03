@@ -180,24 +180,108 @@ def _source_dict(chunk: RetrievedChunk, *, number: int) -> dict:
     }
 
 
-# Matches complete think blocks: <think>...</think>
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-# Matches unclosed think blocks (model hit max_tokens before closing tag).
-_THINK_TAG_OPEN_RE = re.compile(r"<think>.*", re.DOTALL)
+# Openers and closers for model-injected thinking/reasoning blocks.  Groq runs
+# qwen/qwen3.x and OpenRouter runs gemini-2.5-flash, both of which can emit a
+# reasoning preamble wrapped in control tags before the final answer.  The
+# most common is Qwen3's ``<|start_of_thought|>...</<|end_of_thought|>``.
+_THINK_OPENERS = re.compile(
+    r"<\|?(?:start_of_thought|thinking_start|thinking|think)\|?>",
+    re.IGNORECASE,
+)
+_THINK_CLOSERS = re.compile(
+    r"<\|?(?:end_of_thought|thinking_end|/think|/thinking)\|?>",
+    re.IGNORECASE,
+)
 
 
 def _strip_think_tags(text: str) -> str:
     """Remove model-injected thinking/reasoning blocks from LLM output.
 
-    Some models (e.g. Qwen3) emit ``<think>...</think>`` tags containing
-    internal reasoning.  Users should see only the final answer.
-    Handles both closed and unclosed think blocks.
+    Some models (e.g. Qwen3 on Groq, Gemini-2.5 on OpenRouter) emit reasoning
+    wrapped in tags like ``<|start_of_thought|>...</<|end_of_thought|>``.
+    The user must see only the final answer.  This removes the entire block
+    (tags and the reasoning text between them), and also drops anything after
+    an opener that was never closed (a max-tokens cutoff mid-reasoning).
     """
-    result = _THINK_TAG_RE.sub("", text)
-    # Remove any unclosed think block (open tag without close).
-    if "<think>" in result and "</think>" not in result:
-        result = _THINK_TAG_OPEN_RE.sub("", result)
-    return result.strip()
+    parts = _THINK_OPENERS.split(text)
+    if len(parts) == 1:
+        # No opener — nothing to strip.
+        return text.strip()
+
+    # Reassemble: keep the text before the first opener (parts[0]) and any
+    # segment that comes after a closing tag.  Content inside an unclosed block
+    # (no closer before the next opener or the end) is dropped.
+    kept = [parts[0]]
+    for segment in parts[1:]:
+        closed = _THINK_CLOSERS.split(segment, maxsplit=1)
+        if len(closed) == 2:
+            # Opener ... closer: drop the reasoning, keep what follows.
+            kept.append(closed[1])
+        # else: unclosed block — drop it entirely.
+    return "".join(kept).strip()
+
+
+#: Length of the rolling lookahead buffer used by the streaming think filter.
+#: Markers are short (``<|start_of_thought|>`` is 20 chars), so keeping the tail
+#: well past that means any marker is captured whole inside the window before its
+#: text could be emitted.  This bounds the added streaming latency to ~one short
+#: phrase while still never leaking reasoning.
+_THINK_TAIL = 40
+
+
+async def _stream_think_filtered(source: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Wrap an LLM token stream, suppressing think-block reasoning text.
+
+    The streaming path must not send reasoning to the client, so this filters
+    tokens as they arrive rather than relying on a post-hoc strip.  It keeps a
+    rolling buffer and only yields text once it is known to be outside a
+    reasoning block (``<|start_of_thought|>...<|end_of_thought|>`` or
+    ``<thinking>...</thinking>``).  Markers that arrive split across stream
+    tokens are still caught because we scan the whole buffered window.  An
+    unclosed block (max-tokens cutoff mid-reasoning) is discarded entirely.
+    """
+    buf = ""
+    in_think = False
+    async for token in source:
+        buf += token
+        while True:
+            if in_think:
+                close = _THINK_CLOSERS.search(buf)
+                if close is not None:
+                    buf = buf[close.end():]
+                    in_think = False
+                else:
+                    # Still inside reasoning — hold.  Keep only the tail so an
+                    # arbitrarily long reasoning block cannot grow memory.
+                    if len(buf) > _THINK_TAIL:
+                        buf = buf[-_THINK_TAIL:]
+                    break
+            else:
+                open_m = _THINK_OPENERS.search(buf)
+                close_m = _THINK_CLOSERS.search(buf)
+                if open_m is not None and (close_m is None or open_m.start() < close_m.start()):
+                    # Emit everything before the opener, drop the opener, hide.
+                    if open_m.start():
+                        yield buf[:open_m.start()]
+                    buf = buf[open_m.end():]
+                    in_think = True
+                elif close_m is not None:
+                    # Stray closer with no preceding opener — drop just the closer.
+                    if close_m.start():
+                        yield buf[:close_m.start()]
+                    buf = buf[close_m.end():]
+                else:
+                    # No markers in the buffered window: emit all but the tail,
+                    # which we hold back in case a marker starts at the boundary.
+                    if len(buf) > _THINK_TAIL:
+                        yield buf[:-_THINK_TAIL]
+                        buf = buf[-_THINK_TAIL:]
+                    break
+    # End of stream.
+    if in_think:
+        return  # unclosed thinking block — discard the remainder (caught above too)
+    if buf:
+        yield buf
 
 
 def _display_provider_name(internal_name: str) -> str:
@@ -1461,7 +1545,13 @@ async def _stream_chat(
     completion = Completion()
     full_text = ""
     try:
-        async for token in llm.stream(messages, completion=completion):
+        # Suppress model-injected think/reasoning blocks as they stream, so the
+        # client never sees the raw tags or reasoning text (Qwen3 on Groq,
+        # Gemini-2.5 on OpenRouter).  Any tokens that pass through are also
+        # stripped post-hoc below, so every path (streaming + sync) is covered.
+        async for token in _stream_think_filtered(
+            llm.stream(messages, completion=completion)
+        ):
             full_text += token
             yield await _sse_event("token", {"text": token})
     except LLMError as exc:

@@ -195,7 +195,16 @@ async def _llm_relevance_check(
             f"{titles_context}\n\n"
             f"User question: {question}\n\n"
             "Is this question plausibly about content that might be found in one of "
-            "these documents? Use both filenames AND descriptions to judge relevance. "
+            "these documents?\n\n"
+            "Rules for judging:\n"
+            "- Match broadly on THEME and TOPICS, not just exact keywords.  A question "
+            "like \"How is the company organized?\" matches a document about "
+            "\"organization structure, department layout, reporting lines\".\n"
+            "- Descriptions summarize what a document covers — use them to judge "
+            "thematic relevance, not just filename keywords.\n"
+            "- When in doubt, say relevant.  The retrieval pipeline will verify.\n"
+            "- Only say irrelevant when you are confident the question is completely "
+            "unrelated to ALL listed documents.\n\n"
             "Answer with ONLY a JSON object: "
             '{"relevant": true/false, "confidence": 0.0-1.0, "reason": "..."}'
         )
@@ -250,7 +259,14 @@ async def _llm_relevance_check(
 
 
 def _parse_relevance_response(response_text: str) -> RelevanceDecision:
-    """Parse the LLM's JSON relevance classification response."""
+    """Parse the LLM's JSON relevance classification response.
+
+    The relevance gate is a pre-filter, not a final arbiter — the grounding
+    threshold after retrieval handles the real quality decision.  So we are
+    deliberately permissive here: a question is only rejected when the LLM
+    classifier is *both* confident AND says irrelevant.  Low-confidence
+    rejections and ambiguous cases all pass through to retrieval.
+    """
     import json
 
     try:
@@ -261,6 +277,27 @@ def _parse_relevance_response(response_text: str) -> RelevanceDecision:
             relevant = bool(data.get("relevant", True))
             confidence = float(data.get("confidence", 0.5))
             reason = str(data.get("reason", "llm_classification"))
+
+            # Be permissive: only reject when the LLM is both confident AND
+            # says irrelevant.  Low-confidence "irrelevant" calls are likely
+            # false negatives on short/general questions whose keywords don't
+            # exactly match document titles — retrieval + grounding will
+            # handle the real quality decision.
+            if not relevant and confidence < 0.7:
+                logger.debug(
+                    "Relevance gate overriding low-confidence rejection "
+                    "(confidence={confidence:.2f}, reason={reason}), "
+                    "passing to retrieval",
+                    confidence=confidence,
+                    reason=reason,
+                )
+                return RelevanceDecision(
+                    relevant=True,
+                    reason=f"low_confidence_override:{reason}",
+                    confidence=confidence,
+                    layer="llm_classifier",
+                )
+
             return RelevanceDecision(
                 relevant=relevant,
                 reason=reason,

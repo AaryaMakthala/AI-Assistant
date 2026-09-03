@@ -131,10 +131,17 @@ class Intent:
 # ---------------------------------------------------------------------------
 
 # Overview patterns: "what is X", "tell me about X", "summarize X"
-# "what is" must NOT be followed by "the" (that's a fact lookup: "What is the rate?")
+# "what is" must NOT be followed by "the" (that's a fact lookup: "What is the rate?").
+# Coverage/scope questions ("what does X cover", "what topics does X cover") are
+# treated as overviews too: they ask for the full scope of a document, so they need
+# the broad-retrieval + aggregate-grounding treatment rather than a narrow fact lookup.
 _OVERVIEW_PATTERNS = re.compile(
     r"(?:what\s+is\s+(?!the\s)|what(?:'?s)\s+(?!the\s)|tell\s+me\s+about|describe|summarize|"
-    r"overview\s+of|explain|give\s+me\s+(?:an\s+)?overview)\b",
+    r"overview\s+of|explain|give\s+me\s+(?:an\s+)?overview|"
+    r"what\s+is\s+covered(?:\s+in|\s+by)|"
+    r"what\s+(?:topics|areas|subjects)\s+(?:does|do)\s+.{1,40}\s+cover|"
+    r"what\s+does\s+.{1,40}\s+cover)"
+    r"\b",
     re.IGNORECASE,
 )
 

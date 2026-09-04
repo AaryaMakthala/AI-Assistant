@@ -253,6 +253,11 @@ def decode_token(token: str) -> dict[str, Any]:
             # exactly the algorithm its key was chosen for.
             algorithms=[algorithm],
             audience=JWT_AUDIENCE,
+            # Clock-skew tolerance: the issuing server's clock is authoritative for
+            # iat/exp, and a host clock a couple of seconds behind it rejects fresh
+            # tokens as "not yet valid" (CLAUDE.md risk register — verified live on a
+            # no-NTP host). See jwt_leeway_seconds in config.
+            leeway=get_settings().jwt_leeway_seconds,
             options={"require": ["exp", "sub"]},
         )
     except jwt.InvalidTokenError as exc:

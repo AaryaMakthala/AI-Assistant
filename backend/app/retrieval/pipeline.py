@@ -142,6 +142,13 @@ async def retrieve(
     if not text:
         return RetrievalResult(chunks=[], grounded=False, top_score=None)
 
+    # Normalize for retrieval: fix garbled text (elongated chars, extra
+    # punctuation, etc.) before embedding and keyword search so similarity
+    # scores are not penalized by typos.  The original text is kept for the
+    # relevance gate (which handles its own normalization internally).
+    from app.retrieval.intent import normalize_for_classification
+    normalized_text = normalize_for_classification(text)
+
     settings = get_settings()
     # Phase B: OVERVIEW queries need broader retrieval.
     is_overview = query_shape == QueryShape.OVERVIEW
@@ -240,7 +247,8 @@ async def retrieve(
     # --- Hybrid retrieval ---
     # Embed the query in a worker thread: sentence-transformers on CPU is the
     # slowest step before the reranker, and the event loop should not pay for it.
-    query_embedding = await asyncio.to_thread(embed_query, text)
+    # Use normalized_text so garbled queries don't produce weak embeddings.
+    query_embedding = await asyncio.to_thread(embed_query, normalized_text)
 
     semantic = await semantic_search(
         session,
@@ -251,7 +259,7 @@ async def retrieve(
     )
     keyword = await keyword_search(
         session,
-        query=text,
+        query=normalized_text,
         workspace_id=workspace_id,
         limit=candidate_count,
         document_id=target_doc_id,
@@ -293,7 +301,7 @@ async def retrieve(
         )
 
     reranked = await asyncio.to_thread(
-        rerank_scores, text, [candidate.content for candidate in candidates]
+        rerank_scores, normalized_text, [candidate.content for candidate in candidates]
     )
     scored = sorted(
         zip(candidates, reranked, strict=True),

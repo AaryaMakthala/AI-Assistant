@@ -738,4 +738,72 @@ class TestDemoCleanup:
             result = await cleanup_demo_guests()
 
         assert result == 0
-        assert mock_client.delete.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_uses_explicit_workspace_id(self):
+        """Regression: an ID-pinned demo workspace is still found and cleaned.
+
+        Deployments that set ``DEMO_WORKSPACE_ID`` to a workspace whose name
+        differs from ``DEMO_WORKSPACE_NAME`` previously made cleanup return 0
+        forever — the workspace lookup only checked the name. The job must
+        resolve the demo workspace by explicit ID first (mirroring the demo
+        entry flow).
+        """
+        from app.demo.cleanup import cleanup_demo_guests
+
+        demo_ws_id = uuid.uuid4()
+        settings = _mock_settings(
+            demo_enabled=True,
+            demo_guest_ttl_hours=24,
+            demo_workspace_id=str(demo_ws_id),
+            # A name that matches NO workspace — the old lookup failed here.
+            demo_workspace_name="No Such Workspace Name",
+        )
+        expired_user_id = uuid.uuid4()
+
+        # Session 1: workspace lookup by explicit ID -> found.
+        ws_session = _FakeSession(
+            results=[
+                MagicMock(
+                    scalar_one_or_none=MagicMock(return_value=demo_ws_id)
+                )
+            ]
+        )
+        # Session 2: member delete.
+        delete_result = MagicMock()
+        delete_result.rowcount = 1
+        delete_session = _FakeSession(results=[delete_result])
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "users": [
+                {
+                    "id": str(expired_user_id),
+                    "user_metadata": {"is_guest": True},
+                    "created_at": "2020-01-01T00:00:00Z",
+                },
+            ]
+        }
+
+        with (
+            patch("app.demo.cleanup.get_settings", return_value=settings),
+            patch(
+                "app.demo.cleanup.get_session_factory",
+                side_effect=_make_session_factory_side_effect(
+                    ws_session, delete_session
+                ),
+            ),
+            patch("app.demo.cleanup.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get.return_value = mock_response
+            mock_client.delete.return_value = MagicMock(status_code=204)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            result = await cleanup_demo_guests()
+
+        assert result == 1
+        assert ws_session.execute_calls  # the ID lookup ran

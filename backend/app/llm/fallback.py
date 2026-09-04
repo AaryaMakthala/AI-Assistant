@@ -20,6 +20,7 @@ they hold one model or a failover chain.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 
@@ -155,6 +156,21 @@ class FallbackChainProvider:
                     # Permanent fault (bad key, malformed request) — do not retry.
                     raise
 
+                # On 429 (rate limit), retry the same provider once with a short
+                # backoff before falling back.  A 429 typically resolves within
+                # seconds, and retrying the same provider avoids the ~2s penalty
+                # of switching to a fallback provider.
+                if exc.retryable and hasattr(exc, "status_code") and exc.status_code == 429 and not getattr(exc, "_retried", False):
+                    backoff = getattr(exc, "retry_after", 2.0)
+                    logger.info(
+                        "LLM retrying provider={provider} after 429 backoff={backoff:.1f}s",
+                        provider=provider.name,
+                        backoff=backoff,
+                    )
+                    exc._retried = True  # type: ignore[attr-defined]
+                    await asyncio.sleep(backoff)
+                    continue  # retry same provider
+
                 if i < len(self._providers) - 1:
                     logger.info(
                         "LLM fallback provider={next} reason=previous_provider_failure",
@@ -209,12 +225,22 @@ class FallbackChainProvider:
                 ) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", "replace")
-                        raise LLMError(
+                        retryable = response.status_code == 429 or response.status_code >= 500
+                        exc = LLMError(
                             f"Provider returned HTTP {response.status_code}: "
                             f"{body[:error_body_limit]}",
                             provider=provider.name,
-                            retryable=response.status_code == 429 or response.status_code >= 500,
+                            retryable=retryable,
                         )
+                        # Attach metadata for the 429 retry logic in the fallback chain.
+                        exc.status_code = response.status_code  # type: ignore[attr-defined]
+                        if response.status_code == 429:
+                            retry_after_header = response.headers.get("retry-after")
+                            try:
+                                exc.retry_after = float(retry_after_header) if retry_after_header else 2.0  # type: ignore[attr-defined]
+                            except (ValueError, TypeError):
+                                exc.retry_after = 2.0  # type: ignore[attr-defined]
+                        raise exc
                     async for line in response.aiter_lines():
                         token = self._parse_line(line, completion)
                         if token is not None:

@@ -312,6 +312,13 @@ class Settings(BaseSettings):
     jwt_algorithms: list[str] = ["ES256", "RS256", "HS256"]
     #: How long a fetched signing key is trusted before it is re-fetched.
     jwks_cache_seconds: int = 600
+    #: Clock-skew tolerance (seconds) when verifying `iat`/`exp`/`nbf`. Issuer and
+    #: host clocks are never perfectly aligned, and with zero leeway a host whose
+    #: clock runs even a couple of seconds behind the issuer rejects freshly issued
+    #: tokens as "not yet valid" (ImmatureSignatureError) — observed live against
+    #: Supabase on a machine with no NTP sync. 30s absorbs NTP-grade drift on any
+    #: host without materially widening the acceptance window for expired tokens.
+    jwt_leeway_seconds: int = Field(default=30, ge=0)
 
     @model_validator(mode="after")
     def _derive_llm_config(self) -> "Settings":

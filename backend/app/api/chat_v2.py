@@ -1173,6 +1173,50 @@ async def _stream_chat(
     workspace_id = principal.workspace_id
     question = payload.message.strip()
 
+    # 0. Resolve the session to append to — ONCE, before anything else.
+    # Reuse payload.session_id when it names a session this user owns in this
+    # workspace (a continuation); otherwise create a new session (first message
+    # of a conversation, or an unknown/stale id).  Every persistence branch
+    # below — RAG, direct answers, clarification — writes under this one id,
+    # so a conversation can never fragment across ChatSession rows.
+    session_id: uuid.UUID | None = None
+    session_created = False
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        if payload.session_id is not None:
+            existing = (
+                await db.execute(
+                    select(ChatSession.id).where(
+                        ChatSession.id == payload.session_id,
+                        ChatSession.workspace_id == workspace_id,
+                        ChatSession.user_id == principal.user_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                session_id = existing
+        if session_id is None:
+            row = (
+                await db.execute(
+                    insert(ChatSession)
+                    .values(
+                        workspace_id=workspace_id,
+                        user_id=principal.user_id,
+                    )
+                    .returning(ChatSession.id)
+                )
+            ).scalar_one()
+            session_id = row
+            session_created = True
+    assert session_id is not None
+
+    # Announce a genuinely new session to the client (sidebar entry; the
+    # frontend adopts this id for subsequent turns).  Turns that continue an
+    # existing conversation reuse the same id and must NOT re-emit it — the
+    # frontend re-points at whatever session_id the last event delivered, so a
+    # per-message event would re-aim every later answer at the latest fragment.
+    if session_created:
+        yield await _sse_event("session", {"session_id": str(session_id)})
+
     # 1a. Classify intent: LLM-first with cache, regex as failure fallback.
     effective_query = question  # may be overridden by rewrite below
     needs_clarification = False
@@ -1183,7 +1227,7 @@ async def _stream_chat(
     history_turns = await _load_recent_history(
         workspace_id=workspace_id,
         user_id=principal.user_id,
-        session_id=payload.session_id,
+        session_id=session_id,
     )
     history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
 
@@ -1209,21 +1253,11 @@ async def _stream_chat(
 
     # 1c. Handle ambiguity: ask for clarification instead of refusing.
     if needs_clarification or intent.needs_clarification:
-        # Create session and persist.
-        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
-            row = (
-                await db.execute(
-                    insert(ChatSession)
-                    .values(workspace_id=workspace_id, user_id=principal.user_id)
-                    .returning(ChatSession.id)
-                )
-            ).scalar_one()
-            clarify_session_id = row
-        yield await _sse_event("session", {"session_id": str(clarify_session_id)})
+        # Persist the exchange under the session resolved in step 0.
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
             await db.execute(
                 insert(ChatMessage).values(
-                    session_id=clarify_session_id, role="user", content=question,
+                    session_id=session_id, role="user", content=question,
                 )
             )
         clarification_text = refusal_message(ResponseReason.NEEDS_CLARIFICATION)
@@ -1233,7 +1267,7 @@ async def _stream_chat(
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
             await db.execute(
                 insert(ChatMessage).values(
-                    session_id=clarify_session_id, role="assistant",
+                    session_id=session_id, role="assistant",
                     content=clarification_text, sources=[],
                 )
             )
@@ -1333,7 +1367,7 @@ async def _stream_chat(
             intent=intent,
             workspace_id=workspace_id,
             user_id=principal.user_id,
-            session_id=payload.session_id,
+            session_id=session_id,
         )
         logger.info(
             "intent=conversation_history sub={sub} workspace={ws} retrieval_called=False",
@@ -1356,23 +1390,9 @@ async def _stream_chat(
             refusal=refusal_reason.value if refusal_reason else None,
         )
 
-    # For non-document intents, emit the answer and persist.
+    # For non-document intents, emit the answer and persist under the session
+    # resolved in step 0 — no new ChatSession per turn.
     if answer is not None:
-        # We still need a session to persist the turn.
-        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
-            row = (
-                await db.execute(
-                    insert(ChatSession)
-                    .values(
-                        workspace_id=workspace_id,
-                        user_id=principal.user_id,
-                    )
-                    .returning(ChatSession.id)
-                )
-            ).scalar_one()
-            session_id = row
-        assert session_id is not None
-        yield await _sse_event("session", {"session_id": str(session_id)})
         # Persist user message.
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
             await db.execute(
@@ -1414,48 +1434,7 @@ async def _stream_chat(
         return
 
     # --- Document content path (RAG) ---
-    # 2. Create or verify session.
-    session_id: uuid.UUID | None = None
-    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
-        if payload.session_id is not None:
-            existing = (
-                await db.execute(
-                    select(ChatSession.id).where(
-                        ChatSession.id == payload.session_id,
-                        ChatSession.workspace_id == workspace_id,
-                        ChatSession.user_id == principal.user_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if existing is not None:
-                session_id = existing
-            else:
-                row = (
-                    await db.execute(
-                        insert(ChatSession)
-                        .values(
-                            workspace_id=workspace_id,
-                            user_id=principal.user_id,
-                        )
-                        .returning(ChatSession.id)
-                    )
-                ).scalar_one()
-                session_id = row
-        else:
-            row = (
-                await db.execute(
-                    insert(ChatSession)
-                    .values(
-                        workspace_id=workspace_id,
-                        user_id=principal.user_id,
-                    )
-                    .returning(ChatSession.id)
-                )
-            ).scalar_one()
-            session_id = row
-
-    assert session_id is not None
-    yield await _sse_event("session", {"session_id": str(session_id)})
+    # 2. The session was resolved up front (step 0) — just append to it.
 
     # 3. Persist user message.
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:

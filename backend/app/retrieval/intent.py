@@ -124,6 +124,7 @@ class Intent:
     query_shape: QueryShape | None = None
     needs_clarification: bool = False
     skip_rewrite: bool = False
+    rewritten_query: str | None = None
     reason: str = ""
 
 
@@ -659,6 +660,7 @@ def _llm_route_to_intent(
             IntentCategory.DOCUMENT_CONTENT,
             IntentCategory.DOCUMENT_LIST,
         ),
+        rewritten_query=route_result.query if route_result.needs_rewrite and route_result.query else None,
         reason=f"llm_router:{route_result.route} conf={route_result.confidence:.2f}",
     )
 

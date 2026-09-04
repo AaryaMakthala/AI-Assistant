@@ -182,35 +182,35 @@ async def smart_mock_route(
 
     # Greetings
     if _re.match(r"^(?:hi+|hello+|hey+|hola|bonjour|namaste|ciao|bye|thank)", q):
-        return RouteResult(route="direct", confidence=0.95, reasoning="mock")
+        return RouteResult(route="GREETING", confidence=0.95, reasoning="mock")
 
     # Out of scope — math, geography, weather, programming
     if _re.search(r"(?:capital\s+of|weather|joke|python|javascript|\d\s+\d)", q):
-        return RouteResult(route="out_of_scope", confidence=0.95, reasoning="mock")
+        return RouteResult(route="OUT_OF_SCOPE", confidence=0.95, reasoning="mock")
 
     # Identity: assistant
     if _re.search(r"(?:who\s+are\s+you|what\s+(?:is|are)\s+your)", q):
-        return RouteResult(route="direct", confidence=0.95, reasoning="mock")
+        return RouteResult(route="IDENTITY_ASSISTANT", confidence=0.95, reasoning="mock")
 
     # Identity: user
     if _re.search(r"(?:my\s+name\s+is|what\s+is\s+my\s+(?:name|info|email))", q):
-        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
+        return RouteResult(route="IDENTITY_USER", confidence=0.9, reasoning="mock")
 
     # Permissions
     if _re.search(r"(?:who\s+can|can\s+(?:i|we|members?)\s+(?:upload|add|invite|approve|delete))", q):
-        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
+        return RouteResult(route="PERMISSIONS", confidence=0.9, reasoning="mock")
 
     # App help
     if _re.search(r"(?:monitored|tracked|watched|logging)", q):
-        return RouteResult(route="direct", confidence=0.8, reasoning="mock")
+        return RouteResult(route="APP_HELP", confidence=0.8, reasoning="mock")
 
     # App help — invite/add member
     if _re.search(r"(?:how\s+(?:do|can|should)\s+(?:i|we)\s+(?:invite|add|onboard)\s+(?:a\s+)?(?:member|user|person|colleague|someone))", q):
-        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
+        return RouteResult(route="APP_HELP", confidence=0.9, reasoning="mock")
 
     # Conversation history
     if _re.search(r"(?:what\s+(?:are|were)\s+(?:the\s+)?(?:questions?|things?)|what\s+(?:did|was)\s+(?:my|the)\s+(?:previous|last)|what\s+did\s+(?:i|we)\s+(?:ask|say)|what\s+did\s+you\s+(?:just\s+)?(?:answer|say)|what\s+have\s+(?:i|we)\s+(?:been|discussed|talked)|show\s+(?:me\s+)?(?:my\s+)?(?:previous|recent|last))", q):
-        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
+        return RouteResult(route="CONVERSATION_HISTORY", confidence=0.9, reasoning="mock")
 
     # Vague content questions — ask for clarification (must be BEFORE 'about' pattern)
     if _re.search(r"(?:what\s+(?:theu|it|does\s+it)\s+(?:say|sau|mean|about))", q):

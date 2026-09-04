@@ -19,12 +19,21 @@ model's scale — which is why the model is pinned rather than swappable without
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from app.config import get_settings
+
+# Force HuggingFace Hub to load models from the local cache only.
+# On startup the default behaviour issues dozens of HEAD requests to
+# huggingface.co checking for model updates, adding several seconds of
+# pure network overhead.  The model is pinned in config and should
+# already be cached after the first run; set this before importing
+# sentence_transformers so the setting is visible during model load.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 if TYPE_CHECKING:
     from sentence_transformers import CrossEncoder

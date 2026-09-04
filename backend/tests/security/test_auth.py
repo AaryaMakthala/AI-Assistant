@@ -110,6 +110,35 @@ def test_expired_token_is_rejected() -> None:
     assert exc.value.status_code == 401
 
 
+def test_token_issued_a_few_seconds_in_the_future_is_accepted() -> None:
+    """Clock-skew tolerance (jwt_leeway_seconds).
+
+    Supabase signs tokens with its own clock, which can run a second or two ahead
+    of the host's. With zero leeway those fresh tokens were rejected with
+    ImmatureSignatureError on a machine whose clock has no NTP source — observed
+    live against real Supabase tokens. A token whose iat is within the leeway
+    window must verify.
+    """
+    user_id, workspace_id = uuid.uuid4(), uuid.uuid4()
+    now = int(datetime.now(timezone.utc).timestamp())
+    token = _token(
+        {"sub": str(user_id), "workspace_id": str(workspace_id), "iat": now + 5}
+    )
+
+    claims = decode_token(token)
+    assert claims["sub"] == str(user_id)
+
+
+def test_token_issued_far_in_the_future_is_rejected() -> None:
+    """Leeway is tolerance, not a hole: iat beyond the window is still refused."""
+    now = int(datetime.now(timezone.utc).timestamp())
+    token = _token({"sub": str(uuid.uuid4()), "iat": now + 300})
+
+    with pytest.raises(HTTPException) as exc:
+        decode_token(token)
+    assert exc.value.status_code == 401
+
+
 def test_token_without_expiry_is_rejected() -> None:
     """A token that never expires is a permanent credential if it ever leaks."""
     payload = {

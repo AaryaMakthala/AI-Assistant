@@ -319,23 +319,48 @@ export function useChat({
         setTurns(
           messages
             .filter((message) => message.role === "user" || message.role === "assistant")
-            .map((message) => ({
-              id: message.id,
-              role: message.role as "user" | "assistant",
-              content: message.content,
-              // A stored turn is settled by definition; `incomplete` records that its
-              // text is partial, which is a different claim from "still streaming".
-              status: "complete" as const,
-              // Only citations are persisted. The full retrieved set is not, so a
-              // reloaded turn shows what was cited rather than inventing a superset.
-              sources: message.citations,
-              citations: message.citations,
-              routes: message.routes,
-              routeReason: "",
-              steps: [],
-              sqlQuery: message.sql_query,
-              incomplete: message.incomplete,
-            })),
+            .map((message) => {
+              // Renumber persisted citations sequentially so display has no gaps.
+              // The original numbers may be non-sequential (e.g. 1,2,4,5,6) if the
+              // LLM didn't cite every retrieved source.
+              const renumbered: Citation[] = message.citations.map(
+                (c, i) => ({ ...c, number: i + 1 }),
+              );
+              // Build a map from old number → new number for answer-text rewriting.
+              const numberMap = new Map<number, number>();
+              message.citations.forEach((c, i) => {
+                numberMap.set(c.number, i + 1);
+              });
+              // Update bracketed citation references in the answer text.
+              const content = numberMap.size > 0
+                ? message.content.replace(
+                    /\[(\d+(?:\s*,\s*\d+)*)\]/g,
+                    (match, inner: string) => {
+                      const newParts = inner
+                        .split(",")
+                        .map((p: string) => {
+                          const oldNum = parseInt(p.trim(), 10);
+                          const newNum = numberMap.get(oldNum);
+                          return newNum !== undefined ? String(newNum) : p.trim();
+                        });
+                      return `[${newParts.join(", ")}]`;
+                    },
+                  )
+                : message.content;
+              return {
+                id: message.id,
+                role: message.role as "user" | "assistant",
+                content,
+                status: "complete" as const,
+                sources: renumbered,
+                citations: renumbered,
+                routes: message.routes,
+                routeReason: "",
+                steps: [],
+                sqlQuery: message.sql_query,
+                incomplete: message.incomplete,
+              };
+            }),
         );
       } catch (error) {
         setTransportError(

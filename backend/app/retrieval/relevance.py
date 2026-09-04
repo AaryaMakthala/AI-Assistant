@@ -54,6 +54,22 @@ _GREETING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Contact / personnel questions — "who should I contact", "who handles X",
+# "who is responsible for" — are plausibly about org charts, team directories,
+# or role descriptions in workspace documents.  Pass them directly without
+# relying on the LLM classifier, which can confidently reject these when the
+# word "contact" or "handle" doesn't appear in any document title.
+_CONTACT_PERSONNEL_PATTERN = re.compile(
+    r"(?:who\s+(?:should\s+)?(?:i\s+)?(?:contact|reach\s+out\s+to|"
+    r"email|call|talk\s+to|get\s+in\s+touch\s+with))\b"
+    r"|(?:who\s+(?:handles?|manages?|deals?\s+with|is\s+(?:responsible|in\s+charge|"
+    r"accountable)\s+(?:for|of)))\b"
+    r"|(?:who\s+(?:do\s+i|can\s+i|should\s+i)\s+(?:"
+    r"(?:contact|reach\s+out\s+to|email|call|talk\s+to|go\s+to)))\b",
+    re.IGNORECASE,
+)
+
+
 # Obviously unrelated patterns — well-known general-knowledge questions that
 # have nothing to do with any workspace.  Conservative: only reject the truly
 # obvious cases, push anything uncertain to Layer 2.
@@ -131,6 +147,16 @@ async def check_relevance(
                 confidence=1.0,
                 layer="deterministic",
             )
+
+    # Contact / personnel questions pass automatically — they are plausibly
+    # about org charts, team directories, or role descriptions.
+    if _CONTACT_PERSONNEL_PATTERN.search(q):
+        return RelevanceDecision(
+            relevant=True,
+            reason="contact_personnel_heuristic",
+            confidence=0.9,
+            layer="deterministic",
+        )
 
     # --- Layer 2: LLM-based relevance classifier ---
     # Use workspace document titles/topics as context — never chunk text,

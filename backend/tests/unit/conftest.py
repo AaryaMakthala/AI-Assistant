@@ -182,39 +182,39 @@ async def smart_mock_route(
 
     # Greetings
     if _re.match(r"^(?:hi+|hello+|hey+|hola|bonjour|namaste|ciao|bye|thank)", q):
-        return RouteResult(route="GREETING", confidence=0.95, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.95, reasoning="mock")
 
     # Out of scope — math, geography, weather, programming
     if _re.search(r"(?:capital\s+of|weather|joke|python|javascript|\d\s+\d)", q):
-        return RouteResult(route="OUT_OF_SCOPE", confidence=0.95, reasoning="mock")
+        return RouteResult(route="out_of_scope", confidence=0.95, reasoning="mock")
 
     # Identity: assistant
     if _re.search(r"(?:who\s+are\s+you|what\s+(?:is|are)\s+your)", q):
-        return RouteResult(route="IDENTITY_ASSISTANT", confidence=0.95, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.95, reasoning="mock")
 
     # Identity: user
     if _re.search(r"(?:my\s+name\s+is|what\s+is\s+my\s+(?:name|info|email))", q):
-        return RouteResult(route="IDENTITY_USER", confidence=0.9, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
 
     # Permissions
     if _re.search(r"(?:who\s+can|can\s+(?:i|we|members?)\s+(?:upload|add|invite|approve|delete))", q):
-        return RouteResult(route="PERMISSIONS", confidence=0.9, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
 
     # App help
     if _re.search(r"(?:monitored|tracked|watched|logging)", q):
-        return RouteResult(route="APP_HELP", confidence=0.8, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.8, reasoning="mock")
 
     # App help — invite/add member
     if _re.search(r"(?:how\s+(?:do|can|should)\s+(?:i|we)\s+(?:invite|add|onboard)\s+(?:a\s+)?(?:member|user|person|colleague|someone))", q):
-        return RouteResult(route="APP_HELP", confidence=0.9, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
 
     # Conversation history
     if _re.search(r"(?:what\s+(?:are|were)\s+(?:the\s+)?(?:questions?|things?)|what\s+(?:did|was)\s+(?:my|the)\s+(?:previous|last)|what\s+did\s+(?:i|we)\s+(?:ask|say)|what\s+did\s+you\s+(?:just\s+)?(?:answer|say)|what\s+have\s+(?:i|we)\s+(?:been|discussed|talked)|show\s+(?:me\s+)?(?:my\s+)?(?:previous|recent|last))", q):
-        return RouteResult(route="CONVERSATION_HISTORY", confidence=0.9, reasoning="mock")
+        return RouteResult(route="direct", confidence=0.9, reasoning="mock")
 
     # Vague content questions — ask for clarification (must be BEFORE 'about' pattern)
     if _re.search(r"(?:what\s+(?:theu|it|does\s+it)\s+(?:say|sau|mean|about))", q):
-        return RouteResult(route="NEEDS_CLARIFICATION", confidence=0.8, reasoning="mock")
+        return RouteResult(route="clarification", confidence=0.8, reasoning="mock")
 
     # Bare pronoun references — check history first for document context.
     # 'what are they' after a document question → METADATA (doc_list).
@@ -230,71 +230,71 @@ async def smart_mock_route(
         if history:
             for turn in history[-4:]:
                 if turn.get("role") == "user" and _DOC_HISTORY_RE.search(turn.get("content", "")):
-                    return RouteResult(route="METADATA", confidence=0.85, reasoning="mock_pronoun_doc_history")
-        return RouteResult(route="NEEDS_CLARIFICATION", confidence=0.85, reasoning="mock")
+                    return RouteResult(route="metadata", confidence=0.85, reasoning="mock_pronoun_doc_history")
+        return RouteResult(route="clarification", confidence=0.85, reasoning="mock")
 
-    # Topic-qualified content questions go to DOCUMENT_CONTENT
+    # Topic-qualified content questions go to retrieval
     if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
-        return RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="mock")
+        return RouteResult(route="retrieval", confidence=0.9, reasoning="mock")
 
     # Metadata — document count
     if _re.search(
         r"(?:how\s+many|number\s+of)\s+(?:uploaded\s+)?(?:my\s+|the\s+|this\s+)?(?:own\s+)?(?:documents?|files?|uploaded)\b",
         q,
     ):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — document list
     if _re.search(
         r"(?:list|show)\s+(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?(?:my\s+|the\s+|this\s+)?(?:uploaded\s+)?(?:documents?|files?)\b",
         q,
     ):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — "what are the documents" / "what are the names of documents"
     if _re.search(r"^what\s+(?:are|is)\s+(?:the\s+|my\s+)?(?:names?\s+(?:of\s+)?)?(?:uploaded\s+)?(?:documents?|files?)\s*$", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — "what documents have I uploaded"
     if _re.search(r"^what\s+(?:the\s+|my\s+|this\s+)?(?:uploaded\s+)?(?:documents?|files?)\s+(?:have|are|did)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — "list all documents"
     if _re.search(r"^(?:list|show)\s+(?:all\s+)?(?:the\s+|my\s+)?(?:uploaded\s+)?(?:documents?|files?)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — member count (with optional status)
     if _re.search(r"^(?:how\s+many|number\s+of)\s+(?:\w+\s+)?(?:members?|people|users?|employees?)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — member status queries
     if _re.search(r"^how\s+many\s+are\s+(?:invited|pending|active|confirmed|removed)\s*$", q):
-        return RouteResult(route="METADATA", confidence=0.85, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.85, reasoning="mock")
 
     if _re.search(r"^who\s+(?:is|are)\s+(?:invited|pending|active)\s*$", q):
-        return RouteResult(route="METADATA", confidence=0.85, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.85, reasoning="mock")
 
     # Metadata — member list (with optional status)
     if _re.search(r"(?:list|show)\s+(?:all\s+)?(?:the\s+|my\s+)?(?:\w+\s+)?(?:members?|people|users?|employees?)\b", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — role query
     if _re.search(r"(?:what\s+(?:is|are)\s+my|my)\s+(?:role|access|permission)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — page count
     if _re.search(r"(?:how\s+many|number\s+of|total)\s+\w*\s*(?:pages?|sheets?)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — document description/summary
     if _re.search(r"(?:description|summary|summery|descrption|descriction)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — company/workspace name
     if _re.search(r"(?:company|workspace|organization|org|team)\s+(?:name|is\s+(?:called|named))", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
     if _re.search(r"what(?:'?s|\s+is)\s+(?:the\s+)?(?:(?:name\s+(?:of|for)\s+(?:the\s+|this\s+|our\s+)?)?(?:company|workspace|organization|org|team)(?:\s+name)?|(?:company|workspace|organization|org|team)\s+name)", q):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
     # Metadata — broad document listing phrasings ("what are documents present",
     # "documents details", "give me 3 document uploaded", etc.)
@@ -308,7 +308,7 @@ async def smart_mock_route(
         r")",
         q,
     ):
-        return RouteResult(route="METADATA", confidence=0.9, reasoning="mock")
+        return RouteResult(route="metadata", confidence=0.9, reasoning="mock")
 
-    # Default: document content (RAG path)
-    return RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="mock")
+    # Default: retrieval (RAG path)
+    return RouteResult(route="retrieval", confidence=0.9, reasoning="mock")

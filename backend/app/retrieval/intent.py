@@ -119,6 +119,7 @@ class Intent:
     category: IntentCategory
     metadata_sub: MetadataSubIntent | None = None
     member_status: str | None = None
+    member_role: str | None = None
     conversation_history_sub: ConversationHistorySubIntent | None = None
     query_shape: QueryShape | None = None
     needs_clarification: bool = False
@@ -412,6 +413,17 @@ _REMOVED_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Role qualifiers for member count/list queries: "how many owners", "list all admins"
+_ROLE_OWNER_PATTERN = re.compile(
+    r"\b(?:owners?|founders?|workspace\s+owners?)\b",
+    re.IGNORECASE,
+)
+
+_ROLE_MEMBER_PATTERN = re.compile(
+    r"\b(?:members?|team\s*members?|contributors?|employees?)\b",
+    re.IGNORECASE,
+)
+
 # --- Metadata: document patterns ---
 _TOPIC_QUALIFIERS = re.compile(
     r"\b(?:about|discuss|cover|mention|regarding|on\s+the\s+topic\s+of|concerning)\b",
@@ -559,7 +571,15 @@ def normalize_for_classification(query: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Map LLM router routes to IntentCategory values.
+# New 5-route taxonomy: direct, metadata, retrieval, clarification, out_of_scope.
 _LLM_ROUTE_TO_CATEGORY = {
+    # New routes
+    "direct": IntentCategory.GENERAL_CONVERSATION,
+    "metadata": IntentCategory.WORKSPACE_METADATA,
+    "retrieval": IntentCategory.DOCUMENT_CONTENT,
+    "clarification": IntentCategory.AMBIGUOUS,
+    "out_of_scope": IntentCategory.OUT_OF_SCOPE,
+    # Legacy route names (for backward compat with old mocks/tests)
     "GREETING": IntentCategory.GREETING,
     "IDENTITY_ASSISTANT": IntentCategory.IDENTITY_ASSISTANT,
     "IDENTITY_USER": IntentCategory.IDENTITY_USER,
@@ -603,20 +623,27 @@ def _llm_route_to_intent(
 
     needs_clarification = category == IntentCategory.AMBIGUOUS
 
+    # Determine the query to use for downstream processing.
+    # If the LLM flagged needs_rewrite and provided a rewritten query, use it.
+    effective_query = original_query
+    if route_result.needs_rewrite and route_result.query:
+        effective_query = route_result.query
+
     # For METADATA routes, determine the specific sub-intent via regex.
     metadata_sub = None
     member_status = None
     if category == IntentCategory.WORKSPACE_METADATA and original_query:
-        member_intent = _classify_member_metadata(original_query)
+        member_intent = _classify_member_metadata(effective_query)
         if member_intent is not None:
             return Intent(
                 category=category,
                 metadata_sub=member_intent.metadata_sub,
                 member_status=member_intent.member_status,
+                member_role=member_intent.member_role,
                 skip_rewrite=True,
                 reason=f"llm_router:{route_result.route} sub={member_intent.metadata_sub.value} conf={route_result.confidence:.2f}",
             )
-        doc_intent = _classify_document_metadata(original_query)
+        doc_intent = _classify_document_metadata(effective_query)
         if doc_intent is not None:
             return Intent(
                 category=doc_intent.category,
@@ -1090,17 +1117,27 @@ _IMPLICIT_MEMBER_STATUSES = frozenset({
 
 
 def _classify_member_metadata(q: str) -> Intent | None:
-    """Detect member count/list queries with status filters."""
+    """Detect member count/list queries with status and role filters."""
     # Don't match if this is a topic-qualified content question.
     if _TOPIC_QUALIFIERS.search(q):
         return None
 
-    # Must match a member-related pattern.
+    # Must match a member-related pattern OR a role-specific count pattern.
+    # The role pattern catches "how many owners", "how many admins", etc.
+    # which use a role keyword instead of a generic member noun.
     is_member_count = bool(_MEMBER_COUNT_PATTERN.search(q))
     is_member_list = bool(_MEMBER_LIST_PATTERN.search(q))
+    is_role_count = bool(
+        re.search(
+            r"(?:how\s+many|number\s+of|count\s+of|total\s+(?:number\s+of)?)\s+"
+            r"(?:\w+\s+)?"
+            r"(?:owners?|admins?|administrator)",
+            q, re.IGNORECASE,
+        )
+    )
 
     # Also detect follow-up style: "how many are invited?" (no "members" word)
-    if not is_member_count and not is_member_list:
+    if not is_member_count and not is_member_list and not is_role_count:
         implicit = _MEMBER_COUNT_IMPLICIT_PATTERN.search(q)
         if implicit:
             candidate = implicit.group(1).lower().rstrip("?!.;")
@@ -1137,21 +1174,48 @@ def _classify_member_metadata(q: str) -> Intent | None:
     elif _REMOVED_PATTERN.search(q):
         status = "REMOVED"
 
-    if is_member_count:
+    # Determine role filter.
+    # "members" is the generic term for all workspace membership — do NOT
+    # restrict it to the MEMBER role.  Only an explicit, non-generic role
+    # keyword (owner, admin, contributor, etc.) narrows the count to one role.
+    role = None
+    if _ROLE_OWNER_PATTERN.search(q):
+        role = "OWNER"
+    elif re.search(
+        r"\b(?:admins?|administrators?)\b",
+        q, re.IGNORECASE,
+    ):
+        # No ADMIN role exists in this system — handled downstream, but mark
+        # the intent so the handler can respond appropriately.
+        role = "ADMIN"
+    elif _ROLE_MEMBER_PATTERN.search(q) and not (
+        # Generic member phrasing that should mean "all members", not role=MEMBER:
+        # "how many members", "number of members", "count of members", "team members"
+        re.search(
+            r"(?:how\s+many|number\s+of|count\s+of|total\s+(?:number\s+of)?)\s+"
+            r"(?:\w+\s+)?(?:members?|team\s*members?)\b",
+            q, re.IGNORECASE,
+        )
+    ):
+        role = "MEMBER"
+
+    if is_member_count or is_role_count:
         return Intent(
             category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.MEMBER_COUNT,
             member_status=status,
+            member_role=role,
             skip_rewrite=True,
-            reason=f"member_count status={status or 'all'}",
+            reason=f"member_count status={status or 'all'} role={role or 'all'}",
         )
     else:
         return Intent(
             category=IntentCategory.WORKSPACE_METADATA,
             metadata_sub=MetadataSubIntent.MEMBER_LIST,
             member_status=status,
+            member_role=role,
             skip_rewrite=True,
-            reason=f"member_list status={status or 'all'}",
+            reason=f"member_list status={status or 'all'} role={role or 'all'}",
         )
 
 

@@ -30,35 +30,30 @@ from loguru import logger
 
 # The LLM router returns one of these route strings.  The caller maps it
 # to an IntentCategory.
-ROUTE_GREETING = "GREETING"
-ROUTE_IDENTITY_ASSISTANT = "IDENTITY_ASSISTANT"
-ROUTE_IDENTITY_USER = "IDENTITY_USER"
-ROUTE_METADATA = "METADATA"
-ROUTE_PERMISSIONS = "PERMISSIONS"
-ROUTE_DOCUMENT_CONTENT = "DOCUMENT_CONTENT"
-ROUTE_OUT_OF_SCOPE = "OUT_OF_SCOPE"
-ROUTE_NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+ROUTE_DIRECT = "direct"
+ROUTE_METADATA = "metadata"
+ROUTE_RETRIEVAL = "retrieval"
+ROUTE_CLARIFICATION = "clarification"
+ROUTE_OUT_OF_SCOPE = "out_of_scope"
 
-# Conversation history route (questions about prior conversations).
-ROUTE_CONVERSATION_HISTORY = "CONVERSATION_HISTORY"
-# App-help route (questions about the application itself).
-ROUTE_APP_HELP = "APP_HELP"
-# General conversation route (casual chat, greetings, etc.).
-ROUTE_GENERAL_CONVERSATION = "GENERAL_CONVERSATION"
+# Legacy aliases kept for backward compat in tests that reference old names.
+ROUTE_GREETING = ROUTE_DIRECT
+ROUTE_IDENTITY_ASSISTANT = ROUTE_DIRECT
+ROUTE_IDENTITY_USER = ROUTE_DIRECT
+ROUTE_PERMISSIONS = ROUTE_DIRECT
+ROUTE_DOCUMENT_CONTENT = ROUTE_RETRIEVAL
+ROUTE_NEEDS_CLARIFICATION = ROUTE_CLARIFICATION
+ROUTE_CONVERSATION_HISTORY = ROUTE_DIRECT
+ROUTE_APP_HELP = ROUTE_DIRECT
+ROUTE_GENERAL_CONVERSATION = ROUTE_DIRECT
 
 # All valid route strings.
 _VALID_ROUTES = frozenset({
-    ROUTE_GREETING,
-    ROUTE_IDENTITY_ASSISTANT,
-    ROUTE_IDENTITY_USER,
+    ROUTE_DIRECT,
     ROUTE_METADATA,
-    ROUTE_PERMISSIONS,
-    ROUTE_DOCUMENT_CONTENT,
+    ROUTE_RETRIEVAL,
+    ROUTE_CLARIFICATION,
     ROUTE_OUT_OF_SCOPE,
-    ROUTE_NEEDS_CLARIFICATION,
-    ROUTE_CONVERSATION_HISTORY,
-    ROUTE_APP_HELP,
-    ROUTE_GENERAL_CONVERSATION,
 })
 
 # Below this confidence threshold, force NEEDS_CLARIFICATION.
@@ -81,6 +76,12 @@ class RouteResult:
     confidence: float = 1.0
     #: Whether the LLM call succeeded or we fell back.
     status: Literal["success", "degraded"] = "success"
+    #: Rewritten standalone query (only set when needs_rewrite is True).
+    query: str | None = None
+    #: Whether the query needed rewriting (pronouns, garbled, context-dependent).
+    needs_rewrite: bool = False
+    #: Whether the question is plausibly answerable from workspace documents.
+    relevant: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -88,57 +89,55 @@ class RouteResult:
 # ---------------------------------------------------------------------------
 
 _ROUTING_SYSTEM_PROMPT_TEMPLATE = """\
-You are a fast intent classifier for a company knowledge assistant chatbot.
+You are the routing and relevance layer for Office Brain, an internal document
+Q&A assistant.
+
+Given the user's message and recent conversation context, return ONLY a JSON
+object (no markdown, no preamble) with these fields:
+
+{{
+  "route": "direct" | "metadata" | "retrieval" | "clarification" | "out_of_scope",
+  "query": "<rewritten standalone query, only if route is 'retrieval' and rewrite
+is needed, else null>",
+  "needs_rewrite": true | false,
+  "relevant": true | false,
+  "reasoning": "<one short phrase, not a sentence>"
+}}
+
+Routing rules:
+- "direct": greetings, identity questions, app help, general conversation not
+  requiring documents.
+- "metadata": questions about the workspace itself (doc count, doc names, who
+  uploaded what).
+- "retrieval": questions that require searching document content.
+- "clarification": message is ambiguous and cannot be routed without asking the
+  user.
+- "out_of_scope": unrelated to this workspace's documents or purpose.
+
+Rewrite rules:
+- Set "needs_rewrite": true only if the query contains unresolved pronouns
+  ("they", "it", "that"), is garbled/malformed, or depends on prior turns to
+  make sense standalone.
+- If needs_rewrite is true, "query" must be a fully standalone version using
+  conversation context.
+- If needs_rewrite is false, set "query" to the original message unchanged.
+
+Relevance rules:
+- "relevant": true only if route is "retrieval" AND the question is plausibly
+  answerable from workspace documents (not a request for external/general
+  knowledge).
+- If route is not "retrieval", set "relevant": false.
 
 {workspace_context}
 
-Given the user's message (and optional recent conversation for context),
-classify the message into exactly ONE of these routes:
+Conversation context:
+{conversation_context}
 
-- GREETING: Hello, goodbye, thanks, or any casual social message.
-- IDENTITY_ASSISTANT: User asking what/who the assistant is, what it can do,
-  or making a statement about the assistant (e.g. "who are you", "what are you").
-- IDENTITY_USER: User asking about or stating their own info
-  (e.g. "my name is X", "what is my info", "who am I").
-- METADATA: Questions about workspace data — member count, document count,
-  who is admin/owner, what is my role, document listing, etc.
-- PERMISSIONS: "Can I do X?" questions — upload, invite, approve, delete, etc.
-- DOCUMENT_CONTENT: Questions that should be answered from uploaded documents
-  (policies, procedures, facts, summaries, comparisons).
-- CONVERSATION_HISTORY: Questions about the user's prior conversation — what
-  they asked before, what the assistant answered, recent chat history.
-- APP_HELP: Questions about the application itself — what it does, how to use it,
-  whether it tracks/monitors activity, features and capabilities.
-- OUT_OF_SCOPE: General knowledge unrelated to the workspace
-  (math, geography, weather, programming, jokes, etc.).
-- GENERAL_CONVERSATION: Casual chat, statements like "I have a doubt",
-  "can you help me", testing messages, or any non-specific interaction that
-  doesn't fit another category.
-- NEEDS_CLARIFICATION: Genuinely ambiguous — cannot determine the route.
-
-Rules:
-1. Return ONLY a JSON object, no markdown fences, no explanation outside JSON.
-2. If the message is a statement about the user (e.g. "my name is X"), route
-   to IDENTITY_USER — do NOT treat it as a question about the assistant.
-3. "who are you" / "what are you" → IDENTITY_ASSISTANT (the user asks about
-   the assistant, not themselves).
-4. "who is admin" / "who is the owner" → METADATA (a workspace data question).
-5. "can I add someone" / "can I upload" → PERMISSIONS.
-6. "what are the file names" / "what files are present" / "what are the
-   document names" → METADATA (document listing).
-7. When unsure, prefer NEEDS_CLARIFICATION over guessing.
-8. Document-name-aware routing: If the user's message mentions or approximates
-   a document title listed in the workspace context above (even with typos),
-   route to DOCUMENT_CONTENT — the retrieval pipeline will find the matching
-   document. For example, "what does devops contain" targets the DevOps
-   document, "tell me about the resume" targets the resume, etc.
-9. Vague content questions ("what does it say", "what about that", "tell me
-   about it") with no document name or topic should be NEEDS_CLARIFICATION
-   if the context doesn't resolve the reference, or DOCUMENT_CONTENT if the
-   conversation history makes the target clear.
+User message:
+{user_message}
 
 Return ONLY:
-{{"route": "<route>", "reasoning": "<brief>", "confidence": <0.0-1.0>}}
+{{"route": "<route>", "query": "<rewritten or original>", "needs_rewrite": <bool>, "relevant": <bool>, "reasoning": "<brief>"}}
 """
 
 
@@ -153,22 +152,25 @@ def _parse_route_response(response_text: str) -> RouteResult:
         cleaned = re.sub(r"```(?:json)?\s*", "", response_text)
         cleaned = re.sub(r"```\s*$", "", cleaned)
 
-        json_match = re.search(r"\{[^}]+\}", cleaned, re.DOTALL)
+        json_match = re.search(r"\{.+\}", cleaned, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group())
-            route = str(data.get("route", "")).strip().upper()
+            route = str(data.get("route", "")).strip().lower()
             reasoning = str(data.get("reasoning", ""))
             confidence = float(data.get("confidence", 0.5))
+            query = data.get("query")
+            needs_rewrite = bool(data.get("needs_rewrite", False))
+            relevant = bool(data.get("relevant", False))
 
             # Validate the route.
             if route not in _VALID_ROUTES:
                 logger.warning(
                     "LLM router returned invalid route '{route}', "
-                    "falling back to NEEDS_CLARIFICATION",
+                    "falling back to clarification",
                     route=route,
                 )
                 return RouteResult(
-                    route=ROUTE_NEEDS_CLARIFICATION,
+                    route=ROUTE_CLARIFICATION,
                     reasoning=f"invalid_route: {route}",
                     confidence=0.0,
                     status="degraded",
@@ -179,6 +181,9 @@ def _parse_route_response(response_text: str) -> RouteResult:
                 reasoning=reasoning,
                 confidence=max(0.0, min(1.0, confidence)),
                 status="success",
+                query=str(query) if query else None,
+                needs_rewrite=needs_rewrite,
+                relevant=relevant,
             )
     except (json.JSONDecodeError, ValueError, KeyError) as exc:
         logger.warning(
@@ -188,7 +193,7 @@ def _parse_route_response(response_text: str) -> RouteResult:
 
     # Parsing failed.
     return RouteResult(
-        route=ROUTE_NEEDS_CLARIFICATION,
+        route=ROUTE_CLARIFICATION,
         reasoning="parse_failure",
         confidence=0.0,
         status="degraded",
@@ -247,30 +252,31 @@ async def route_with_llm(
         from app.llm.generic import GenericProvider
         provider = GenericProvider()
 
-    # Build the system prompt with workspace context.
+    # Build workspace context section.
     ws_context = (
-        f"This workspace contains:\n{workspace_knowledge_context}"
+        f"Workspace knowledge:\n{workspace_knowledge_context}"
         if workspace_knowledge_context
         else "No workspace-specific information available."
     )
-    system_prompt = _ROUTING_SYSTEM_PROMPT_TEMPLATE.format(
-        workspace_context=ws_context,
-    )
 
-    # Build the user message with conversation context.
+    # Build conversation context section.
     context_lines: list[str] = []
     if history:
         for turn in history[-4:]:  # last 2 pairs max
             label = "User" if turn.get("role") == "user" else "Assistant"
             context_lines.append(f"{label}: {turn.get('content', '')}")
+    conv_context = "\n".join(context_lines) if context_lines else "(none)"
 
-    user_msg = f"User message: {query}"
-    if context_lines:
-        user_msg = f"Recent conversation:\n" + "\n".join(context_lines) + f"\n\n{user_msg}"
+    # Build the full prompt using the template.
+    system_prompt = (
+        _ROUTING_SYSTEM_PROMPT_TEMPLATE
+        .replace("{workspace_context}", ws_context, 1)
+        .replace("{conversation_context}", conv_context, 1)
+        .replace("{user_message}", query, 1)
+    )
 
     messages = [
         Message(role="system", content=system_prompt),
-        Message(role="user", content=user_msg),
     ]
 
     completion = Completion()
@@ -283,7 +289,7 @@ async def route_with_llm(
         if not response_text:
             logger.warning("LLM router returned empty response")
             return RouteResult(
-                route=ROUTE_NEEDS_CLARIFICATION,
+                route=ROUTE_CLARIFICATION,
                 reasoning="empty_response",
                 confidence=0.0,
                 status="degraded",
@@ -305,7 +311,7 @@ async def route_with_llm(
             error=str(exc)[:200],
         )
         return RouteResult(
-            route=ROUTE_NEEDS_CLARIFICATION,
+            route=ROUTE_CLARIFICATION,
             reasoning=f"llm_error: {str(exc)[:100]}",
             confidence=0.0,
             status="degraded",
@@ -316,4 +322,9 @@ __all__ = [
     "CONFIDENCE_THRESHOLD",
     "RouteResult",
     "route_with_llm",
+    "ROUTE_DIRECT",
+    "ROUTE_METADATA",
+    "ROUTE_RETRIEVAL",
+    "ROUTE_CLARIFICATION",
+    "ROUTE_OUT_OF_SCOPE",
 ]

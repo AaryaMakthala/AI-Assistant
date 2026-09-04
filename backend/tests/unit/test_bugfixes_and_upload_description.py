@@ -330,11 +330,11 @@ class TestSmartMockConsistency:
 
     @pytest.mark.asyncio
     async def test_what_are_they_route(self) -> None:
-        """'what are they' should route to NEEDS_CLARIFICATION via smart mock."""
+        """'what are they' should route to clarification via smart mock."""
         from tests.unit.conftest import smart_mock_route
 
         result = await smart_mock_route(query="what are they")
-        assert result.route == "NEEDS_CLARIFICATION"
+        assert result.route == "clarification"
 
     @pytest.mark.asyncio
     async def test_company_name_smart_mock(self) -> None:
@@ -342,7 +342,7 @@ class TestSmartMockConsistency:
         from tests.unit.conftest import smart_mock_route
 
         result = await smart_mock_route(query="what is the company name")
-        assert result.route == "METADATA"
+        assert result.route == "metadata"
 
     @pytest.mark.asyncio
     async def test_what_are_they_with_doc_history_routes_metadata(self) -> None:
@@ -354,17 +354,17 @@ class TestSmartMockConsistency:
             {"role": "assistant", "content": "You have 6 uploaded documents."},
         ]
         result = await smart_mock_route(query="what are they", history=history)
-        assert result.route == "METADATA", (
-            f"Expected METADATA with doc history, got {result.route}"
+        assert result.route == "metadata", (
+            f"Expected metadata with doc history, got {result.route}"
         )
 
     @pytest.mark.asyncio
     async def test_what_are_they_without_history_still_needs_clarification(self) -> None:
-        """'what are they' without history should still be NEEDS_CLARIFICATION."""
+        """'what are they' without history should still be clarification."""
         from tests.unit.conftest import smart_mock_route
 
         result = await smart_mock_route(query="what are they")
-        assert result.route == "NEEDS_CLARIFICATION"
+        assert result.route == "clarification"
 
 
 # ---------------------------------------------------------------------------
@@ -394,8 +394,8 @@ class TestMetadataPhrasingCoverage:
         from tests.unit.conftest import smart_mock_route
 
         result = await smart_mock_route(query=query)
-        assert result.route == "METADATA", (
-            f"'{query}' should route to METADATA, got {result.route}"
+        assert result.route == "metadata", (
+            f"'{query}' should route to metadata, got {result.route}"
         )
 
 

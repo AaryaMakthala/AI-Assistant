@@ -5,8 +5,10 @@ Tests verify the actual chat endpoint behavior for follow-up scenarios,
 ensuring the rewritten query is the canonical query used everywhere
 downstream: metadata routing, document targeting, retrieval, and LLM.
 
-The rewrite step is mocked at the chat_v2 module boundary — we test that
-given rewrite_result X, the downstream pipeline uses X consistently.
+Rewriting now lives in the LLM router: a RouteResult with needs_rewrite=True
+and query=<rewritten> becomes Intent.rewritten_query inside classify_intent.
+These tests drive that router seam and verify chat_v2 consumes
+intent.rewritten_query consistently.
 
 Test matrix:
 A — Simple follow-up (pronoun resolution)
@@ -32,8 +34,9 @@ from fastapi.testclient import TestClient
 import app.api.chat_v2 as chat_module
 from app.api.dependencies import get_generic_llm
 from app.llm.base import Completion, LLMError, Message, TokenUsage
+from app.retrieval.intent import normalize_for_classification
+from app.retrieval.llm_router import RouteResult
 from app.retrieval.pipeline import RetrievedChunk, RetrievalResult
-from app.retrieval.query_rewrite import RewriteResult
 from app.security.auth import Principal, get_principal
 
 pytestmark = pytest.mark.usefixtures("valid_env")
@@ -63,6 +66,32 @@ def _chunk(
         rrf_score=0.02,
         rerank_score=score,
     )
+
+
+def _make_rewrite_router(source: str, rewritten: str) -> Any:
+    """Build a route_with_llm stand-in that rewrites one specific follow-up.
+
+    The first call with ``source`` returns a needs_rewrite RouteResult
+    carrying ``rewritten`` — which classify_intent turns into
+    ``Intent.rewritten_query``, the seam chat_v2 now consumes.  Any other
+    query (including the rewritten one during re-classification) is plain
+    DOCUMENT_CONTENT.
+    """
+
+    async def _router(
+        *, query: str, history: list | None = None, **kw: Any
+    ) -> RouteResult:
+        if normalize_for_classification(query) == normalize_for_classification(source):
+            return RouteResult(
+                route="DOCUMENT_CONTENT",
+                needs_rewrite=True,
+                query=rewritten,
+                confidence=0.95,
+                reasoning="test",
+            )
+        return RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+
+    return _router
 
 
 class _StubLLM:
@@ -279,17 +308,14 @@ class TestASimpleFollowUp:
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        # Mock rewrite at the chat_v2 module level.
-        async def _fake_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query="What are the benefits of Kanban?",
-                needs_clarification=False,
-                confidence=0.95,
-                status="success",
-                original_query=query,
-            )
-
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        # Router attaches the rewritten follow-up to the Intent.
+        monkeypatch.setattr(
+            "app.retrieval.llm_router.route_with_llm",
+            _make_rewrite_router(
+                "What about its benefits?",
+                "What are the benefits of Kanban?",
+            ),
+        )
 
         stub = _StubLLM(text="Kanban benefits include improved visibility.")
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
@@ -353,17 +379,14 @@ class TestDocumentFollowUp:
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        # Mock rewrite to resolve "it" to DevOps document.
-        async def _fake_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query="What questions about Kanban are present in the DevOps document?",
-                needs_clarification=False,
-                confidence=0.92,
-                status="success",
-                original_query=query,
-            )
-
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        # Router rewrites the bare follow-up into a DevOps-scoped question.
+        monkeypatch.setattr(
+            "app.retrieval.llm_router.route_with_llm",
+            _make_rewrite_router(
+                "What questions about it mention Kanban?",
+                "What questions about Kanban are present in the DevOps document?",
+            ),
+        )
 
         stub = _StubLLM(
             text="The DevOps document contains questions about Kanban boards."
@@ -466,18 +489,15 @@ class TestMonthFollowUp:
     ) -> None:
         test_client, _ = client
 
-        # Mock rewrite to produce a document count for last month.
-        # The rewritten query matches the "count" metadata pattern.
-        async def _fake_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query="How many documents were uploaded last month?",
-                needs_clarification=False,
-                confidence=0.90,
-                status="success",
-                original_query=query,
-            )
-
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        # Router attaches a rewritten doc-count query; re-classifying the
+        # rewritten text hits the metadata regex fast-path (no router call).
+        monkeypatch.setattr(
+            "app.retrieval.llm_router.route_with_llm",
+            _make_rewrite_router(
+                "What about last month?",
+                "How many documents were uploaded last month?",
+            ),
+        )
 
         # Set up tenant_session for metadata count.
         # "What about last month?" starts as DOCUMENT_CONTENT (no metadata match),
@@ -533,17 +553,19 @@ class TestAmbiguousFollowUp:
     ) -> None:
         test_client, _ = client
 
-        # Mock rewrite to return needs_clarification=True.
-        async def _fake_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query="How many documents are there?",
-                needs_clarification=True,
-                confidence=0.25,
-                status="ambiguous",
-                original_query=query,
+        # Ambiguity now surfaces from the router: a NEEDS_CLARIFICATION
+        # RouteResult maps to Intent.needs_clarification, and chat_v2 replies
+        # with a clarification request (no retrieval, no LLM).
+        async def _ambiguous_router(
+            *, query: str, history: list | None = None, **kw: Any
+        ) -> RouteResult:
+            return RouteResult(
+                route="NEEDS_CLARIFICATION",
+                confidence=0.9,
+                reasoning="test",
             )
 
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _ambiguous_router)
 
         # Verify retrieval is NOT called.
         retrieval_called: list[str] = []
@@ -592,17 +614,15 @@ class TestFollowUpAfterRefusal:
     ) -> None:
         test_client, _ = client
 
-        # Mock rewrite to resolve clarification into a metadata query.
-        async def _fake_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query="How many members are in this workspace?",
-                needs_clarification=False,
-                confidence=0.85,
-                status="success",
-                original_query=query,
-            )
-
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        # Router rewrites the clarification into a member-count query; the
+        # rewritten text re-classifies via the metadata regex fast-path.
+        monkeypatch.setattr(
+            "app.retrieval.llm_router.route_with_llm",
+            _make_rewrite_router(
+                "I mean the workspace.",
+                "How many members are in this workspace?",
+            ),
+        )
 
         session = _FakeSession(responses=[
             _FakeResult(scalar=None),  # _load_recent_history: no session
@@ -643,12 +663,12 @@ class TestFollowUpAfterRefusal:
 # ===========================================================================
 
 class TestRewriteProviderFailure:
-    """Force the rewrite provider to fail. Use a query with an obvious
-    follow-up pronoun.
+    """Force the router (which now carries rewriting) to fail.  Use a query
+    with an obvious follow-up pronoun.
 
     Expected: original query is preserved, request continues,
     no internal error exposed, no false not_relevant decision solely
-    because rewriting failed.
+    because the router degraded.
     """
 
     def test_g_rewrite_failure_graceful(
@@ -656,17 +676,22 @@ class TestRewriteProviderFailure:
     ) -> None:
         test_client, _ = client
 
-        # Mock rewrite to return degraded (simulates provider failure).
-        async def _failing_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query=query,  # original preserved
-                needs_clarification=False,
+        # Rewriting now lives inside the LLM router.  Simulate the router
+        # failing outright: a degraded RouteResult makes classify_intent fall
+        # back to regex (Stage 2), which leaves this follow-up as plain
+        # DOCUMENT_CONTENT with no rewritten query — the original question
+        # must flow through unchanged, with no error and no false refusal.
+        async def _degraded_router(
+            *, query: str, history: list | None = None, **kw: Any
+        ) -> RouteResult:
+            return RouteResult(
+                route="NEEDS_CLARIFICATION",
                 confidence=0.0,
+                reasoning="llm_error: provider unreachable",
                 status="degraded",
-                original_query=query,
             )
 
-        monkeypatch.setattr(chat_module, "rewrite_query", _failing_rewrite)
+        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _degraded_router)
 
         # Track what query reaches retrieval — should be the ORIGINAL query.
         captured_queries: list[str] = []
@@ -712,19 +737,13 @@ class TestRewriteProviderFailure:
     def test_g_rewrite_failure_no_false_not_relevant(
         self, monkeypatch: pytest.MonkeyPatch, client: tuple[TestClient, Principal]
     ) -> None:
-        """Rewrite failure alone must not cause a not_relevant refusal."""
+        """No rewrite signal from the router must not cause a refusal.
+
+        The fixture router returns plain DOCUMENT_CONTENT (no needs_rewrite),
+        so intent.rewritten_query is None and the original question proceeds
+        through retrieval to a grounded answer — not a not_relevant refusal.
+        """
         test_client, _ = client
-
-        async def _failing_rewrite(*, query: str, history: Any) -> RewriteResult:  # noqa: ARG001
-            return RewriteResult(
-                rewritten_query=query,
-                needs_clarification=False,
-                confidence=0.0,
-                status="degraded",
-                original_query=query,
-            )
-
-        monkeypatch.setattr(chat_module, "rewrite_query", _failing_rewrite)
 
         kanban_chunk = _chunk(0.9, content="Kanban is a workflow method.")
 

@@ -679,17 +679,17 @@ class TestAmbiguous:
         stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
-        # Mock rewrite to return needs_clarification
-        async def _fake_rewrite(*, query, history):
-            from app.retrieval.query_rewrite import RewriteResult
-            return RewriteResult(
-                rewritten_query=query,
-                needs_clarification=True,
-                confidence=0.2,
-                status="ambiguous",
-                original_query=query,
+        # Ambiguity now surfaces from the router (which also carries rewriting):
+        # a NEEDS_CLARIFICATION RouteResult maps to Intent.needs_clarification,
+        # and chat_v2 replies with a clarification request.
+        async def _ambiguous_router(*, query: str, history: list | None = None, **kw):
+            from app.retrieval.llm_router import RouteResult
+            return RouteResult(
+                route="NEEDS_CLARIFICATION",
+                confidence=0.9,
+                reasoning="test",
             )
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _ambiguous_router)
 
         response = test_client.post(
             "/chat/grounded",
@@ -714,17 +714,17 @@ class TestAmbiguous:
         stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
-        # Mock rewrite to return needs_clarification
-        async def _fake_rewrite(*, query, history):
-            from app.retrieval.query_rewrite import RewriteResult
-            return RewriteResult(
-                rewritten_query=query,
-                needs_clarification=True,
-                confidence=0.1,
-                status="ambiguous",
-                original_query=query,
+        # Ambiguity now surfaces from the router (which also carries rewriting):
+        # a NEEDS_CLARIFICATION RouteResult maps to Intent.needs_clarification,
+        # and chat_v2 replies with a clarification request.
+        async def _ambiguous_router(*, query: str, history: list | None = None, **kw):
+            from app.retrieval.llm_router import RouteResult
+            return RouteResult(
+                route="NEEDS_CLARIFICATION",
+                confidence=0.9,
+                reasoning="test",
             )
-        monkeypatch.setattr(chat_module, "rewrite_query", _fake_rewrite)
+        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _ambiguous_router)
 
         response = test_client.post(
             "/chat/grounded",

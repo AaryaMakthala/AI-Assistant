@@ -54,7 +54,7 @@ from app.retrieval.intent import (
     classify_query_shape,
 )
 from app.retrieval.pipeline import RetrievedChunk, retrieve
-from app.retrieval.query_rewrite import ChatTurn, RewriteResult, rewrite_query
+from app.retrieval.query_rewrite import ChatTurn
 from app.retrieval.refusals import ResponseReason, refusal_message
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
@@ -468,25 +468,39 @@ async def _answer_metadata_question(
             )
 
         if sub == MetadataSubIntent.MEMBER_COUNT:
-            # Build the query — optionally filter by status.
+            # ADMIN is not a role in this system — clarify rather than guess.
+            if intent.member_role == "ADMIN":
+                return (
+                    "There is no 'admin' role in this workspace. Roles are "
+                    "OWNER and MEMBER only.",
+                    None,
+                )
+            # Build the query — optionally filter by status and/or role.
             stmt = select(func.count()).select_from(Member).where(
                 Member.workspace_id == workspace_id,
             )
             if intent.member_status:
                 stmt = stmt.where(Member.status == intent.member_status)
+            if intent.member_role:
+                stmt = stmt.where(Member.role == intent.member_role)
             count = (await db.execute(stmt)).scalar_one()
             status_label = (intent.member_status or "ACTIVE").lower()
+            role_label = (intent.member_role or "").lower()
             if count == 0:
-                if intent.member_status:
-                    return (
-                        f"There are no {status_label} members in this workspace.",
-                        ResponseReason.METADATA_EMPTY,
-                    )
-                return "There are no members in this workspace yet.", ResponseReason.METADATA_EMPTY
+                descriptor = " ".join(filter(None, [role_label, status_label, "members"]))
+                if not descriptor.strip():
+                    descriptor = "members"
+                return (
+                    f"There are no {descriptor} in this workspace.",
+                    ResponseReason.METADATA_EMPTY,
+                )
             word = "member" if count == 1 else "members"
             verb = "is" if count == 1 else "are"
-            if intent.member_status:
-                return f"There {verb} {count} {status_label} {word} in this workspace.", None
+            descriptor = " ".join(filter(None, [role_label, status_label, word]))
+            if not descriptor.strip():
+                descriptor = word
+            if intent.member_status or intent.member_role:
+                return f"There {verb} {count} {descriptor} in this workspace.", None
             return f"There {verb} {count} {word} in this workspace.", None
 
         if sub == MetadataSubIntent.MEMBER_LIST:
@@ -496,14 +510,18 @@ async def _answer_metadata_question(
             )
             if intent.member_status:
                 stmt = stmt.where(Member.status == intent.member_status)
+            if intent.member_role:
+                stmt = stmt.where(Member.role == intent.member_role)
             rows = (
                 await db.execute(stmt.order_by(Member.created_at.asc()))
             ).all()
             if not rows:
-                if intent.member_status:
-                    status_label = intent.member_status.lower()
-                    return f"There are no {status_label} members in this workspace.", ResponseReason.METADATA_EMPTY
-                return "There are no members in this workspace yet.", ResponseReason.METADATA_EMPTY
+                role_label = (intent.member_role or "").lower()
+                status_label = (intent.member_status or "").lower()
+                descriptor = " ".join(filter(None, [role_label, status_label, "members"]))
+                if not descriptor.strip():
+                    descriptor = "members"
+                return f"There are no {descriptor} in this workspace.", ResponseReason.METADATA_EMPTY
             items = [
                 f"- User {str(row.user_id)[:8]}... (role: {row.role}, status: {row.status})"
                 for row in rows
@@ -511,8 +529,10 @@ async def _answer_metadata_question(
             count = len(rows)
             word = "member" if count == 1 else "members"
             verb = "is" if count == 1 else "are"
+            role_label = (intent.member_role or "").lower()
             status_label = (intent.member_status or "all").lower()
-            header = f"There {verb} {count} {status_label} {word} in this workspace:"
+            descriptor = " ".join(filter(None, [role_label, status_label, word]))
+            header = f"There {verb} {count} {descriptor} in this workspace:"
             return header + "\n" + "\n".join(items), None
 
         if sub == MetadataSubIntent.ROLE:
@@ -1174,13 +1194,11 @@ async def _stream_chat(
         workspace_id=workspace_id,
     )
 
-    # 1b. Rewrite for document_content intents.
-    if intent.category == IntentCategory.DOCUMENT_CONTENT:
-        rewrite_result = await rewrite_query(query=question, history=history_turns)
-        effective_query = rewrite_result.rewritten_query
-        needs_clarification = rewrite_result.needs_clarification
+    # 1b. Use rewritten query from router if available.
+    if intent.rewritten_query:
+        effective_query = intent.rewritten_query
         # Re-classify after rewrite in case the rewritten query changed the intent.
-        if rewrite_result.status == "success" and effective_query != question:
+        if effective_query != question:
             intent = await classify_intent(
                 effective_query,
                 history=history_dicts,
@@ -1284,23 +1302,18 @@ async def _stream_chat(
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
 
-    elif intent.category == IntentCategory.PERMISSIONS:
+    elif intent.category in (
+        IntentCategory.PERMISSIONS,
+        IntentCategory.WORKSPACE_PERMISSION,
+    ):
+        # PERMISSIONS (legacy LLM-router route name) and WORKSPACE_PERMISSION
+        # (regex fast-path category) are the same lane — one answer function.
         answer, refusal_reason = _answer_workspace_permission(
             question=effective_query,
             principal_role=member_role,
         )
         logger.info(
             "intent=permissions workspace={ws} retrieval_called=False refusal={refusal}",
-            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
-        )
-
-    elif intent.category == IntentCategory.WORKSPACE_PERMISSION:
-        answer, refusal_reason = _answer_workspace_permission(
-            question=effective_query,
-            principal_role=member_role,
-        )
-        logger.info(
-            "intent=workspace_permission workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
 
@@ -1583,8 +1596,25 @@ async def _stream_chat(
         )
         return
 
-    # 7. Emit citations.
-    yield await _sse_event("citations", {"citations": sources_list})
+    # 6b. Resolve which retrieved sources the LLM actually cited, so the
+    # user-facing source/citation lists contain only chunks that grounded the
+    # answer (CLAUDE.md 8.4 / ISSUE E).  Chunks that survived retrieval but
+    # were never referenced by the answer are dropped, not passed through.
+    # If the answer contains no bracketed citations at all, we cannot determine
+    # what was referenced — keep the full retrieved set rather than dropping
+    # everything.
+    from app.rag.pipeline import cited_numbers
+    cited_nums = cited_numbers(full_text)
+    if cited_nums:
+        cited_set = set(cited_nums)
+        final_sources = [
+            src for src in sources_list if src["number"] in cited_set
+        ]
+    else:
+        final_sources = sources_list
+
+    # 7. Emit citations (only what the answer actually referenced).
+    yield await _sse_event("citations", {"citations": final_sources})
 
     # 8. Persist assistant message.
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
@@ -1593,7 +1623,7 @@ async def _stream_chat(
                 session_id=session_id,
                 role="assistant",
                 content=full_text,
-                sources=sources_list,
+                sources=final_sources,
             )
         )
 
@@ -1703,18 +1733,10 @@ async def grounded_chat(
         workspace_id=workspace_id,
     )
 
-    # Only rewrite for document_content intents.
-    if intent.category == IntentCategory.DOCUMENT_CONTENT:
-        rewrite_result = await rewrite_query(query=question, history=history_turns)
-        effective_query = rewrite_result.rewritten_query
-        if rewrite_result.needs_clarification:
-            return GroundedChatResponse(
-                answer=refusal_message(ResponseReason.NEEDS_CLARIFICATION),
-                grounded=True,
-                insufficient_evidence=False,
-                sources=[],
-            )
-        if rewrite_result.status == "success" and effective_query != question:
+    # Use rewritten query from router if available.
+    if intent.rewritten_query:
+        effective_query = intent.rewritten_query
+        if effective_query != question:
             intent = await classify_intent(
                 effective_query,
                 history=history_dicts,
@@ -1792,25 +1814,17 @@ async def grounded_chat(
             insufficient_evidence=refusal_reason is not None, sources=[],
         )
 
-    if intent.category == IntentCategory.PERMISSIONS:
+    if intent.category in (
+        IntentCategory.PERMISSIONS,
+        IntentCategory.WORKSPACE_PERMISSION,
+    ):
+        # PERMISSIONS (legacy LLM-router route name) and WORKSPACE_PERMISSION
+        # (regex fast-path category) are the same lane — one answer function.
         answer, refusal_reason = _answer_workspace_permission(
             question=effective_query, principal_role=member_role,
         )
         logger.info(
             "intent=permissions workspace={ws} retrieval_called=False refusal={refusal}",
-            ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
-        )
-        return GroundedChatResponse(
-            answer=answer, grounded=True,
-            insufficient_evidence=refusal_reason is not None, sources=[],
-        )
-
-    if intent.category == IntentCategory.WORKSPACE_PERMISSION:
-        answer, refusal_reason = _answer_workspace_permission(
-            question=effective_query, principal_role=member_role,
-        )
-        logger.info(
-            "intent=workspace_permission workspace={ws} retrieval_called=False refusal={refusal}",
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
         return GroundedChatResponse(
@@ -1941,6 +1955,24 @@ async def grounded_chat(
     sources = [_source(chunk) for chunk in result.chunks]
     # Strip model-injected thinking/reasoning blocks (e.g. Qwen3 `` tags).
     answer_text = _strip_think_tags(completion.text)
+
+    # ISSUE E: filter the sources returned to only those the answer actually cited.
+    # The LLM cites [1], [2], ... matching the prompt position (index+1) of
+    # `result.chunks`.  Any chunk that survived retrieval but was never referenced
+    # by the answer is dropped, so the returned list has no noise citations.
+    # If the answer contains no bracketed citations at all, we cannot determine
+    # what was referenced — fall back to the full retrieved set rather than
+    # dropping everything.
+    from app.rag.pipeline import cited_numbers
+    cited_nums = cited_numbers(answer_text)
+    if cited_nums:
+        cited_set = set(cited_nums)
+        cited_chunk_ids = {
+            chunk.chunk_id
+            for i, chunk in enumerate(result.chunks)
+            if (i + 1) in cited_set
+        }
+        sources = [src for src in sources if src.chunk_id in cited_chunk_ids]
     logger.info(
         "Grounded answer for workspace {ws}: {n} sources, {tokens} completion tokens",
         ws=workspace_id,

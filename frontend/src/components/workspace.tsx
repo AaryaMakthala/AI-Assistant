@@ -29,8 +29,8 @@ export function Workspace() {
   const [activeChunkId, setActiveChunkId] = useState<string | undefined>();
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   // Active workspace — starts from the server-confirmed default, but can be
-  // overridden by the workspace switcher.  When switching, the X-Workspace-ID
-  // header tells the backend which workspace to scope requests to.
+  // overridden (e.g. by stale-workspace recovery).  The X-Workspace-ID header
+  // tells the backend which workspace to scope requests to.
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | undefined>();
   const workspaceId = activeWorkspaceId ?? me?.workspace_id;
 
@@ -142,15 +142,6 @@ export function Workspace() {
         onReprocessDocument={(id) => void documents.reprocess(id)}
         onApproveDocument={(id) => void documents.approve(id)}
         onRejectDocument={(id) => void documents.reject(id)}
-        onSwitchWorkspace={(id) => {
-          // Clear chat state so stale turns from the old workspace don't persist.
-          chat.reset();
-          setActiveChunkId(undefined);
-          setIsPanelOpen(false);
-          setShowUpload(false);
-          setActiveWorkspaceId(id);
-          setHasNoWorkspaces(false);
-        }}
         onDeleteWorkspace={() => {
           // Organization was deleted AND the owner's auth account was removed
           // by the backend. Sign out and redirect to the login page — do NOT

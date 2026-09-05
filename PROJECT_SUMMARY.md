@@ -4,6 +4,8 @@
 **Current phase:** Phase 10 (Full Test Pass) — INCOMPLETE  
 **Branch:** `main` (14 modified, 2 untracked files — all from the session below)
 
+**Superseded by:** `SYSTEM_REFERENCE.md` — comprehensive end-to-end system reference.
+
 ---
 
 ## 1. Architecture
@@ -327,18 +329,20 @@ Real Supabase guest tokens now return 200 instead of 401.
 
 ### What's Not Working / Incomplete
 
-- **Phase 10 (Full Test Pass):** The final comprehensive test suite (pytest + vitest/playwright) covering ingestion correctness, retrieval + fusion, grounding/refusal, approval flow state transitions, adversarial workspace isolation, chat round trip — this has not been run as a complete pass.
-- **NTP clock sync:** Root cause for Bug 6 is unfixed (masked by leeway).
+- **Phase 10 (Full Test Pass):** The final comprehensive test suite (pytest + vitest/playwright) covering ingestion correctness, retrieval + fusion, grounding/refusal, approval flow state transitions, adversarial workspace isolation, chat round trip — this has not been run as a complete pass. Unit suite verified at 674/674 this session.
+- **5 integration test failures:** Pre-existing. Tests reference the legacy `organizations` table via `_seed_document`/`_seed` helpers. Schema rewrite deferred.
+- **NTP clock sync:** Root cause for Bug 6 is unfixed (masked by leeway). Offset ~0.9ms, requires admin.
 - **Invitation flow:** Backend accept endpoint exists, but no frontend landing page, no email sent. Only works for demo/testing with direct API calls.
 - **POST /chat/grounded:** Test-only endpoint, intentionally non-persistent. Reads caller's real chat history for context — should only run under developer's own token.
+- **Uncommitted work:** 14 modified + 2 untracked files from routing refactor and bug fixes.
 
 ### Test Coverage
 
 | Category | Files | Status |
 |---|---|---|
-| Unit tests | 38 files in `backend/tests/unit/` | Passing (updated for this session) |
-| Security tests | 6 files in `backend/tests/security/` | Passing (2 new this session) |
-| Integration tests | 10 files in `backend/tests/integration/` | Passing |
+| Unit tests | 38 files in `backend/tests/unit/` | **674/674 pass**, 0 fail, 0 skip, 4 deprecation warnings |
+| Security tests | 6 files in `backend/tests/security/` | 60/60 pass (not re-run this session) |
+| Integration tests | 10 files in `backend/tests/integration/` | 33 pass, 5 fail (legacy `organizations` table), 33 skip |
 | **Total** | **55 test files** | |
 
 ### Uncommitted Changes (this session)
@@ -370,10 +374,10 @@ Real Supabase guest tokens now return 200 instead of 401.
 
 | # | Item | Urgency | Notes |
 |---|---|---|---|
-| 1 | **NTP sync not enabled** | Low | Bug 6 root cause. Clock-skew leeway (30s) masks it. Enable Windows Time service or configure `w32tm` when convenient. |
+| 1 | **NTP sync not enabled** | Low | Bug 6 root cause. Clock-skew leeway (30s) masks it. Offset ~0.9ms. Enable Windows Time service or configure `w32tm` when convenient. Requires admin. |
 | 2 | **Invitation flow incomplete** | Low | Backend accept endpoint exists, no frontend landing page, no email delivery. Only matters for real teammate invites. Deprioritized. |
 | 3 | **POST /chat/grounded test endpoint** | Low | Intentionally non-persistent (test/acceptance only). Reads caller's real chat history. Should only ever run under developer's own token, not a real user's. No frontend callers confirmed. |
-| 4 | **Phase 10 full test pass** | High | Final comprehensive test suite (pytest + vitest/playwright) has not been run as a complete pass. This is the real acceptance bar for the project. |
+| 4 | **Phase 10 full test pass** | High | Final comprehensive test suite (pytest + vitest/playwright) has not been run as a complete pass. Unit suite verified at 674/674 this session. Security suite 60/60 last session. Integration has 5 pre-existing failures. |
 | 5 | **Commit uncommitted work** | High | 14 modified + 2 untracked files representing the entire routing refactor + bug fixes from this session. Not yet committed. |
 
 ### Content / Data
@@ -381,6 +385,7 @@ Real Supabase guest tokens now return 200 instead of 401.
 | # | Item | Urgency | Notes |
 |---|---|---|---|
 | 6 | **Leave accrual numbers disagree** | Low | `Leave_and_Time_Off_Policy.docx` and `05_Benefits_Compensation_Summary.md` have inconsistent leave accrual figures. Content cleanup, not a code issue. |
+| 7 | **5 integration test failures (legacy table)** | Medium | Tests reference dropped `organizations` table. `_seed_document`/`_seed` helpers need rewrite to use `workspace_id` schema. Pre-existing, not new regressions. |
 
 ---
 

@@ -12,7 +12,6 @@ import Link from "next/link";
 import { useState } from "react";
 import { DocumentLibrary } from "./document-library";
 import { MembersPanel } from "./members-panel";
-import { WorkspaceSwitcher } from "./workspace-switcher";
 import type { ChatSession, DocumentSummary } from "@/lib/api";
 import type { UploadState } from "@/lib/hooks/use-documents";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -41,7 +40,6 @@ export function Sidebar({
   onReprocessDocument,
   onApproveDocument,
   onRejectDocument,
-  onSwitchWorkspace,
   onDeleteWorkspace,
 }: {
   sessions: ChatSession[];
@@ -67,7 +65,6 @@ export function Sidebar({
   onReprocessDocument: (id: string) => void;
   onApproveDocument: (id: string) => void;
   onRejectDocument: (id: string) => void;
-  onSwitchWorkspace: (workspaceId: string) => void;
   onDeleteWorkspace?: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("chats");
@@ -88,11 +85,6 @@ export function Sidebar({
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
       <div className="p-3 space-y-2">
-        <WorkspaceSwitcher
-          token={token}
-          currentWorkspaceId={workspaceId}
-          onSwitch={onSwitchWorkspace}
-        />
         <button
           type="button"
           onClick={onNewChat}

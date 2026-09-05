@@ -85,7 +85,12 @@ class TestRoutingCacheStoresClassification:
 
     @pytest.mark.asyncio
     async def test_cache_miss_triggers_llm_call(self) -> None:
-        """Without a cache entry, the LLM router is called."""
+        """Without a cache entry, the LLM router is called.
+
+        The query is deliberately anaphoric/ambiguous (``what about it``) so
+        the regex fast-path in ``classify_intent`` does not intercept it — the
+        LLM must be reached.
+        """
         ws = uuid.uuid4()
 
         async def _mock_route(**kwargs: Any) -> RouteResult:
@@ -96,7 +101,7 @@ class TestRoutingCacheStoresClassification:
             side_effect=_mock_route,
         ) as mock_llm:
             intent = await classify_intent(
-                "how many documents", workspace_id=ws
+                "what about it", workspace_id=ws
             )
             mock_llm.assert_called_once()
 
@@ -140,28 +145,32 @@ class TestMetadataAnswersFresh:
 
     @pytest.mark.asyncio
     async def test_same_query_after_invalidation_gets_fresh_classification(self) -> None:
-        """After cache invalidation, the LLM re-classifies the same query."""
-        ws = uuid.uuid4()
-        normalized = normalize_for_classification("hello")
+        """After cache invalidation, the LLM re-classifies the same query.
 
-        # Pre-populate cache as GREETING.
-        set_cached_route(ws, normalized, "GREETING", "old", 0.95)
+        An anaphoric/ambiguous query (``what about it``) is used so the regex
+        fast-path does not intercept it after invalidation — the LLM is reached.
+        """
+        ws = uuid.uuid4()
+        normalized = normalize_for_classification("what about it")
+
+        # Pre-populate cache as METADATA.
+        set_cached_route(ws, normalized, "METADATA", "old", 0.95)
 
         # Invalidate (simulates document change).
         invalidate_workspace_cache(ws)
 
         # Now classify — LLM is called fresh.
         async def _mock_route(**kwargs: Any) -> RouteResult:
-            return _make_route("GREETING", 0.95, "fresh_llm")
+            return _make_route("METADATA", 0.95, "fresh_llm")
 
         with patch(
             "app.retrieval.llm_router.route_with_llm",
             side_effect=_mock_route,
         ) as mock_llm:
-            intent = await classify_intent("hello", workspace_id=ws)
+            intent = await classify_intent("what about it", workspace_id=ws)
             mock_llm.assert_called_once()  # LLM was called
 
-        assert intent.category.value == "greeting"
+        assert intent.category.value == "workspace_metadata"
 
 
 # ------------------------------------------------------------------
@@ -175,24 +184,24 @@ class TestCacheInvalidation:
     @pytest.mark.asyncio
     async def test_invalidation_forces_llm_call(self) -> None:
         ws = uuid.uuid4()
-        normalized = normalize_for_classification("hello")
+        normalized = normalize_for_classification("what about it")
 
         # Pre-populate cache.
-        set_cached_route(ws, normalized, "GREETING", "cached", 0.95)
+        set_cached_route(ws, normalized, "METADATA", "cached", 0.95)
 
         # First call — cache hit, no LLM.
         with patch(
             "app.retrieval.llm_router.route_with_llm",
             new_callable=AsyncMock,
         ) as mock_llm:
-            intent1 = await classify_intent("hello", workspace_id=ws)
+            intent1 = await classify_intent("what about it", workspace_id=ws)
             mock_llm.assert_not_called()
-        assert intent1.category.value == "greeting"
+        assert intent1.category.value == "workspace_metadata"
 
         # Invalidate cache (simulates document upload/remove/approve).
         invalidate_workspace_cache(ws)
 
-        # Second call — cache miss, LLM is called.
+        # Second call — cache miss, ambiguous query reaches the LLM.
         async def _mock_route(**kwargs: Any) -> RouteResult:
             return _make_route("DOCUMENT_CONTENT", 0.8, "fresh_llm")
 
@@ -200,7 +209,7 @@ class TestCacheInvalidation:
             "app.retrieval.llm_router.route_with_llm",
             side_effect=_mock_route,
         ) as mock_llm:
-            intent2 = await classify_intent("hello", workspace_id=ws)
+            intent2 = await classify_intent("what about it", workspace_id=ws)
             mock_llm.assert_called_once()
 
         # The LLM re-classified; result may differ from the cached value.

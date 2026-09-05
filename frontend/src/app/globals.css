@@ -63,6 +63,14 @@
   --font-mono: var(--font-ibm-plex-mono);
 }
 
+/* Guard against any full-viewport layer (e.g. the login background) ever
+ * producing a horizontal scrollbar — width mismatches around scrollbars
+ * must never turn into page-level sideways scrolling. */
+html,
+body {
+  overflow-x: hidden;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);

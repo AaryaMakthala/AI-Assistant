@@ -1,15 +1,14 @@
 "use client";
 
 import {
+  ArrowRight,
   Building2,
-  Loader2,
-  LogIn,
   Eye,
   EyeOff,
-  MessageSquareText,
-  FileText,
-  Sparkles,
+  Loader2,
+  Play,
 } from "lucide-react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
@@ -21,6 +20,7 @@ import {
 } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
+import "./login.css";
 
 type Mode = "signin" | "signup";
 
@@ -74,13 +74,16 @@ export default function LoginPage() {
 
   if (!isSupabaseConfigured() || !supabase) {
     return (
-      <Shell>
-        <p role="alert" className="text-sm text-danger">
+      <LoginShell
+        title="Sign in to Office Brain"
+        subtitle="Ask questions across your organization's approved knowledge — every answer grounded in your documents, with citations."
+      >
+        <p role="alert" className="login-alert login-alert-error">
           Sign-in is unavailable: this deployment has no Supabase credentials.
           Set <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> and{" "}
           <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code>.
         </p>
-      </Shell>
+      </LoginShell>
     );
   }
 
@@ -279,443 +282,378 @@ export default function LoginPage() {
   // Zero-workspace state: user is authenticated but has no organizations.
   if (needsOrg) {
     return (
-      <Shell>
-        <div className="space-y-4">
+      <LoginShell
+        title="Create your organization"
+        subtitle="You're signed in, but this account isn't part of a workspace yet."
+      >
+        <div className="space-y-5">
           {orgSuccess ? (
-            <div className="rounded-md bg-accent/10 p-3 text-sm text-accent border border-accent/20">
-              <p role="status">
-                Organization created. We&apos;ve sent a verification email to
-                your email address.
-              </p>
+            <>
+              <div className="login-alert login-alert-success">
+                <p role="status">
+                  Organization created. We&apos;ve sent a verification email to
+                  your email address.
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => router.replace(postSignInTarget())}
-                className="mt-2 text-xs font-medium underline hover:text-accent/80"
+                className="login-btn login-btn-primary"
               >
                 Continue to application
               </button>
-            </div>
+            </>
           ) : (
             <>
-              <div className="rounded-md bg-warning/10 p-3 text-sm text-warning border border-warning/20">
+              <div className="login-alert login-alert-warning">
                 <p role="alert">
                   No organization is associated with this account.
                 </p>
-                <p className="mt-1 text-xs text-warning/80">
+                <p className="mt-1 text-xs text-white/60">
                   Please contact your administrator or create an organization to
                   continue.
                 </p>
               </div>
-              <form onSubmit={handleCreateOrg} className="space-y-4">
-                <Field
-                  label="Organization name"
-                  type="text"
-                  value={newOrgName}
-                  onChange={setNewOrgName}
-                  autoComplete="organization"
-                  required
-                />
+              <form onSubmit={handleCreateOrg} className="login-form">
+                <div className="login-fields">
+                  <Field
+                    label="Organization name"
+                    type="text"
+                    value={newOrgName}
+                    onChange={setNewOrgName}
+                    autoComplete="organization"
+                    required
+                  />
+                </div>
                 {orgError && (
-                  <div className="rounded-md bg-danger/10 p-3 text-sm text-danger border border-danger/20">
+                  <div className="login-alert login-alert-error">
                     <p role="alert">{orgError}</p>
                   </div>
                 )}
-                <button
-                  type="submit"
-                  disabled={isCreatingOrg || !newOrgName.trim()}
-                  className={cn(
-                    "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
-                    "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
-                    "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
-                    "disabled:opacity-60 disabled:pointer-events-none",
-                  )}
-                >
-                  {isCreatingOrg ? (
-                    <Loader2 className="size-4 animate-spin" aria-hidden />
-                  ) : (
-                    <Building2 className="size-4" aria-hidden />
-                  )}
-                  Create organization
-                </button>
+                <div className="login-actions">
+                  <button
+                    type="submit"
+                    disabled={isCreatingOrg || !newOrgName.trim()}
+                    className="login-btn login-btn-primary"
+                  >
+                    {isCreatingOrg ? (
+                      <Loader2 className="size-4 animate-spin" aria-hidden />
+                    ) : (
+                      <Building2 className="size-4" aria-hidden />
+                    )}
+                    Create organization
+                  </button>
+                </div>
               </form>
+              <div className="text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNeedsOrg(false);
+                    setNewOrgName("");
+                    setOrgError(undefined);
+                    setOrgSuccess(false);
+                  }}
+                  className="login-link font-medium"
+                >
+                  Back to sign in
+                </button>
+              </div>
             </>
           )}
-          <div className="text-center">
-            <button
-              type="button"
-              onClick={() => {
-                setNeedsOrg(false);
-                setNewOrgName("");
-                setOrgError(undefined);
-                setOrgSuccess(false);
-              }}
-              className="text-sm font-medium text-muted hover:text-foreground transition-colors"
-            >
-              Back to sign in
-            </button>
-          </div>
         </div>
-      </Shell>
+      </LoginShell>
     );
   }
 
   return (
-    <div className="flex min-h-dvh">
-      {/* Left panel — auth form */}
-      <div className="flex flex-1 items-center justify-center bg-background px-4 py-12 sm:px-6 lg:px-8">
-        <div className="w-full max-w-md animate-fade-in">
-          {/* Logo + wordmark */}
-          <div className="mb-8 flex items-center gap-3">
-            <img
-              src="/logo.png"
-              alt="Office Brain logo"
-              className="size-10 rounded-lg"
+    <LoginShell
+      title={
+        mode === "signin"
+          ? "Sign in to Office Brain"
+          : "Create your account"
+      }
+      subtitle={
+        mode === "signin"
+          ? "Ask questions across your organization's approved knowledge — every answer grounded in your documents, with citations."
+          : "Start a workspace for your team and get grounded, cited answers from the documents that matter."
+      }
+      onDemo={handleDemo}
+      demoBusy={isEnteringDemo}
+    >
+      <form onSubmit={submit} className="login-form">
+        <div className="login-fields">
+          {mode === "signup" && (
+            <Field
+              label="Full name"
+              type="text"
+              value={fullName}
+              onChange={setFullName}
+              autoComplete="name"
+              required
             />
-            <span className="text-xl font-bold tracking-tight text-foreground">
-              Office Brain
-            </span>
-          </div>
+          )}
 
-          {/* Auth card */}
-          <div className="rounded-2xl border border-border bg-surface shadow-xl overflow-hidden">
-            <div className="h-1 bg-gradient-to-r from-accent/40 via-accent to-accent/40" />
-            <div className="px-8 pt-8 pb-8">
-              <h1 className="text-2xl font-bold tracking-tight text-foreground">
-                {mode === "signin" ? "Welcome back" : "Create your account"}
-              </h1>
-              <p className="mt-2 text-sm text-muted">
-                {mode === "signin"
-                  ? "Sign in to access your organization's knowledge."
-                  : "Get started with Office Brain for your team."}
-              </p>
+          <Field
+            label="Email"
+            type="email"
+            value={email}
+            onChange={setEmail}
+            autoComplete="email"
+            required
+          />
 
-              <form onSubmit={submit} className="mt-6 space-y-4">
-                {mode === "signup" && (
-                  <Field
-                    label="Full name"
-                    type="text"
-                    value={fullName}
-                    onChange={setFullName}
-                    autoComplete="name"
-                    required
-                  />
-                )}
+          <PasswordField
+            label="Password"
+            value={password}
+            onChange={setPassword}
+            autoComplete={
+              mode === "signin" ? "current-password" : "new-password"
+            }
+            required
+            showPassword={showPassword}
+            setShowPassword={setShowPassword}
+          />
 
-                <Field
-                  label="Email"
-                  type="email"
-                  value={email}
-                  onChange={setEmail}
-                  autoComplete="email"
-                  required
-                />
-
-                <div className="space-y-1">
-                  <PasswordField
-                    label="Password"
-                    value={password}
-                    onChange={setPassword}
-                    autoComplete={
-                      mode === "signin" ? "current-password" : "new-password"
-                    }
-                    required
-                    showPassword={showPassword}
-                    setShowPassword={setShowPassword}
-                  />
-                  {mode === "signin" && (
-                    <div className="flex justify-end pt-1">
-                      <Link
-                        href="/forgot-password"
-                        className="text-xs text-muted hover:text-foreground hover:underline transition-colors"
-                      >
-                        Forgot password?
-                      </Link>
-                    </div>
-                  )}
-                  {mode === "signup" && password.length > 0 && (
-                    <PasswordStrengthIndicator password={password} />
-                  )}
-                </div>
-
-                {mode === "signup" && (
-                  <>
-                    <PasswordField
-                      label="Confirm Password"
-                      value={confirmPassword}
-                      onChange={setConfirmPassword}
-                      autoComplete="new-password"
-                      required
-                      showPassword={showConfirmPassword}
-                      setShowPassword={setShowConfirmPassword}
-                    />
-                    <Field
-                      label="Organization name"
-                      type="text"
-                      value={orgName}
-                      onChange={setOrgName}
-                      autoComplete="organization"
-                      hint="Names your new workspace. Leave blank to use your name."
-                    />
-                  </>
-                )}
-
-                {error && (
-                  <div className="rounded-md bg-danger/10 p-3 text-sm text-danger border border-danger/20">
-                    <p role="alert">{error}</p>
-                    {isUnverified && (
-                      <button
-                        type="button"
-                        onClick={handleResend}
-                        disabled={isBusy}
-                        className="mt-2 text-xs font-medium underline hover:text-danger/80"
-                      >
-                        Resend verification email
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {resendSuccess && (
-                  <p
-                    role="status"
-                    className="rounded-md bg-accent/10 p-3 text-sm text-accent border border-accent/20"
-                  >
-                    Verification email sent. Please check your inbox.
-                  </p>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={isBusy}
-                  className={cn(
-                    "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
-                    "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
-                    "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
-                    "disabled:opacity-60 disabled:pointer-events-none",
-                  )}
-                >
-                  {isBusy ? (
-                    <Loader2 className="size-4 animate-spin" aria-hidden />
-                  ) : (
-                    <LogIn className="size-4" aria-hidden />
-                  )}
-                  {mode === "signin" ? "Sign in" : "Create account"}
-                </button>
-              </form>
-
-              <div className="mt-6 text-center">
-                <button
-                  type="button"
-                  onClick={toggleMode}
-                  className="text-sm font-medium text-muted hover:text-foreground transition-colors"
-                >
-                  {mode === "signin"
-                    ? "Don't have an account? Sign up"
-                    : "Already have an account? Sign in"}
-                </button>
-              </div>
+          {mode === "signin" && (
+            <div className="flex justify-end">
+              <Link
+                href="/forgot-password"
+                className="login-link hover:underline"
+              >
+                Forgot password?
+              </Link>
             </div>
-          </div>
+          )}
+
+          {mode === "signup" && password.length > 0 && (
+            <PasswordStrengthIndicator password={password} />
+          )}
+
+          {mode === "signup" && (
+            <PasswordField
+              label="Confirm password"
+              value={confirmPassword}
+              onChange={setConfirmPassword}
+              autoComplete="new-password"
+              required
+              showPassword={showConfirmPassword}
+              setShowPassword={setShowConfirmPassword}
+            />
+          )}
+
+          {mode === "signup" && (
+            <Field
+              label="Organization name"
+              type="text"
+              value={orgName}
+              onChange={setOrgName}
+              autoComplete="organization"
+              hint="Names your new workspace. Leave blank to use your name."
+            />
+          )}
         </div>
-      </div>
 
-      {/* Right panel — demo CTA */}
-      <div className="hidden lg:flex flex-1 items-center justify-center bg-accent-subtle/30 px-12">
-        <div className="w-full max-w-lg animate-fade-in">
-          <div className="space-y-8">
-            {/* Headline */}
-            <div>
-              <h2 className="text-3xl font-bold tracking-tight text-foreground">
-                See Office Brain in action
-              </h2>
-              <p className="mt-3 text-base text-muted leading-relaxed">
-                Ask questions about company documents, get instant answers with
-                citations, and explore how AI-powered knowledge retrieval works
-                for your team.
-              </p>
-            </div>
-
-            {/* Feature preview — decorative chat bubbles */}
-            <div className="space-y-3">
-              <ChatBubble
-                role="user"
-                text="What's our annual leave policy?"
-              />
-              <ChatBubble
-                role="assistant"
-                text="Full-time employees accrue 15 days per year, increasing to 20 days after 3 years. Up to 5 unused days can carry over to Q1."
-                sources={["Leave Policy · Page 1"]}
-              />
-            </div>
-
-            {/* Feature highlights */}
-            <div className="space-y-3">
-              <FeatureItem
-                icon={<MessageSquareText className="size-4" />}
-                text="Natural language search across all company docs"
-              />
-              <FeatureItem
-                icon={<FileText className="size-4" />}
-                text="Instant citations so you always know the source"
-              />
-              <FeatureItem
-                icon={<Sparkles className="size-4" />}
-                text="No account required — jump right in"
-              />
-            </div>
-
-            {/* Demo button */}
-            <div className="space-y-3">
+        {error && (
+          <div className="login-alert login-alert-error">
+            <p role="alert">{error}</p>
+            {isUnverified && (
               <button
                 type="button"
-                onClick={handleDemo}
-                disabled={isEnteringDemo}
-                className={cn(
-                  "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-6 py-3",
-                  "text-sm font-semibold text-accent-foreground shadow-md transition-all hover:bg-accent/90 active:scale-[0.98]",
-                  "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
-                  "disabled:opacity-60 disabled:pointer-events-none",
-                )}
+                onClick={handleResend}
+                disabled={isBusy}
+                className="mt-2 text-xs font-medium underline hover:text-danger/80"
               >
-                {isEnteringDemo ? (
-                  <Loader2 className="size-4 animate-spin" aria-hidden />
-                ) : (
-                  <Sparkles className="size-4" aria-hidden />
-                )}
-                {isEnteringDemo ? "Starting demo..." : "Try the demo"}
+                Resend verification email
               </button>
-              {demoError && (
-                <p className="text-xs text-center text-danger">{demoError}</p>
-              )}
-              <p className="text-xs text-center text-muted">
-                A pre-loaded demo workspace with sample company documents.
-                No account needed.
-              </p>
-            </div>
+            )}
           </div>
-        </div>
-      </div>
+        )}
 
-      {/* Mobile demo CTA — shown below login form on narrow viewports */}
-      <div className="lg:hidden px-4 pb-8 bg-accent-subtle/30">
-        <div className="mx-auto max-w-md space-y-4 pt-4">
-          <div className="h-px bg-border" />
-          <div className="text-center space-y-2">
-            <h2 className="text-lg font-semibold text-foreground">
-              Try Office Brain
-            </h2>
-            <p className="text-sm text-muted">
-              Explore a demo workspace with sample company documents.
-            </p>
-          </div>
+        {resendSuccess && (
+          <p
+            role="status"
+            className="login-alert login-alert-success"
+          >
+            Verification email sent. Please check your inbox.
+          </p>
+        )}
+
+        <div className="login-actions">
+          <button
+            type="submit"
+            disabled={isBusy}
+            className="login-btn login-btn-primary"
+          >
+            {isBusy ? (
+              <>
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                Signing in...
+              </>
+            ) : (
+              <>
+                {mode === "signin" ? "Sign in" : "Create account"}
+                <ArrowRight className="size-4" aria-hidden />
+              </>
+            )}
+          </button>
+
           <button
             type="button"
             onClick={handleDemo}
             disabled={isEnteringDemo}
-            className={cn(
-              "flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-2.5",
-              "text-sm font-semibold text-accent-foreground shadow-sm transition-all hover:bg-accent/90 active:scale-[0.98]",
-              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:outline-none",
-              "disabled:opacity-60 disabled:pointer-events-none",
-            )}
+            className="login-btn login-btn-secondary"
           >
             {isEnteringDemo ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden />
+              <>
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                Starting demo...
+              </>
             ) : (
-              <Sparkles className="size-4" aria-hidden />
+              <>
+                <Play className="size-4" aria-hidden />
+                Try the demo
+              </>
             )}
-            {isEnteringDemo ? "Starting demo..." : "Try the demo"}
           </button>
+
           {demoError && (
-            <p className="text-xs text-center text-danger">{demoError}</p>
+            <p className="login-demo-error">{demoError}</p>
           )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
-// ---------------------------------------------------------------------------
-// Shell — wraps the zero-workspace and unconfigured states
-// ---------------------------------------------------------------------------
+          <p className="text-center text-xs text-white/50">
+            A pre-loaded demo workspace with sample company documents. No
+            account needed.
+          </p>
 
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <main className="flex min-h-dvh items-center justify-center bg-background/50 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-surface via-background to-background px-4 py-12 sm:px-6 lg:px-8">
-      <div className="w-full max-w-md animate-fade-in relative overflow-hidden rounded-2xl bg-surface shadow-xl border border-border/50">
-        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-accent/40 via-accent to-accent/40 animate-pulse" />
-
-        <div className="px-8 pt-10 pb-8">
-          <div className="mb-8 flex items-center justify-center gap-3">
-            <img
-              src="/logo.png"
-              alt="Office Brain logo"
-              className="size-10 rounded-lg"
-            />
-            <span className="text-xl font-bold tracking-tight text-foreground">
-              Office Brain
-            </span>
-          </div>
-          {children}
-        </div>
-      </div>
-    </main>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Decorative chat bubble for the demo preview
-// ---------------------------------------------------------------------------
-
-function ChatBubble({
-  role,
-  text,
-  sources,
-}: {
-  role: "user" | "assistant";
-  text: string;
-  sources?: string[];
-}) {
-  return (
-    <div
-      className={cn(
-        "rounded-xl px-4 py-3 text-sm leading-relaxed max-w-sm",
-        role === "user"
-          ? "bg-accent/10 text-foreground ml-auto border border-accent/20"
-          : "bg-surface border border-border text-foreground",
-      )}
-    >
-      <p>{text}</p>
-      {sources && sources.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {sources.map((s) => (
-            <span
-              key={s}
-              className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent"
+          <div className="pt-2 text-center">
+            <button
+              type="button"
+              onClick={toggleMode}
+              className="login-link font-medium"
             >
-              <FileText className="size-3" aria-hidden />
-              {s}
-            </span>
-          ))}
+              {mode === "signin"
+                ? "Don't have an account? Sign up"
+                : "Already have an account? Sign in"}
+            </button>
+          </div>
         </div>
-      )}
-    </div>
+      </form>
+    </LoginShell>
   );
 }
 
-function FeatureItem({
-  icon,
-  text,
+// ---------------------------------------------------------------------------
+// Shell — background layer, top nav, and content placement. Shared by the
+// main sign-in/sign-up view, the zero-workspace state, and the unconfigured
+// notice so they all sit on the same glass treatment.
+// ---------------------------------------------------------------------------
+
+function LoginShell({
+  title,
+  subtitle,
+  onDemo,
+  demoBusy,
+  children,
 }: {
-  icon: React.ReactNode;
-  text: string;
+  title?: string;
+  subtitle?: string;
+  onDemo?: () => void;
+  demoBusy?: boolean;
+  children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start gap-3">
-      <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-accent/10 text-accent">
-        {icon}
+    <div className="login-page">
+      {/* Full-bleed background: one next/image layer of the real photo
+       * (public/login-bg.png), object-fit: cover — fills the entire viewport
+       * edge-to-edge with zero letterboxing, seams, or masks. The photo's
+       * own calm dark zone on the left is what the headline sits on; cover's
+       * minor edge-crop (≈4% of width at desktop) never reaches it. */}
+      <Image
+        src="/login-bg.png"
+        alt=""
+        aria-hidden
+        fill
+        priority
+        sizes="100vw"
+        draggable={false}
+        style={{ objectFit: "cover" }}
+        className="login-bg"
+      />
+
+      {/* The three real blob renders, individually positioned and layered on
+       * top of the background (z-index 1) — still behind the nav and glass
+       * card (z-index 2), which blur whatever blob edge sits close enough to
+       * the panel boundary. */}
+      <div className="login-blobs" aria-hidden="true">
+        {/* unoptimized so the DOM <img> srcs are the literal /blobs/*.png
+         * paths (decorative PNGs, already lean — no re-encode needed). */}
+        <Image
+          src="/blobs/gcircle.png"
+          alt=""
+          width={677}
+          height={369}
+          unoptimized
+          priority
+          className="login-blob login-blob-gcircle"
+        />
+        <Image
+          src="/blobs/green.png"
+          alt=""
+          width={500}
+          height={500}
+          unoptimized
+          className="login-blob login-blob-green"
+        />
+        <Image
+          src="/blobs/stone.png"
+          alt=""
+          width={677}
+          height={369}
+          unoptimized
+          className="login-blob login-blob-stone"
+        />
       </div>
-      <p className="text-sm text-muted leading-snug">{text}</p>
+
+      {/* Nav floats on the raw background, above the centered glass card. */}
+      <header className="login-nav">
+        <div className="login-brand">
+          <span className="login-brand-mark">
+            <Building2 className="size-5" aria-hidden="true" />
+          </span>
+          <span>Office Brain</span>
+        </div>
+        {onDemo && (
+          <button
+            type="button"
+            onClick={onDemo}
+            disabled={demoBusy}
+            className="login-nav-demo"
+          >
+            {demoBusy ? "Starting demo..." : "Try the demo →"}
+          </button>
+        )}
+      </header>
+
+      {/* Two-column area: headline + subhead sit directly on the background's
+       * calm left zone; the wide, compact glass card holds the form at
+       * center-right. */}
+      <main className="login-main">
+        {(title || subtitle) && (
+          <div className="login-hero">
+            {title && <h1 className="login-headline">{title}</h1>}
+            {subtitle && <p className="login-subtext">{subtitle}</p>}
+          </div>
+        )}
+        <div className="login-glass">{children}</div>
+      </main>
+
+      {/* Small secondary brand mark, bottom-left. */}
+      <div className="login-corner-mark" aria-hidden="true">
+        <span className="login-corner-mark-box">
+          <Building2 className="size-4" />
+        </span>
+      </div>
     </div>
   );
 }
@@ -742,25 +680,17 @@ function Field({
   hint?: string;
 }) {
   return (
-    <div className="space-y-1.5">
-      <label className="block text-sm font-medium text-foreground">
-        {label}
-      </label>
+    <div className="login-field-group">
+      <label className="login-label">{label}</label>
       <input
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         autoComplete={autoComplete}
         required={required}
-        className={cn(
-          "block w-full rounded-lg border border-border bg-surface-raised px-3 py-2 text-sm text-foreground",
-          "placeholder:text-muted/60 transition-colors",
-          "focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none",
-        )}
+        className="login-input"
       />
-      {hint && (
-        <p className="text-[11px] text-muted pt-0.5">{hint}</p>
-      )}
+      {hint && <p className="login-hint">{hint}</p>}
     </div>
   );
 }
@@ -783,33 +713,28 @@ function PasswordField({
   setShowPassword: (show: boolean) => void;
 }) {
   return (
-    <div className="space-y-1.5">
-      <label className="block text-sm font-medium text-foreground">
-        {label}
-      </label>
-      <div className="relative">
+    <div className="login-field-group">
+      <label className="login-label">{label}</label>
+      <div className="login-password-wrap">
         <input
           type={showPassword ? "text" : "password"}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           autoComplete={autoComplete}
           required={required}
-          className={cn(
-            "block w-full rounded-lg border border-border bg-surface-raised pl-3 pr-10 py-2 text-sm text-foreground",
-            "placeholder:text-muted/60 transition-colors",
-            "focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none",
-          )}
+          className="login-input"
         />
         <button
           type="button"
-          className="absolute inset-y-0 right-0 flex items-center pr-3 text-muted hover:text-foreground transition-colors focus:outline-none"
+          className="login-password-toggle"
           onClick={() => setShowPassword(!showPassword)}
           tabIndex={-1}
+          aria-label={showPassword ? "Hide password" : "Show password"}
         >
           {showPassword ? (
-            <EyeOff className="h-4 w-4" aria-hidden="true" />
+            <EyeOff className="size-4" aria-hidden="true" />
           ) : (
-            <Eye className="h-4 w-4" aria-hidden="true" />
+            <Eye className="size-4" aria-hidden="true" />
           )}
         </button>
       </div>
@@ -851,8 +776,8 @@ function PasswordStrengthIndicator({ password }: { password: string }) {
   }
 
   return (
-    <div className="pt-1 space-y-1.5">
-      <div className="h-1.5 w-full bg-border rounded-full overflow-hidden">
+    <div className="space-y-1.5 pt-1">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
         <div
           className={cn(
             "h-full transition-all duration-300 ease-in-out",
@@ -861,11 +786,11 @@ function PasswordStrengthIndicator({ password }: { password: string }) {
           style={{ width }}
         />
       </div>
-      <p className="text-[11px] font-medium text-muted flex justify-between">
+      <p className="flex justify-between text-[11px] font-medium text-white/60">
         <span>Password strength:</span>
         <span
           className={cn(
-            strength === "Weak" && "text-danger",
+            strength === "Weak" && "text-[#FF6B6B]",
             strength === "Fair" && "text-orange-500",
             strength === "Strong" && "text-yellow-500",
             strength === "Very strong" && "text-green-500",
@@ -876,4 +801,4 @@ function PasswordStrengthIndicator({ password }: { password: string }) {
       </p>
     </div>
   );
-}
+}

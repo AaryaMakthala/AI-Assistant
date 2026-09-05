@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
@@ -37,6 +37,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: A 384-dimension vector, matching the pinned embedding model.
 _VECTOR = "[" + ",".join(["0.1"] * 384) + "]"
+
+
+def _unreachable(exc: BaseException) -> bool:
+    """True only for genuine DB reachability failures (connection refused/timeout).
+
+    A schema-mismatch `ProgrammingError`/`UndefinedTableError` is NOT a reachability
+    problem — it means the database answered but the schema is wrong, which must
+    surface as a test failure, never as a swallowed "database unreachable" skip.
+    """
+    if isinstance(exc, OSError) or isinstance(exc, asyncio.TimeoutError):
+        return True
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    return isinstance(exc, SQLAlchemyError) and "connection" in str(exc).lower()
 
 
 def _database_url() -> str | None:
@@ -190,8 +204,10 @@ async def _delete_as(org_id: uuid.UUID, user_id: uuid.UUID, document_id: uuid.UU
 def test_delete_removes_the_row_its_chunks_and_its_failures(delete_env: str) -> None:
     try:
         ids = asyncio.run(_seed_document(delete_env, org_slug=f"del-{uuid.uuid4().hex[:8]}"))
-    except (OSError, SQLAlchemyError) as exc:
-        pytest.skip(f"test database unreachable: {exc}")
+    except Exception as exc:
+        if _unreachable(exc):
+            pytest.skip(f"test database unreachable: {exc}")
+        raise
 
     try:
         before = asyncio.run(_counts(delete_env, ids))
@@ -212,8 +228,10 @@ def test_one_org_cannot_delete_another_orgs_document(delete_env: str) -> None:
     try:
         owner = asyncio.run(_seed_document(delete_env, org_slug=f"own-{uuid.uuid4().hex[:8]}"))
         attacker = asyncio.run(_seed_document(delete_env, org_slug=f"atk-{uuid.uuid4().hex[:8]}"))
-    except (OSError, SQLAlchemyError) as exc:
-        pytest.skip(f"test database unreachable: {exc}")
+    except Exception as exc:
+        if _unreachable(exc):
+            pytest.skip(f"test database unreachable: {exc}")
+        raise
 
     try:
         # The attacker knows the victim's document id and asks for it directly.
@@ -236,8 +254,10 @@ def test_one_org_cannot_see_another_orgs_chunks(delete_env: str) -> None:
     try:
         owner = asyncio.run(_seed_document(delete_env, org_slug=f"own-{uuid.uuid4().hex[:8]}"))
         attacker = asyncio.run(_seed_document(delete_env, org_slug=f"atk-{uuid.uuid4().hex[:8]}"))
-    except (OSError, SQLAlchemyError) as exc:
-        pytest.skip(f"test database unreachable: {exc}")
+    except Exception as exc:
+        if _unreachable(exc):
+            pytest.skip(f"test database unreachable: {exc}")
+        raise
 
     async def visible_chunks(org_id: uuid.UUID, user_id: uuid.UUID) -> int:
         from app.db.session import dispose_engine

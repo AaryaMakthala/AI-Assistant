@@ -1,0 +1,665 @@
+/*
+ * Login page design system — scoped to /login and its direct children.
+ * Plain CSS (no animation library): the entrance choreography and the blob
+ * drift loops are simple keyframes with custom cubic-bezier easing, so a
+ * dependency is not justified.
+ *
+ * Layout contract (from the redesign spec):
+ *   One full-bleed login-bg.png layer behind everything (z-index 0),
+ *   object-fit: cover — fills the entire viewport edge-to-edge with zero
+ *   letterboxing, seams, masks, or dissolve edges. The photo's own calm,
+ *   dark left third is where the headline sits; cover's minor edge-crop
+ *   (≈4% of width at desktop) never reaches that zone. The three real blob
+ *   renders (public/blobs/*.png) float above it (z-index 1) as small,
+ *   individually positioned <img> accents scattered above/below/beside the
+ *   headline and subtext — never behind the glyphs — never merged into the
+ *   background. The nav floats on top (brand top-left, demo pill
+ *   top-right). Left-center: headline + subhead sitting directly on the
+ *   background's calm zone — no card behind the text block. Center-right:
+ *   one wide/short frosted glass card holding the form, pulled left off the
+ *   viewport edge so the gap to the headline equals the card's right
+ *   margin. A small secondary brand mark sits bottom-left. The page is
+ *   exactly one viewport tall — no scrollbars.
+ */
+
+.login-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  color: #ffffff;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  /* Plain dark fallback, visible only for the instant before the background
+   * image finishes loading. No gradient, no competing color — the single
+   * full-bleed image covers it entirely once loaded. */
+  background: #0b1a11;
+}
+
+/* --- Background ---------------------------------------------------------- */
+
+/* Full-bleed login-bg.png, one layer, object-fit: cover — fills the whole
+ * viewport edge-to-edge (no letterbox, no mask, no dissolve, no seam). The
+ * photo's built-in calm dark zone on the left is what the headline sits on;
+ * cover's minor edge-crop never reaches it. next/image `fill` sets the
+ * absolute positioning inline; the class keeps it at z-index 0. */
+.login-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  animation: login-fade-in 600ms ease-out both;
+}
+
+/* --- Blob layer ---------------------------------------------------------- */
+
+/* One container holding the three real PNG renders, above the background
+ * image and below the nav + glass card (z-index 2). pointer-events: none so
+ * the decorative layer never intercepts clicks near the form. */
+.login-blobs {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  animation: login-fade-in 600ms ease-out both;
+}
+
+.login-blob {
+  position: absolute;
+  height: auto;
+  will-change: transform;
+}
+
+/* Each blob's PNG canvas has wide transparent margins (the opaque shape is
+ * only ~40–62% of the canvas width), so the element width is chosen to make
+ * the *visible* shape hit the intended size — deliberately small accents
+ * (~40% smaller than before) so they read as floating details, not
+ * dominant shapes: gcircle ~155px, green ~120px, stone ~90px. The visible
+ * shapes sit centered in their canvases. All three stay behind the text
+ * (z-index 1 < nav/hero/card at 2) but are positioned above, below, or
+ * beside the text block — never behind the glyphs themselves.
+ *
+ * Defaults (768–1099px column layout, decorative approximation): gcircle in
+ * the left gutter above the headline, stone in the right gutter, green low
+ * near the text.
+ */
+.login-blob-gcircle {
+  width: 260px;
+  top: 12%;
+  left: -10%;
+  animation: float-a 11s ease-in-out infinite alternate;
+}
+
+.login-blob-stone {
+  width: 160px;
+  top: 16%;
+  left: 68%;
+  animation: float-c 13s ease-in-out 3s infinite alternate;
+}
+
+.login-blob-green {
+  width: 150px;
+  top: 34%;
+  left: 8%;
+  animation: float-b 9s ease-in-out 1.5s infinite alternate;
+}
+
+/* Desktop (≥1100px two-column layout): anchor each blob's vertical position
+ * to the hero text block, whose center sits at 50% of the viewport height +
+ * 26px (76px nav + 16px top padding, content centered in the remainder). A
+ * calc() anchor — not a top % — keeps the scatter glued to the headline at
+ * any viewport height. Sizes are ~40% smaller than before; every blob
+ * clears the text block entirely: gcircle (bright) floats above the
+ * headline's upper-left, stone (bright) floats high to its right, green
+ * (dark) sits below-right of the subtext. None of them overlap the glyphs. */
+@media (min-width: 1100px) {
+  .login-blob-gcircle {
+    width: 390px;
+    left: -100px;
+    top: calc(50% - 344px);
+  }
+
+  .login-blob-stone {
+    width: 175px;
+    left: 331px;
+    top: calc(50% - 321px);
+  }
+
+  .login-blob-green {
+    width: 195px;
+    left: 322px;
+    top: calc(50% + 60px);
+  }
+}
+
+@keyframes login-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Three distinct drift loops — different durations, delays and translate
+ * distances so none of them look synced. Stone (smallest, nearest the
+ * headline) moves least so it never distracts from the text. */
+@keyframes float-a {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(-15px, 15px);
+  }
+}
+
+@keyframes float-b {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(18px, -18px);
+  }
+}
+
+@keyframes float-c {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(-10px, -10px);
+  }
+}
+
+/* --- Top nav ------------------------------------------------------------- */
+
+.login-nav {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 76px;
+  flex-shrink: 0;
+  padding: 0 24px;
+  animation: login-slide-down 500ms cubic-bezier(0.16, 1, 0.3, 1) 200ms both;
+}
+
+@media (min-width: 768px) {
+  .login-nav {
+    padding: 0 80px;
+  }
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+}
+
+.login-brand-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+}
+
+.login-nav-demo {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: transparent;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+
+.login-nav-demo:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.login-nav-demo:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* --- Two-column content area --------------------------------------------- */
+
+.login-main {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 56px;
+  padding: 16px 24px 24px;
+  /* Safety valve only: at the three target viewports the content fits, so no
+   * scrollbar ever appears; a very short mobile screen in sign-up mode gets
+   * an internal scroll instead of clipped fields. */
+  overflow-y: auto;
+}
+
+@media (min-width: 768px) {
+  .login-main {
+    padding: 16px 80px 40px;
+  }
+}
+
+/* Hero text block — sits directly on the background's calm left zone, no
+ * card behind it. */
+.login-hero {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 480px;
+}
+
+.login-headline {
+  margin: 0 0 14px;
+  font-family: var(--font-fraunces), "Source Serif 4", Georgia, serif;
+  font-weight: 500;
+  font-size: clamp(28px, 3.2vw, 40px);
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+  animation: login-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 600ms both;
+}
+
+.login-subtext {
+  margin: 0;
+  max-width: 380px;
+  color: rgba(201, 212, 198, 0.8);
+  font-size: 16px;
+  line-height: 1.6;
+  animation: login-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
+}
+
+/* --- Glass card ---------------------------------------------------------- */
+
+/* One wide, short frosted card, center-right: dark-green tint that lets the
+ * background bleed through, clean 28px rounded-rectangle edges (no mask, no
+ * feather), hairline border, tight padding — rounded-square proportions, not
+ * a tall form. The card itself stays still: entrance is a pure opacity fade,
+ * no slide, no hover-lift, so the form feels stable while the background
+ * drifts. In the two-column row layout it is pulled left off the viewport
+ * edge (see the ≥1100px rule below) so the gap to the headline block
+ * matches the card's right margin. */
+.login-glass {
+  position: relative;
+  z-index: 2;
+  flex: 0 1 460px;
+  width: min(100%, 460px);
+  margin-left: auto;
+  padding: 32px 36px;
+  /* Slightly stronger fill (0.28) so the card reads as a clean, distinct
+   * surface against the photo — the frosted backdrop no longer lets the
+   * photo's bright areas dominate the card's silhouette. */
+  background: rgba(20, 40, 30, 0.28);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 28px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+  animation: login-fade 600ms cubic-bezier(0.16, 1, 0.3, 1) 400ms both;
+}
+
+/* Two-column row layout (≥1100px): drop the fixed flex gap and instead give
+ * the card a left margin equal to half the space left over after the fixed
+ * hero (≤480px) + card (460px) widths. Result: gap between the headline
+ * block and the card equals the card's right margin (both (W − 940px)/2),
+ * so the card reads as balanced center-right instead of hard against the
+ * right edge. (The ≤1099px column layout centers the card on its own.) */
+@media (min-width: 1100px) {
+  .login-main {
+    gap: 0;
+  }
+
+  .login-glass {
+    margin-left: calc((100% - 940px) / 2);
+  }
+}
+
+/* --- Form ---------------------------------------------------------------- */
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-fields > * {
+  animation: login-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 800ms both;
+}
+
+.login-fields > *:nth-child(2) {
+  animation-delay: 860ms;
+}
+
+/* Signup has up to five groups; cap the stagger so the buttons can still be last. */
+.login-fields > *:nth-child(3),
+.login-fields > *:nth-child(4),
+.login-fields > *:nth-child(5) {
+  animation-delay: 920ms;
+}
+
+.login-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Sentence-case labels: quiet, muted, no all-caps tracking. */
+.login-label {
+  display: block;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.login-input {
+  display: block;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  background: rgba(255, 255, 255, 0.06);
+  /* More visible border so the fields read clearly as input boxes. */
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 15px;
+  transition: all 0.2s ease;
+}
+
+.login-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.login-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.login-hint {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.login-password-wrap {
+  position: relative;
+}
+
+.login-password-wrap .login-input {
+  padding-right: 48px;
+}
+
+.login-password-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.login-password-toggle:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+
+.login-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: login-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 950ms both;
+}
+
+.login-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 44px;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.login-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Primary: warm off-white fill, deep green text. Hover is a brightness lift
+ * only — no translate, per the "card stays still" contract. */
+.login-btn-primary {
+  background: #f5f3ec;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #0c1410;
+}
+
+.login-btn-primary:hover {
+  filter: brightness(1.04);
+}
+
+.login-btn-secondary {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+}
+
+.login-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.login-link {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  transition: color 0.2s ease;
+}
+
+.login-link:hover {
+  color: #ffffff;
+}
+
+/* --- Alerts (error / success / warning) ---------------------------------- */
+
+.login-alert {
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.5;
+  /* Mounts after user interaction — animate in immediately, no entrance delay. */
+  animation: login-fade 300ms ease-out both;
+}
+
+.login-alert-error {
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  background: rgba(255, 107, 107, 0.12);
+  color: #ff6b6b;
+}
+
+.login-alert-success {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.login-alert-warning {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Small inline error under the demo button — not a boxed alert. */
+.login-demo-error {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: center;
+  font-size: 12px;
+  color: #ff6b6b;
+}
+
+/* --- Corner mark --------------------------------------------------------- */
+
+/* Small secondary brand mark, bottom-left on the raw background. Decorative —
+ * hidden on mobile so it never crowds the card. */
+.login-corner-mark {
+  position: absolute;
+  left: 24px;
+  bottom: 20px;
+  z-index: 2;
+  display: none;
+  opacity: 0.5;
+}
+
+@media (min-width: 768px) {
+  .login-corner-mark {
+    display: block;
+    left: 80px;
+    bottom: 24px;
+  }
+}
+
+.login-corner-mark-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.65);
+}
+
+/* --- Stacked layout (tablet / mobile) ------------------------------------ */
+
+@media (max-width: 1099px) {
+  .login-main {
+    flex-direction: column;
+    justify-content: center;
+    gap: 32px;
+    padding: 16px 24px 32px;
+  }
+
+  .login-hero {
+    flex: none;
+    max-width: 460px;
+    text-align: center;
+  }
+
+  .login-subtext {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .login-glass {
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .login-glass {
+    padding: 28px 24px;
+  }
+
+  /* Small accent blobs on phones (~40% smaller than before), all in the
+   * clear band between the nav and the stacked headline — above, never
+   * behind, the text. Left / center-right / center-left, unevenly spaced. */
+  .login-blob-gcircle {
+    width: 95px;
+    top: 11%;
+    left: 6%;
+  }
+
+  .login-blob-stone {
+    width: 80px;
+    top: 12%;
+    left: 60%;
+  }
+
+  .login-blob-green {
+    width: 95px;
+    top: 7%;
+    left: 32%;
+  }
+}
+
+/* --- Entrance keyframes -------------------------------------------------- */
+
+@keyframes login-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes login-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Reduced motion ------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  /* Blobs freeze in their default position; everything else loses its entrance. */
+  .login-bg,
+  .login-blobs,
+  .login-blob,
+  .login-nav,
+  .login-glass,
+  .login-headline,
+  .login-subtext,
+  .login-fields > *,
+  .login-actions,
+  .login-alert {
+    animation: none;
+  }
+}

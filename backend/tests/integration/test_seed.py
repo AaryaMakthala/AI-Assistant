@@ -19,13 +19,44 @@ import pytest
 from dotenv import dotenv_values
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import Settings
 from app.demo.seed import seed_demo_workspace
+from pydantic import SecretStr
 
 _TEST_DATABASE_URL = "TEST_DATABASE_URL"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+pytestmark = pytest.mark.usefixtures("seed_env")
+
+
+@pytest.fixture
+def seed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore a complete, valid configuration for the seed pipeline.
+
+    The root conftest's ``_ignore_dotenv`` autouse fixture clears every
+    setting (and disables .env loading), so ``seed_demo_workspace()``'s
+    internal ``get_settings()``/``get_session_factory()`` would otherwise
+    hard-exit with SystemExit.  Mirror the ``valid_env`` config the other
+    integration files use, but point DATABASE_URL at the real
+    TEST_DATABASE_URL so the seed pipeline writes to the same database the
+    tests assert against.
+    """
+    test_url = _test_database_url() or "postgresql+asyncpg://test:test@localhost:5432/test"
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("DATABASE_URL", test_url)
+    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "test-anon-key")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
+    monkeypatch.setenv("LLM_PROVIDER", "test-provider")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setenv("LLM_API_KEY", "test-llm-api-key")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _test_database_url() -> str | None:
@@ -37,7 +68,13 @@ def _test_database_url() -> str | None:
 
 
 async def _ensure_demo_owner_in_auth(conn: AsyncConnection, owner_id: uuid.UUID) -> None:
-    """Insert the demo owner into auth.users so FK references succeed."""
+    """Insert the demo owner into auth.users so FK references succeed.
+
+    The ``on_auth_user_created`` trigger calls ``app.provision_auth_user()``,
+    which auto-creates a workspace + OWNER membership for the new user.  We
+    must clean those up so that ``seed_demo_workspace``'s ``create_workspace()``
+    call doesn't fail with "This email is already registered with an organization."
+    """
     await conn.execute(
         text(
             "INSERT INTO auth.users (id, email, raw_app_meta_data, raw_user_meta_data, "
@@ -46,6 +83,19 @@ async def _ensure_demo_owner_in_auth(conn: AsyncConnection, owner_id: uuid.UUID)
             "ON CONFLICT (id) DO NOTHING"
         ),
         {"id": owner_id, "email": "demo-owner@officebrain.app"},
+    )
+
+    # Clean up auto-provisioned data from the trigger.  The trigger creates a
+    # workspace (via provision_auth_user) whose owner_id matches, plus an OWNER
+    # membership.  Remove both so create_workspace() can proceed.
+    # Members first (FK to workspaces), then workspaces.
+    await conn.execute(
+        text("DELETE FROM members WHERE user_id = :uid AND role = 'OWNER'"),
+        {"uid": owner_id},
+    )
+    await conn.execute(
+        text("DELETE FROM workspaces WHERE owner_id = :uid"),
+        {"uid": owner_id},
     )
 
 
@@ -129,6 +179,21 @@ async def test_db_conn():
 
 
 @pytest.fixture
+async def seed_factory(test_db_conn: AsyncConnection):
+    """Patch get_session_factory so seed_demo_workspace() uses the test connection.
+
+    When bound to a Connection, async_sessionmaker creates sessions that share
+    that connection's transaction.  This makes the seed's reads/writes visible
+    to test_db_conn queries, and everything rolls back at teardown.
+    """
+    factory = async_sessionmaker(
+        bind=test_db_conn, class_=AsyncSession, expire_on_commit=False,
+    )
+    with patch("app.demo.seed.get_session_factory", return_value=factory):
+        yield
+
+
+@pytest.fixture
 def mock_supabase_admin():
     """Mock the Supabase Admin API responses for demo owner creation/lookup."""
     with patch("app.demo.seed.httpx.AsyncClient") as mock_client_cls:
@@ -179,7 +244,7 @@ async def _count_docs_and_chunks(conn: AsyncConnection, ws_id: uuid.UUID, owner_
 
 
 @pytest.mark.asyncio
-async def test_seed_creates_workspace_without_rls_error(test_db_conn, mock_supabase_admin) -> None:
+async def test_seed_creates_workspace_without_rls_error(test_db_conn, mock_supabase_admin, seed_factory) -> None:
     """seed_demo_workspace runs without 'requires an authenticated sub claim' error."""
     conn = test_db_conn
     owner_id = mock_supabase_admin
@@ -220,7 +285,7 @@ async def test_seed_creates_workspace_without_rls_error(test_db_conn, mock_supab
 
 
 @pytest.mark.asyncio
-async def test_seed_idempotent_no_duplication(test_db_conn, mock_supabase_admin) -> None:
+async def test_seed_idempotent_no_duplication(test_db_conn, mock_supabase_admin, seed_factory) -> None:
     """Running seed_demo_workspace twice does not duplicate documents or chunks."""
     conn = test_db_conn
     owner_id = mock_supabase_admin
@@ -256,8 +321,12 @@ async def test_seed_idempotent_no_duplication(test_db_conn, mock_supabase_admin)
 
 
 @pytest.mark.asyncio
-async def test_seed_does_not_leak_claims(test_db_conn, mock_supabase_admin) -> None:
-    """After seed runs, claims should not leak to other transactions on the same connection."""
+async def test_seed_does_not_leak_claims(test_db_conn, mock_supabase_admin, seed_factory) -> None:
+    """After seed runs, claims should not leak to other transactions on the same connection.
+
+    Uses SET LOCAL ROLE app_tenant (NOBYPASSRLS) so RLS policies actually apply;
+    the default postgres role has BYPASSRLS which would see all rows regardless.
+    """
     conn = test_db_conn
     owner_id = mock_supabase_admin
 
@@ -269,9 +338,10 @@ async def test_seed_does_not_leak_claims(test_db_conn, mock_supabase_admin) -> N
     assert ws_id is not None
 
     # Now start a fresh transaction WITHOUT setting claims.
-    # The connection should see NO documents (RLS blocks everything without claims).
+    # Switch to app_tenant role (NOBYPASSRLS) so RLS policies actually apply.
     await conn.rollback()
     await conn.begin()
+    await conn.execute(text("SET LOCAL ROLE app_tenant"))
 
     doc_count = (
         await conn.execute(text("SELECT COUNT(*) FROM documents"))
@@ -286,7 +356,7 @@ async def test_seed_does_not_leak_claims(test_db_conn, mock_supabase_admin) -> N
 
 
 @pytest.mark.asyncio
-async def test_seed_with_valid_demo_workspace_id(test_db_conn, mock_supabase_admin) -> None:
+async def test_seed_with_valid_demo_workspace_id(test_db_conn, mock_supabase_admin, seed_factory) -> None:
     """When demo_workspace_id points to an existing workspace, seed uses it directly
     without calling _ensure_demo_owner or create_workspace.
     """
@@ -313,9 +383,10 @@ async def test_seed_with_valid_demo_workspace_id(test_db_conn, mock_supabase_adm
 
     # Patch get_settings to return demo_workspace_id set to the existing workspace.
     with patch("app.demo.seed.get_settings") as mock_get_settings:
-        mock_settings = MagicMock(spec=Settings)
+        mock_settings = MagicMock()
         mock_settings.demo_workspace_id = str(ws_id)
         mock_settings.demo_workspace_name = "Office Brain Demo"
+        mock_settings.supabase_url = "https://test.supabase.co"
         mock_get_settings.return_value = mock_settings
 
         ws_result = await seed_demo_workspace()
@@ -327,9 +398,14 @@ async def test_seed_with_valid_demo_workspace_id(test_db_conn, mock_supabase_adm
     assert doc_count == 3, "3 sample documents should be ingested"
     assert chunk_count > 0, "Chunks should be present"
 
-    # Verify no new workspace was created (the pre-existing one is the only one).
+    # Verify no new workspace was created (the pre-existing one is the only one
+    # owned by this owner).  We filter by owner_id because the test connection
+    # uses the postgres role (BYPASSRLS) and sees all committed workspaces.
     all_ws = (
-        await conn.execute(text("SELECT id FROM workspaces"))
+        await conn.execute(
+            text("SELECT id FROM workspaces WHERE owner_id = :owner"),
+            {"owner": owner_id},
+        )
     ).scalars().all()
     assert len(all_ws) == 1, "No new workspace should have been created"
     assert all_ws[0] == ws_id
@@ -337,7 +413,7 @@ async def test_seed_with_valid_demo_workspace_id(test_db_conn, mock_supabase_adm
 
 @pytest.mark.asyncio
 async def test_seed_with_valid_demo_workspace_id_skips_if_already_seeded(
-    test_db_conn, mock_supabase_admin
+    test_db_conn, mock_supabase_admin, seed_factory
 ) -> None:
     """When demo_workspace_id points to an already-seeded workspace, seed returns
     early without re-ingesting documents.
@@ -374,9 +450,10 @@ async def test_seed_with_valid_demo_workspace_id_skips_if_already_seeded(
     )
 
     with patch("app.demo.seed.get_settings") as mock_get_settings:
-        mock_settings = MagicMock(spec=Settings)
+        mock_settings = MagicMock()
         mock_settings.demo_workspace_id = str(ws_id)
         mock_settings.demo_workspace_name = "Office Brain Demo"
+        mock_settings.supabase_url = "https://test.supabase.co"
         mock_get_settings.return_value = mock_settings
 
         ws_result = await seed_demo_workspace()
@@ -433,7 +510,7 @@ async def test_seed_with_invalid_demo_workspace_id_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_seed_without_demo_workspace_id_uses_existing_behavior(
-    test_db_conn, mock_supabase_admin
+    test_db_conn, mock_supabase_admin, seed_factory
 ) -> None:
     """When demo_workspace_id is NOT set, seed falls back to create-or-reuse-by-name."""
     conn = test_db_conn
@@ -442,9 +519,11 @@ async def test_seed_without_demo_workspace_id_uses_existing_behavior(
     await _ensure_demo_owner_in_auth(conn, owner_id)
 
     with patch("app.demo.seed.get_settings") as mock_get_settings:
-        mock_settings = MagicMock(spec=Settings)
+        mock_settings = MagicMock()
         mock_settings.demo_workspace_id = None  # Not set
         mock_settings.demo_workspace_name = "Office Brain Demo"
+        mock_settings.supabase_url = "https://test.supabase.co"
+        mock_settings.supabase_service_role_key = SecretStr("test-service-role-key")
         mock_get_settings.return_value = mock_settings
 
         ws_result = await seed_demo_workspace()

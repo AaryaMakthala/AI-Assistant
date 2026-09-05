@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from dotenv import dotenv_values
 from sqlalchemy import select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
@@ -29,6 +29,19 @@ from app.db.legacy_models import ORG_SCOPED_TABLES
 pytestmark = pytest.mark.usefixtures("valid_env")
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _unreachable(exc: BaseException) -> bool:
+    """True only for genuine DB reachability failures (connection refused/timeout).
+
+    A schema-mismatch `ProgrammingError`/`UndefinedTableError` is NOT a reachability
+    problem — it must surface as a test failure, never as a swallowed skip.
+    """
+    if isinstance(exc, OSError) or isinstance(exc, asyncio.TimeoutError):
+        return True
+    if isinstance(exc, DBAPIError) and exc.connection_invalidated:
+        return True
+    return isinstance(exc, SQLAlchemyError) and "connection" in str(exc).lower()
 
 
 def _database_url() -> str | None:
@@ -128,8 +141,10 @@ def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path
 
     try:
         ids = asyncio.run(_seed(ingestion_env, storage_key))
-    except (OSError, SQLAlchemyError) as exc:
-        pytest.skip(f"test database unreachable: {exc}")
+    except Exception as exc:
+        if _unreachable(exc):
+            pytest.skip(f"test database unreachable: {exc}")
+        raise
 
     try:
         # Run the canonical synchronous pipeline directly.
@@ -190,8 +205,10 @@ def test_ingestion_marks_an_unreadable_file_as_failed(ingestion_env: str) -> Non
 
     try:
         ids = asyncio.run(_seed(ingestion_env, uuid.uuid4()))
-    except (OSError, SQLAlchemyError) as exc:
-        pytest.skip(f"test database unreachable: {exc}")
+    except Exception as exc:
+        if _unreachable(exc):
+            pytest.skip(f"test database unreachable: {exc}")
+        raise
 
     try:
         with pytest.raises(IngestionError):

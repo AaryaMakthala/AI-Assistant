@@ -333,8 +333,8 @@ export function MembersPanel({
                   onClick={() => void handleDeleteOrganization()}
                   disabled={isDeleting}
                   className={cn(
-                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium",
-                    "bg-danger text-white transition-opacity hover:opacity-90",
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold",
+                    "bg-danger text-[#0c1410] transition-opacity hover:opacity-90",
                     "disabled:cursor-not-allowed disabled:opacity-50",
                   )}
                 >

@@ -210,6 +210,44 @@ async def demo_enter() -> DemoEnterResponse:
             detail="Could not create demo session. Please try again later.",
         )
 
+    # 4. Repoint the guest's workspace claim at the demo workspace.
+    #
+    #    The on_auth_user_created trigger wrote the *temporary* workspace id
+    #    into raw_app_meta_data (the source of the JWT ``workspace_id`` claim)
+    #    when the guest was created in step 2.  That workspace was just
+    #    deleted, so a token minted at the guest's sign-in would carry a dead
+    #    claim: ``/me`` would report no workspace name or role, and every
+    #    workspace-scoped call would 404 "Workspace not found", which the
+    #    frontend's recovery path would answer by resetting the conversation.
+    #    Overwrite the claim so it names the workspace the guest is actually
+    #    a member of.
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.put(
+                f"{supabase_url}/auth/v1/admin/users/{created_user_id}",
+                headers={
+                    "apikey": service_key,
+                    "Authorization": f"Bearer {service_key}",
+                },
+                json={"app_metadata": {"workspace_id": str(ws.id)}},
+            )
+
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Supabase returned {response.status_code}: {response.text[:300]}"
+                )
+    except Exception as exc:
+        logger.error(
+            "Failed to repoint demo guest {user} claim to workspace {ws}: {error}",
+            user=created_user_id,
+            ws=ws.id,
+            error=str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not create demo session. Please try again later.",
+        )
+
     logger.info(
         "Demo guest {email} created, linked to workspace {ws}",
         email=guest_email,

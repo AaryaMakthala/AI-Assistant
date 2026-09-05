@@ -319,6 +319,7 @@ class TestDemoEnter:
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client.post.return_value = mock_response
+            mock_client.put.return_value = mock_response
             mock_client_cls.return_value = mock_client
 
             result = await demo_enter()
@@ -326,6 +327,15 @@ class TestDemoEnter:
         assert result.workspace_id == demo_ws_id
         assert result.email.startswith("guest_")
         assert result.redirect_url == "/"
+
+        # Step 4 repoints the guest's workspace claim at the demo workspace,
+        # because the auth trigger left it naming the deleted temp workspace.
+        mock_client.put.assert_awaited_once()
+        url, _ = mock_client.put.call_args
+        assert f"/auth/v1/admin/users/{guest_user_id}" in url[0]
+        assert mock_client.put.call_args.kwargs["json"]["app_metadata"][
+            "workspace_id"
+        ] == str(demo_ws_id)
 
     @pytest.mark.asyncio
     async def test_guest_email_and_workspace_in_response(self):
@@ -367,6 +377,7 @@ class TestDemoEnter:
         ):
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
+            mock_client.put.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
@@ -381,6 +392,12 @@ class TestDemoEnter:
         assert result.email.startswith("guest_")
         assert result.email.endswith("@demo.local")
         assert len(result.password) > 10
+
+        # Step 4 repoints the guest's workspace claim at the demo workspace.
+        mock_client.put.assert_awaited_once()
+        assert mock_client.put.call_args.kwargs["json"]["app_metadata"][
+            "workspace_id"
+        ] == str(demo_ws_id)
 
     @pytest.mark.asyncio
     async def test_guest_rejected_from_owner_endpoint(self):
@@ -545,6 +562,7 @@ class TestDemoEnter:
         ):
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response
+            mock_client.put.return_value = mock_response
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
@@ -553,6 +571,15 @@ class TestDemoEnter:
 
         # 1. /demo/enter returns the correct workspace ID.
         assert result.workspace_id == demo_ws_id
+
+        # 4. The guest's workspace claim is repointed at the demo workspace
+        #    (the trigger left it naming the deleted temp workspace).
+        mock_client.put.assert_awaited_once()
+        url, _ = mock_client.put.call_args
+        assert f"/auth/v1/admin/users/{guest_user_id}" in url[0]
+        assert mock_client.put.call_args.kwargs["json"]["app_metadata"][
+            "workspace_id"
+        ] == str(demo_ws_id)
         assert result.email.startswith("guest_")
         assert result.email.endswith("@demo.local")
 

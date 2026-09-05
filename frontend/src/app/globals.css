@@ -5,44 +5,42 @@
  * rather than a specific grey, so the dark theme below is a redefinition of the same
  * names instead of a parallel set of `dark:` variants on every element.
  *
- * Enterprise technical palette: moss (brand/dark surfaces), fern (interactive),
- * sage (muted text on dark), parchment (app background), ivory (card surface),
- * clay (warning/processing).
+ * Dark glassmorphism palette, matching the login page: deep forest base
+ * (#0C1410), warm off-white primary buttons (#F5F3EC), sage-grey muted text
+ * (rgba(201,212,198,…)), hairline white borders. The reading area is a
+ * mostly-opaque dark solid (rgba(12,20,16,0.92)) — legibility first — while
+ * the sidebar / top bar / composer use the translucent glass recipes in the
+ * `glass-*` classes below.
  */
 :root {
-  /* Core palette — do not adjust these hex values */
-  --ink: #2b2e1f;
-  --moss: #3f4a2a;
-  --moss2: #4e5c34;
-  --fern: #6e7c48;
-  --sage: #a8af87;
-  --sage40: rgba(168, 175, 135, 0.35);
-  --parchment: #efe7d1;
-  --ivory: #faf6e9;
-  --border-color: #cbbf9c;
-  --clay: #a8552f;
+  /* Core palette */
+  --ink: #f5f3ec;
+  --moss: #16261c;
+  --moss2: #1f4d3a;
+  --fern: #f5f3ec;
+  --sage: #c9d4c6;
+  --sage40: rgba(201, 212, 198, 0.15);
+  --parchment: #0c1410;
+  --ivory: #16261c;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --clay: #d9a06b;
 
-  /* Semantic mappings for light mode */
-  --background: var(--parchment);
+  /* Semantic mappings (dark) */
+  --background: rgba(12, 20, 16, 0.92);
   --surface: var(--ivory);
-  --surface-raised: var(--ivory);
+  --surface-raised: rgba(255, 255, 255, 0.08);
   --foreground: var(--ink);
-  --muted: var(--fern);
+  --muted: rgba(201, 212, 198, 0.7);
   --border: var(--border-color);
   --accent: var(--fern);
-  --accent-foreground: var(--ivory);
-  --accent-subtle: var(--sage40);
-  --danger: #991b1b;
-  --danger-subtle: #fef2f2;
+  --accent-foreground: #0c1410;
+  --accent-subtle: rgba(245, 243, 236, 0.12);
+  --danger: #ff6b6b;
+  --danger-subtle: rgba(255, 107, 107, 0.12);
   --warning: var(--clay);
-  --warning-subtle: rgba(168, 85, 47, 0.15);
-  --success: var(--fern);
+  --warning-subtle: rgba(217, 160, 107, 0.12);
+  --success: #9cc5a8;
 }
-
-/* Dark mode disabled: the palette was designed for light backgrounds.
- * A real dark theme requires additional tokens with sufficient contrast,
- * not overrides of light-mode colors. Until then, both modes use the
- * same parchment/ivory base. */
 
 @theme inline {
   --color-background: var(--background);
@@ -61,6 +59,54 @@
   --color-success: var(--success);
   --font-sans: var(--font-inter);
   --font-mono: var(--font-ibm-plex-mono);
+  --font-display: var(--font-fraunces);
+}
+
+/* --- Dark glassmorphism recipe (message cards) --------------------------- */
+/*
+ * The chat-bg.png photo lives ONLY inside the scrollable message area of the
+ * workspace (chat-pane), as a fixed backdrop behind the transcript. The
+ * chrome around it — sidebar, top bar, sources panel — is plain solid dark
+ * (#0F1A15, no image, no blur), and the composer sits on the flat page
+ * solid. Individual messages are frosted glass cards over that image: a
+ * dark-green translucent fill (higher opacity than the login card, because
+ * this text must stay legible over a busy photo), strong blur, hairline
+ * border, 16px radius.
+ */
+
+/* One frosted message card (assistant answers; the recipe both message
+ * roles share). Backdrop-filter blurs the chat background showing through. */
+.glass-message {
+  background: rgba(20, 40, 30, 0.46);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+}
+
+/* The composer floats as a glass box over the same continuous backdrop the
+ * messages sit on — same fill family as the message cards, slightly lighter
+ * (0.4), with a soft shadow so it reads as lifted off the background. */
+.glass-composer {
+  background: rgba(20, 40, 30, 0.4);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+/* Focus is styled on the recipe, not a Tailwind utility: the recipe is
+ * unlayered CSS, so a layered utility could never override its border. */
+.glass-composer:focus-within {
+  border-color: rgba(245, 243, 236, 0.6);
+}
+
+/* Dark scrollbars so the default light OS thumb never sits inside the dark
+ * workspace. Decorative only — the app never depends on scrollbar visibility. */
+* {
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-width: thin;
 }
 
 /* Guard against any full-viewport layer (e.g. the login background) ever

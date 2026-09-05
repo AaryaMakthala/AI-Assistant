@@ -95,7 +95,7 @@ export function ConfirmDialog({
           disabled={isBusy}
           className={cn(
             "flex items-center gap-1.5 rounded-md bg-danger px-3 py-1.5 text-xs",
-            "font-medium text-white transition-opacity hover:opacity-90",
+            "font-semibold text-[#0c1410] transition-opacity hover:opacity-90",
             "focus-visible:ring-2 focus-visible:ring-danger focus-visible:outline-none",
             "disabled:cursor-not-allowed disabled:opacity-50",
           )}

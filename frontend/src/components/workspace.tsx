@@ -151,9 +151,9 @@ export function Workspace() {
       />
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border bg-surface px-4 py-2.5">
+        <header className="flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-2.5">
           <div className="flex min-w-0 items-baseline gap-2">
-            <h1 className="text-sm font-semibold">Knowledge Assistant</h1>
+            <h1 className="font-display text-[15px] font-semibold tracking-tight">Knowledge Assistant</h1>
             {me?.workspace_name && (
               <span className="truncate text-xs text-muted">{me.workspace_name}</span>
             )}

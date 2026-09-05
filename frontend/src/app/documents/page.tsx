@@ -376,7 +376,7 @@ function PendingDocumentRow({
           onClick={onApprove}
           disabled={isApproving || isRejecting}
           className={cn(
-            "flex items-center gap-1 rounded-md bg-success px-3 py-1.5 text-xs font-medium text-white",
+            "flex items-center gap-1 rounded-md bg-success px-3 py-1.5 text-xs font-semibold text-[#0c1410]",
             "transition-opacity hover:opacity-90",
             "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
             "disabled:cursor-not-allowed disabled:opacity-50",

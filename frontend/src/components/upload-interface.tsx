@@ -111,7 +111,7 @@ export function UploadInterface({
           <ArrowLeft className="size-3" aria-hidden />
           Back to chat
         </button>
-        <h2 className="text-sm font-semibold">Upload Documents</h2>
+        <h2 className="font-display text-sm font-semibold">Upload Documents</h2>
       </div>
 
       {/* File list */}

@@ -1,0 +1,70 @@
+demo button clicked: true
+authenticated workspace reached: true
+workspace state: {"sidebarTabs":["Chats","Documents"],"newChat":{"bg":"rgba(0, 0, 0, 0)","color":"rgb(255, 255, 255)","border":"rgba(255, 255, 255, 0.25)","radius":"3.35544e+07px"},"workspaceName":null,"docCount":0}
+textarea focused after click: true
+typed value in textarea: "hi"
+submitted
+poll 0 {"user":true,"card":true,"len":23,"streaming":false,"alert":""}
+round trip result: {"userMsg":true,"hasCard":true,"len":70,"cardText":"Hello! I'm your company knowledge assistant. How can I help you today?","streaming":false,"alert":"","emptyAgain":false}
+API traffic: [
+ {
+  "url": "/demo/enter",
+  "status": 200
+ },
+ {
+  "url": "/demo/enter",
+  "status": 200
+ },
+ {
+  "url": "/me",
+  "status": 200
+ },
+ {
+  "url": "/me",
+  "status": 200
+ },
+ {
+  "url": "/chat/sessions",
+  "status": 200
+ },
+ {
+  "url": "/documents",
+  "status": 200
+ },
+ {
+  "url": "/documents",
+  "status": 200
+ },
+ {
+  "url": "/chat/sessions",
+  "status": 200
+ },
+ {
+  "url": "/chat/sessions",
+  "status": 200
+ },
+ {
+  "url": "/documents",
+  "status": 200
+ },
+ {
+  "url": "/chat",
+  "status": 200
+ },
+ {
+  "url": "/chat",
+  "status": 200
+ },
+ {
+  "url": "/documents",
+  "status": 200
+ },
+ {
+  "url": "/chat/sessions",
+  "status": 200
+ },
+ {
+  "url": "/chat/sessions",
+  "status": 200
+ }
+]

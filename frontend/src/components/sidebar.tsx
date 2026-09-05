@@ -83,15 +83,17 @@ export function Sidebar({
       ] as const);
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-surface">
+    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-[#0F1A15]">
       <div className="p-3 space-y-2">
         <button
           type="button"
           onClick={onNewChat}
           className={cn(
-            "flex w-full items-center justify-center gap-1.5 rounded-lg bg-accent",
-            "px-3 py-2 text-sm font-medium text-accent-foreground transition-opacity",
-            "hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            "flex w-full items-center justify-center gap-1.5 rounded-full border",
+            "border-[rgba(255,255,255,0.25)] bg-transparent px-3 py-2 text-sm font-medium",
+            "text-white transition-colors hover:border-[rgba(255,255,255,0.4)]",
+            "hover:bg-[rgba(255,255,255,0.08)] focus-visible:ring-2 focus-visible:ring-accent",
+            "focus-visible:outline-none",
           )}
         >
           <Plus className="size-4" aria-hidden />
@@ -209,7 +211,9 @@ function SessionRow({
     <div
       className={cn(
         "group flex items-center gap-1 rounded-md pr-1 transition-colors",
-        isActive ? "bg-surface-raised" : "hover:bg-surface-raised",
+        isActive
+          ? "bg-[rgba(255,255,255,0.1)]"
+          : "hover:bg-[rgba(255,255,255,0.06)]",
       )}
     >
       <button

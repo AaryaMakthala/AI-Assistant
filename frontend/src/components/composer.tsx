@@ -42,11 +42,18 @@ export function Composer({
   };
 
   return (
-    <div className="border-t border-border bg-surface px-4 py-3">
+    /* The composer floats as a glass box over the SAME continuous chat
+     * backdrop the messages sit on (chat-pane draws one image layer behind
+     * this whole panel) — no solid bar, no seam. The wrapper is transparent
+     * and margins the box off the panel's bottom edge so it reads as
+     * floating. It is relative z-10: the content is static HTML and would
+     * otherwise paint beneath the panel's fixed backdrop/scrim layers (both
+     * positioned with positive z-index), which would swallow pointer
+     * events meant for the textarea and send button. */
+    <div className="relative z-10 px-4 pt-1 pb-6">
       <div
         className={cn(
-          "mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border border-border",
-          "bg-background p-2 transition-colors focus-within:border-accent",
+          "glass-composer mx-auto flex max-w-[780px] items-end gap-2 p-2",
         )}
       >
         <textarea
@@ -98,9 +105,9 @@ export function Composer({
             aria-label="Send message"
             className={cn(
               "flex size-8 shrink-0 items-center justify-center rounded-full",
-              "bg-accent text-accent-foreground transition-opacity",
-              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              "disabled:cursor-not-allowed disabled:opacity-40",
+              "bg-accent text-accent-foreground transition-[filter]",
+              "hover:brightness-110 focus-visible:ring-2 focus-visible:ring-accent",
+              "focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40",
             )}
           >
             <ArrowUp className="size-4" aria-hidden />
@@ -108,7 +115,7 @@ export function Composer({
         )}
       </div>
 
-      <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[0.6875rem] text-muted">
+      <p className="mx-auto mt-2 max-w-[780px] px-2 text-center text-[0.6875rem] text-muted">
         Answers are drawn from your organization&apos;s documents and data. Check
         cited sources for anything consequential.
       </p>

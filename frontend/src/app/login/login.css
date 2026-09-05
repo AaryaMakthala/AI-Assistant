@@ -8,7 +8,11 @@
  *   One full-bleed login-bg.png layer behind everything (z-index 0),
  *   object-fit: cover — fills the entire viewport edge-to-edge with zero
  *   letterboxing, seams, masks, or dissolve edges. The photo's own calm,
- *   dark left third is where the headline sits; cover's minor edge-crop
+ *   dark zone spans the left half (brightness analysis at the hero's
+ *   vertical band confirms the whole left 60–65% of the frame is smooth and
+ *   dark); the headline is pushed off the hard left edge into that zone by
+ *   --login-shift (see .login-page), so text sits toward center-left on
+ *   desktop instead of hugging the frame edge; cover's minor edge-crop
  *   (≈4% of width at desktop) never reaches that zone. The three real blob
  *   renders (public/blobs/*.png) float above it (z-index 1) as small,
  *   individually positioned <img> accents scattered above/below/beside the
@@ -32,6 +36,14 @@
   height: 100dvh;
   overflow: hidden;
   color: #ffffff;
+  /* Desktop two-column: how far the headline + form block sits off the left
+   * edge. 0 on smaller screens; grows with the viewport once there is room,
+   * so the text lands in the background's calm zone (which the brightness
+   * analysis shows spans the whole left half at the hero's vertical band)
+   * instead of hugging the frame edge. The blob layer reads the same value
+   * and shifts in lockstep, keeping each accent's position relative to the
+   * text unchanged. */
+  --login-shift: 0px;
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   /* Plain dark fallback, visible only for the instant before the background
    * image finishes loading. No gradient, no competing color — the single
@@ -116,25 +128,27 @@
  * 26px (76px nav + 16px top padding, content centered in the remainder). A
  * calc() anchor — not a top % — keeps the scatter glued to the headline at
  * any viewport height. Sizes are ~40% smaller than before; every blob
- * clears the text block entirely: gcircle (bright) floats above the
- * headline's upper-left, stone (bright) floats high to its right, green
+ * clears the text block entirely: the large gcircle slot (rendered with the
+ * muted stone.png asset so all three blobs share one matte family — the
+ * original gcircle.png was a bright saturated sphere that stood out) floats
+ * above the headline's upper-left, stone floats high to its right, green
  * (dark) sits below-right of the subtext. None of them overlap the glyphs. */
 @media (min-width: 1100px) {
   .login-blob-gcircle {
     width: 390px;
-    left: -100px;
+    left: calc(-100px + var(--login-shift));
     top: calc(50% - 344px);
   }
 
   .login-blob-stone {
     width: 175px;
-    left: 331px;
+    left: calc(331px + var(--login-shift));
     top: calc(50% - 321px);
   }
 
   .login-blob-green {
     width: 195px;
-    left: 322px;
+    left: calc(322px + var(--login-shift));
     top: calc(50% + 60px);
   }
 }
@@ -330,12 +344,28 @@
  * so the card reads as balanced center-right instead of hard against the
  * right edge. (The ≤1099px column layout centers the card on its own.) */
 @media (min-width: 1100px) {
+  .login-page {
+    --login-shift: clamp(0px, (100vw - 1120px) / 2, 200px);
+  }
+
   .login-main {
     gap: 0;
   }
 
+  /* Hero text block pushed off the left edge by --login-shift, so the
+   * headline + subtext sit in the background's calm/open zone rather than
+   * hard against the frame edge. The shift grows with the viewport but is
+   * still bounded so the text never drifts over the image's bright zone. */
+  .login-hero {
+    margin-left: var(--login-shift);
+  }
+
+  /* Card follows the hero: its left margin keeps the composition balanced as
+   * the hero shifts right (940px fixed widths + 120px of hero shift). A max()
+   * floor keeps the two-column row from going negative at the narrowest
+   * desktop widths. */
   .login-glass {
-    margin-left: calc((100% - 940px) / 2);
+    margin-left: max(0px, calc((100% - 1060px) / 2));
   }
 }
 
@@ -451,7 +481,7 @@
   gap: 8px;
   width: 100%;
   height: 44px;
-  border-radius: 999px;
+  border-radius: 8px;
   font-family: inherit;
   font-size: 15px;
   font-weight: 600;

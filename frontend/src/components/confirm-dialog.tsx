@@ -14,6 +14,7 @@
 
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { Button } from "./button";
 import { cn } from "@/lib/utils";
 
 export function ConfirmDialog({
@@ -77,32 +78,21 @@ export function ConfirmDialog({
       </div>
 
       <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           onClick={onCancel}
           disabled={isBusy}
-          className={cn(
-            "rounded-md px-3 py-1.5 text-xs font-medium text-muted transition-colors",
-            "hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent",
-            "focus-visible:outline-none disabled:opacity-50",
-          )}
         >
           Cancel
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="danger"
           onClick={onConfirm}
           disabled={isBusy}
-          className={cn(
-            "flex items-center gap-1.5 rounded-md bg-danger px-3 py-1.5 text-xs",
-            "font-semibold text-[#0c1410] transition-opacity hover:opacity-90",
-            "focus-visible:ring-2 focus-visible:ring-danger focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
         >
           {isBusy && <Loader2 className="size-3 animate-spin" aria-hidden />}
           {confirmLabel}
-        </button>
+        </Button>
       </div>
     </dialog>
   );

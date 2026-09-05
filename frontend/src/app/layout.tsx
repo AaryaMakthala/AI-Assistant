@@ -21,7 +21,7 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "Knowledge Assistant",
+  title: "Office Brain",
   description:
     "Ask questions across your organization's documents, business data and code.",
 };

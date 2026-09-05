@@ -48,6 +48,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, insert, select, update
@@ -406,6 +407,63 @@ async def get_document(principal: CurrentPrincipal, document_id: uuid.UUID) -> D
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
     return DocumentResponse.model_validate(row)
+
+
+def _safe_download_filename(filename: str) -> str:
+    """Sanitize a filename for a Content-Disposition header.
+
+    The stored name comes from the client upload and is never treated as a
+    filesystem path, but a header value with quotes/control chars could be a
+    header-injection vector. Per RFC 6266, nest the name inside quotes and
+    mangle anything that would leak out of them.
+    """
+    cleaned = "".join(ch for ch in filename if ch.isprintable() and ch not in '"')
+    return cleaned or "document"
+
+
+@router.get(
+    "/{document_id}/download",
+    summary="Download the raw file bytes of a document",
+)
+async def download_document(principal: CurrentPrincipal, document_id: uuid.UUID) -> Response:
+    """Return a workspace document's raw bytes for the caller to download.
+
+    Any active workspace member may download a document (the same authorization
+    model as the read endpoints — membership is resolved from the ``members``
+    table at request time, never from the token). Document resolution is
+    workspace-scoped and cross-workspace IDs 404 so they stay non-enumerable.
+
+    ``file_data`` is BYTEA read into memory (CLAUDE.md section 6) — fine under
+    the 10 MB upload cap. The response is a raw byte body with a
+    ``Content-Disposition: attachment`` header so the browser downloads rather
+    than navigates.
+    """
+    workspace_id = principal.workspace_id
+    await assert_workspace_role(workspace_id, principal)
+
+    async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as session:
+        row = (
+            await session.execute(
+                select(Document.file_data, Document.filename, Document.mime_type).where(
+                    Document.id == document_id,
+                    Document.workspace_id == workspace_id,
+                )
+            )
+        ).one_or_none()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found.")
+
+    file_data, filename, mime_type = row
+    safe_name = _safe_download_filename(filename)
+    return Response(
+        content=bytes(file_data) if file_data is not None else b"",
+        media_type=mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Content-Length": str(len(file_data or b"")),
+        },
+    )
 
 
 class ApproveDocumentRequest(BaseModel):

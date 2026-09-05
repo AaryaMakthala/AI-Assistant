@@ -14,6 +14,7 @@
 
 import { AlertCircle, CheckCircle2, FileText, Loader2, RotateCw, Trash2, Upload, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Button } from "./button";
 import { ConfirmDialog } from "./confirm-dialog";
 import { StatusBadge } from "./status-badge";
 import {
@@ -111,21 +112,15 @@ export function DocumentLibrary({
       </div>
 
       <div className="m-3 mt-0">
-        <button
-          type="button"
+        <Button
+          variant="secondary"
           disabled={disabled}
           onClick={onUpload}
-          className={cn(
-            "flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed p-4 text-center transition-colors",
-            "border-border bg-background text-xs text-muted",
-            "hover:border-accent hover:bg-accent-subtle hover:text-foreground",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
+          className="w-full justify-center py-4"
         >
           <Upload className="size-4" aria-hidden />
           Upload files
-        </button>
+        </Button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
@@ -234,16 +229,11 @@ function PendingRow({
         Uploaded {formatRelativeTime(row.created_at)}
       </p>
       <div className="mt-1.5 flex gap-1.5">
-        <button
-          type="button"
+        <Button
+          variant="primary"
           onClick={onApprove}
           disabled={isApproving || isRejecting}
-          className={cn(
-            "flex items-center gap-1 rounded-md bg-success px-2.5 py-1 text-[0.6875rem] font-semibold text-[#0c1410]",
-            "transition-opacity hover:opacity-90",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
+          className="bg-success"
         >
           {isApproving ? (
             <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -251,17 +241,11 @@ function PendingRow({
             <CheckCircle2 className="size-3" aria-hidden />
           )}
           Approve
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="secondary"
           onClick={onReject}
           disabled={isApproving || isRejecting}
-          className={cn(
-            "flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[0.6875rem] font-medium text-muted",
-            "transition-colors hover:text-foreground",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
         >
           {isRejecting ? (
             <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -269,7 +253,7 @@ function PendingRow({
             <X className="size-3" aria-hidden />
           )}
           Reject
-        </button>
+        </Button>
       </div>
     </div>
   );

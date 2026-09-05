@@ -205,6 +205,38 @@ export function getDocument(
 }
 
 /**
+ * Download a document's raw file bytes.
+ *
+ * The backend serves the bytes at GET /documents/{id}/download with a
+ * `Content-Disposition: attachment` header. Because the endpoint requires the
+ * Authorization header (it cannot be reached by a plain `<a href>`), we fetch
+ * the blob with the token and hand it to the browser as a download.
+ */
+export async function downloadDocument(
+  documentId: string,
+  filename: string,
+  options: RequestOptions = {},
+): Promise<void> {
+  const response = await fetch(
+    `${BASE_URL}/documents/${encodeURIComponent(documentId)}/download`,
+    {
+      headers: authHeaders(options),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) throw await failure(response);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Delete a document and everything derived from it.
  *
  * The backend removes the row, its chunks and vectors, its failure trail and the stored

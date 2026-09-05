@@ -166,7 +166,7 @@ function EmptyState({
       <div className="flex size-11 items-center justify-center rounded-xl bg-accent-subtle text-accent">
         <MessageSquareText className="size-5" aria-hidden />
       </div>
-      <h2 className="font-display mt-4 text-xl font-semibold tracking-tight">
+      <h2 className="font-display mt-4 text-xl tracking-tight">
         Ask about anything your organization knows
       </h2>
       <p className="mt-1.5 max-w-md text-sm text-muted">

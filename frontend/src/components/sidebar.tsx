@@ -10,6 +10,7 @@
 import { FolderOpen, MessageSquare, Plus, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
+import { Button } from "./button";
 import { DocumentLibrary } from "./document-library";
 import { MembersPanel } from "./members-panel";
 import type { ChatSession, DocumentSummary } from "@/lib/api";
@@ -41,6 +42,9 @@ export function Sidebar({
   onApproveDocument,
   onRejectDocument,
   onDeleteWorkspace,
+  documentsViewActive,
+  onSelectChats,
+  onSelectDocuments,
 }: {
   sessions: ChatSession[];
   activeSessionId?: string;
@@ -66,15 +70,32 @@ export function Sidebar({
   onApproveDocument: (id: string) => void;
   onRejectDocument: (id: string) => void;
   onDeleteWorkspace?: () => void;
+  /** Whether the main content area is currently showing the documents view.
+   *  Drives which of Chats/Documents renders as active, so the tab follows the
+   *  view instead of the other way around. */
+  documentsViewActive: boolean;
+  /** Show the chat conversation in the main area (and its tab as active). */
+  onSelectChats: () => void;
+  /** Show the document upload/grid interface in the main area (and its tab as active). */
+  onSelectDocuments: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("chats");
 
-  const activeTab: Tab = tab === "members" && !canManageOrg ? "chats" : tab;
+  // The Chats/Documents tabs are driven by which view the main area is actually
+  // showing (Workspace owns it): pick a chat session or New chat and the Chats
+  // tab lights up; open the docs view and the Documents tab lights up. Members
+  // stays a sidebar-only view (owners), independent of the main area.
+  const activeTab: Tab =
+    tab === "members" && canManageOrg
+      ? "members"
+      : documentsViewActive
+        ? "documents"
+        : "chats";
 
   const tabs: ReadonlyArray<readonly [Tab, string]> = canManageOrg
     ? ([
         ["chats", "Chats"],
-        ["documents", "Docs"],
+        ["documents", "Documents"],
         ["members", "Members"],
       ] as const)
     : ([
@@ -85,20 +106,15 @@ export function Sidebar({
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-border bg-[#0F1A15]">
       <div className="p-3 space-y-2">
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="md"
+          className="w-full"
           onClick={onNewChat}
-          className={cn(
-            "flex w-full items-center justify-center gap-1.5 rounded-full border",
-            "border-[rgba(255,255,255,0.25)] bg-transparent px-3 py-2 text-sm font-medium",
-            "text-white transition-colors hover:border-[rgba(255,255,255,0.4)]",
-            "hover:bg-[rgba(255,255,255,0.08)] focus-visible:ring-2 focus-visible:ring-accent",
-            "focus-visible:outline-none",
-          )}
         >
           <Plus className="size-4" aria-hidden />
           New chat
-        </button>
+        </Button>
       </div>
 
       <div
@@ -112,7 +128,11 @@ export function Sidebar({
             type="button"
             role="tab"
             aria-selected={activeTab === value}
-            onClick={() => setTab(value)}
+            onClick={() => {
+              setTab(value);
+              if (value === "chats") onSelectChats();
+              else if (value === "documents") onSelectDocuments();
+            }}
             className={cn(
               "flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
               "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",

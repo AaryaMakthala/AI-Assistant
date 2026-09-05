@@ -18,6 +18,7 @@ import { AlertCircle, ArrowLeft, CheckCircle2, FileText, Loader2, Plus, RotateCw
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import type { DocumentSummary } from "@/lib/api";
@@ -123,23 +124,17 @@ export default function DocumentsPage() {
               : `${library.documents.length} document${library.documents.length === 1 ? "" : "s"} in your workspace.`}
           </p>
         </div>
-        <button
-          type="button"
+        <Button
+          variant="secondary"
           onClick={() => void library.refresh()}
           disabled={library.isLoading}
-          className={cn(
-            "flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5",
-            "py-1.5 text-xs text-muted transition-colors hover:text-foreground",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:opacity-50",
-          )}
         >
           <RotateCw
             className={cn("size-3", library.isLoading && "animate-spin")}
             aria-hidden
           />
           Refresh
-        </button>
+        </Button>
       </header>
 
       {library.error && (
@@ -219,20 +214,14 @@ export default function DocumentsPage() {
         )}
 
         <div className="mt-3 flex items-center gap-2">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
             disabled={!isAuthenticated}
             onClick={() => inputRef.current?.click()}
-            className={cn(
-              "flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted",
-              "transition-colors hover:text-foreground",
-              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-              "disabled:cursor-not-allowed disabled:opacity-50",
-            )}
           >
             <Plus className="size-3.5" aria-hidden />
             Add File
-          </button>
+          </Button>
           <input
             ref={inputRef}
             type="file"
@@ -246,20 +235,14 @@ export default function DocumentsPage() {
           />
           <div className="flex-1" />
           {pendingFiles.length > 0 && (
-            <button
-              type="button"
+            <Button
+              variant="primary"
               onClick={handleUploadPending}
               disabled={!canUploadPending}
-              className={cn(
-                "flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-foreground",
-                "transition-opacity hover:opacity-90",
-                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-                "disabled:cursor-not-allowed disabled:opacity-50",
-              )}
             >
               <Upload className="size-3.5" aria-hidden />
               Upload ({pendingFiles.length})
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -371,16 +354,11 @@ function PendingDocumentRow({
         </p>
       </div>
       <div className="flex shrink-0 gap-1.5">
-        <button
-          type="button"
+        <Button
+          variant="primary"
           onClick={onApprove}
           disabled={isApproving || isRejecting}
-          className={cn(
-            "flex items-center gap-1 rounded-md bg-success px-3 py-1.5 text-xs font-semibold text-[#0c1410]",
-            "transition-opacity hover:opacity-90",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
+          className="bg-success"
         >
           {isApproving ? (
             <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -388,17 +366,11 @@ function PendingDocumentRow({
             <CheckCircle2 className="size-3" aria-hidden />
           )}
           Approve
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="secondary"
           onClick={onReject}
           disabled={isApproving || isRejecting}
-          className={cn(
-            "flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted",
-            "transition-colors hover:text-foreground",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-50",
-          )}
         >
           {isRejecting ? (
             <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -406,7 +378,7 @@ function PendingDocumentRow({
             <X className="size-3" aria-hidden />
           )}
           Reject
-        </button>
+        </Button>
       </div>
     </div>
   );

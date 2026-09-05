@@ -15,6 +15,7 @@
 
 import { AlertCircle, Check, Loader2, Send, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { Button } from "./button";
 import {
   ApiError,
   createInvitation,
@@ -258,15 +259,10 @@ export function MembersPanel({
                   "focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none",
                 )}
               />
-              <button
+              <Button
                 type="submit"
+                variant="primary"
                 disabled={isInviting || !inviteEmail.trim()}
-                className={cn(
-                  "flex shrink-0 items-center gap-1 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-accent-foreground",
-                  "transition-opacity hover:opacity-90",
-                  "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-                  "disabled:cursor-not-allowed disabled:opacity-50",
-                )}
               >
                 {isInviting ? (
                   <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -274,7 +270,7 @@ export function MembersPanel({
                   <Send className="size-3" aria-hidden />
                 )}
                 Invite
-              </button>
+              </Button>
             </div>
             {inviteSuccess && (
               <p className="mt-1.5 flex items-center gap-1 text-[0.6875rem] text-success">
@@ -328,15 +324,10 @@ export function MembersPanel({
                 <p className="text-xs text-danger">{deleteError}</p>
               )}
               <div className="flex gap-2">
-                <button
-                  type="button"
+                <Button
+                  variant="danger"
                   onClick={() => void handleDeleteOrganization()}
                   disabled={isDeleting}
-                  className={cn(
-                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold",
-                    "bg-danger text-[#0c1410] transition-opacity hover:opacity-90",
-                    "disabled:cursor-not-allowed disabled:opacity-50",
-                  )}
                 >
                   {isDeleting ? (
                     <Loader2 className="size-3 animate-spin" aria-hidden />
@@ -344,18 +335,17 @@ export function MembersPanel({
                     <Trash2 className="size-3" aria-hidden />
                   )}
                   Delete organization
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="ghost"
                   onClick={() => {
                     setShowDeleteConfirm(false);
                     setDeleteError(undefined);
                   }}
                   disabled={isDeleting}
-                  className="rounded-md px-3 py-1.5 text-xs text-muted hover:text-foreground"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </div>
           ) : (

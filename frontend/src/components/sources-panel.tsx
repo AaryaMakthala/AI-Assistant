@@ -34,7 +34,7 @@ export function SourcesPanel({
     <aside className="flex h-full w-80 shrink-0 flex-col border-l border-border bg-[#0F1A15]">
       <header className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="min-w-0">
-          <h2 className="font-display text-sm font-semibold">Sources</h2>
+          <h2 className="font-display text-sm">Sources</h2>
           <p className="mt-0.5 text-xs text-muted">
             {sources.length === 0
               ? "Nothing was consulted"

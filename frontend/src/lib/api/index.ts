@@ -7,6 +7,7 @@ export {
   deleteDocument,
   deleteSession,
   deleteWorkspace,
+  downloadDocument,
   enterDemo,
   getDocument,
   getMe,

@@ -10,6 +10,7 @@
 
 import { Building2, LogOut, PanelRightOpen, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/button";
 import { ChatPane } from "@/components/chat-pane";
 import { Sidebar } from "@/components/sidebar";
 import { SourcesPanel } from "@/components/sources-panel";
@@ -19,7 +20,6 @@ import { listWorkspaces, isWorkspaceNotFound } from "@/lib/api";
 import { useChat } from "@/lib/hooks/use-chat";
 import { useDocuments } from "@/lib/hooks/use-documents";
 import { useSessions } from "@/lib/hooks/use-sessions";
-import { cn } from "@/lib/utils";
 
 /** Roles allowed to see org administration. Mirrors the backend role model. */
 const ADMIN_ROLES = ["OWNER", "owner"];
@@ -138,6 +138,9 @@ export function Workspace() {
         }}
         onOpenUpload={() => setShowUpload(true)}
         onDismissUpload={documents.dismissUpload}
+        documentsViewActive={showUpload}
+        onSelectChats={() => setShowUpload(false)}
+        onSelectDocuments={() => setShowUpload(true)}
         onDeleteDocument={(id) => void documents.remove(id)}
         onReprocessDocument={(id) => void documents.reprocess(id)}
         onApproveDocument={(id) => void documents.approve(id)}
@@ -153,43 +156,32 @@ export function Workspace() {
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-2.5">
           <div className="flex min-w-0 items-baseline gap-2">
-            <h1 className="font-display text-[15px] font-semibold tracking-tight">Knowledge Assistant</h1>
+            <h1 className="font-sans text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">OFFICE BRAIN</h1>
             {me?.workspace_name && (
               <span className="truncate text-xs text-muted">{me.workspace_name}</span>
             )}
           </div>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
+            <Button
+              variant={isPanelOpen ? "ghost" : "secondary"}
               onClick={() => setIsPanelOpen((open) => !open)}
               aria-pressed={isPanelOpen}
-              className={cn(
-                "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors",
-                "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-                isPanelOpen
-                  ? "bg-accent-subtle text-accent"
-                  : "text-muted hover:text-foreground",
-              )}
+              className={isPanelOpen ? "text-accent" : undefined}
             >
               <PanelRightOpen className="size-3.5" aria-hidden />
               Sources
               {activeTurn?.sources.length ? ` (${activeTurn.sources.length})` : ""}
-            </button>
+            </Button>
 
             {isAuthenticated && (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
                 onClick={() => void signOut()}
                 title={me?.email ?? undefined}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted",
-                  "transition-colors hover:text-foreground",
-                  "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
-                )}
               >
                 <LogOut className="size-3.5" aria-hidden />
                 Sign out
-              </button>
+              </Button>
             )}
           </div>
         </header>
@@ -209,8 +201,11 @@ export function Workspace() {
             onUpload={(file, description) => void documents.upload(file, description)}
             onDismissUpload={documents.dismissUpload}
             uploads={documents.uploads}
+            documents={documents.documents}
             onBack={() => setShowUpload(false)}
             disabled={!isAuthenticated}
+            token={token}
+            workspaceId={workspaceId}
           />
         )}
 
@@ -331,14 +326,14 @@ function NoWorkspacesNotice({
             disabled={isCreating}
             className="flex-1 rounded-md border border-border bg-surface-raised px-3 py-2 text-sm text-foreground placeholder:text-muted/60 focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none disabled:opacity-60"
           />
-          <button
-            type="button"
+          <Button
+            variant="primary"
+            size="md"
             onClick={() => void handleCreate()}
             disabled={isCreating || !name.trim()}
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
           >
             {isCreating ? "Creating..." : "Create"}
-          </button>
+          </Button>
         </div>
         {error && <p className="text-xs text-danger">{error}</p>}
       </div>

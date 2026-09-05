@@ -589,7 +589,7 @@ function LoginShell({
         {/* unoptimized so the DOM <img> srcs are the literal /blobs/*.png
          * paths (decorative PNGs, already lean — no re-encode needed). */}
         <Image
-          src="/blobs/gcircle.png"
+          src="/blobs/stone.png"
           alt=""
           width={677}
           height={369}
@@ -636,8 +636,8 @@ function LoginShell({
       </header>
 
       {/* Two-column area: headline + subhead sit directly on the background's
-       * calm left zone; the wide, compact glass card holds the form at
-       * center-right. */}
+       * calm zone, pushed off the hard left edge into center-left; the wide,
+       * compact glass card holds the form at center-right. */}
       <main className="login-main">
         {(title || subtitle) && (
           <div className="login-hero">

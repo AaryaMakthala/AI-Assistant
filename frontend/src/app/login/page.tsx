@@ -19,10 +19,28 @@ import {
   listWorkspaces,
 } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { BrandWordmark } from "@/components/brand-wordmark";
 import { cn } from "@/lib/utils";
 import "./login.css";
 
 type Mode = "signin" | "signup";
+
+/**
+ * Decorative blob renders, individually positioned by their `login-blob-*`
+ * classes in login.css. One entry today — to bring more blobs back, add
+ * entries here (src, intrinsic width/height, a `login-blob-*` position class)
+ * and a matching position class in login.css; the mapping below renders them
+ * in order, layered above the background photo and below the nav/glass card.
+ */
+const BLOBS = [
+  {
+    id: "gcircle",
+    src: "/blobs/stone.png",
+    width: 677,
+    height: 369,
+    className: "login-blob login-blob-gcircle",
+  },
+] as const;
 
 /** Kept in step with the reset-password form so one flow cannot accept what the other rejects. */
 const MIN_PASSWORD_LENGTH = 8;
@@ -581,48 +599,34 @@ function LoginShell({
         className="login-bg"
       />
 
-      {/* The three real blob renders, individually positioned and layered on
-       * top of the background (z-index 1) — still behind the nav and glass
-       * card (z-index 2), which blur whatever blob edge sits close enough to
-       * the panel boundary. */}
+      {/* The blob render(s) from public/blobs/, individually positioned and
+       * layered on top of the background (z-index 1) — still behind the nav
+       * and glass card (z-index 2), which blur whatever blob edge sits close
+       * enough to the panel boundary. */}
       <div className="login-blobs" aria-hidden="true">
         {/* unoptimized so the DOM <img> srcs are the literal /blobs/*.png
          * paths (decorative PNGs, already lean — no re-encode needed). */}
-        <Image
-          src="/blobs/stone.png"
-          alt=""
-          width={677}
-          height={369}
-          unoptimized
-          priority
-          className="login-blob login-blob-gcircle"
-        />
-        <Image
-          src="/blobs/green.png"
-          alt=""
-          width={500}
-          height={500}
-          unoptimized
-          className="login-blob login-blob-green"
-        />
-        <Image
-          src="/blobs/stone.png"
-          alt=""
-          width={677}
-          height={369}
-          unoptimized
-          className="login-blob login-blob-stone"
-        />
+        {BLOBS.map((blob) => (
+          <Image
+            key={blob.id}
+            src={blob.src}
+            alt=""
+            width={blob.width}
+            height={blob.height}
+            unoptimized
+            priority
+            className={blob.className}
+          />
+        ))}
       </div>
 
       {/* Nav floats on the raw background, above the centered glass card. */}
       <header className="login-nav">
-        <div className="login-brand">
-          <span className="login-brand-mark">
-            <Building2 className="size-5" aria-hidden="true" />
-          </span>
-          <span>Office Brain</span>
-        </div>
+        <BrandWordmark
+          withMark
+          markClassName="size-[34px] rounded-[10px]"
+          className="login-brand"
+        />
         {onDemo && (
           <button
             type="button"

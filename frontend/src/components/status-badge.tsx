@@ -17,11 +17,14 @@ import type { DocumentStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const STYLES: Record<DocumentStatus, string> = {
-  PENDING: "bg-surface-raised text-muted",
-  READY: "bg-accent-subtle text-accent",
+  PENDING: "bg-warning-subtle text-warning",
+  READY: "bg-success-subtle text-success",
   REJECTED: "bg-danger-subtle text-danger",
   FAILED: "bg-danger-subtle text-danger",
 };
+
+/** Hairline border, tinted with the badge's own text color. */
+const BORDER = "border border-current/20";
 
 const LABELS: Record<DocumentStatus, string> = {
   PENDING: "Queued",
@@ -53,8 +56,9 @@ export function StatusBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5",
-        "text-[0.6875rem] font-medium",
+        "inline-flex items-center gap-1 rounded-full px-2 py-0.5",
+        "text-[0.6875rem] font-medium leading-4 whitespace-nowrap",
+        BORDER,
         isEmpty ? "bg-warning-subtle text-warning" : STYLES[status],
         className,
       )}

@@ -40,6 +40,7 @@
   --warning: var(--clay);
   --warning-subtle: rgba(217, 160, 107, 0.12);
   --success: #9cc5a8;
+  --success-subtle: rgba(156, 197, 168, 0.12);
 }
 
 @theme inline {
@@ -57,6 +58,7 @@
   --color-warning: var(--warning);
   --color-warning-subtle: var(--warning-subtle);
   --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
   --font-sans: var(--font-inter);
   --font-mono: var(--font-ibm-plex-mono);
   --font-display: var(--font-fraunces);

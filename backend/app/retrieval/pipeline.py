@@ -121,6 +121,8 @@ async def retrieve(
     workspace_id: uuid.UUID,
     query_shape: QueryShape | None = None,
     doc_target_result: DocumentTargetingResult | None = None,
+    search_query: str | None = None,
+    qu_confidence: float | None = None,
 ) -> RetrievalResult:
     """Retrieve the best evidence for `query` inside one workspace.
 
@@ -137,17 +139,34 @@ async def retrieve(
 
     Phase B-2: ``doc_target_result`` enables filename-aware candidate generation
     and high-confidence document-target grounding relaxation.
+
+    Parameters
+    ----------
+    search_query:
+        Retrieval-optimized query from the Query Understanding stage.
+        When provided, this is used for embedding and reranking instead of
+        the raw user text — fixing typo-related retrieval failures.
+    qu_confidence:
+        Confidence from the Query Understanding stage (0.0–1.0).
+        Passed to the grounding functions as a secondary signal: when
+        >= 0.85 and the reranker score is plausible, grounding is allowed
+        even if the primary score is marginal.
     """
     text = query.strip()
     if not text:
         return RetrievalResult(chunks=[], grounded=False, top_score=None)
+
+    # Determine what to use for retrieval vs. what to keep as the original.
+    # search_query (from Query Understanding) is the typo-corrected,
+    # retrieval-optimized version.  Fall back to the raw text if not provided.
+    retrieval_text = search_query.strip() if search_query else text
 
     # Normalize for retrieval: fix garbled text (elongated chars, extra
     # punctuation, etc.) before embedding and keyword search so similarity
     # scores are not penalized by typos.  The original text is kept for the
     # relevance gate (which handles its own normalization internally).
     from app.retrieval.intent import normalize_for_classification
-    normalized_text = normalize_for_classification(text)
+    normalized_text = normalize_for_classification(retrieval_text)
 
     settings = get_settings()
     # Phase B: OVERVIEW queries need broader retrieval.
@@ -348,6 +367,7 @@ async def retrieve(
 
     # --- Grounding check ---
     # Use query-shape-aware grounding with doc-target relaxation.
+
     all_scores = [score for _, score in scored[:final_count]]
     if is_overview and len(all_scores) >= 2:
         # Overview: absolute-threshold aggregate grounding.
@@ -356,6 +376,7 @@ async def retrieve(
             doc_target_high_confidence=is_high_confidence_target,
             has_target_chunk=has_target_chunk,
             has_filename_match_chunk=has_filename_match_chunk,
+            query_understanding_confidence=qu_confidence,
         )
         # Diagnostic logging for overview queries.
         all_median = statistics.median(all_scores)
@@ -379,6 +400,7 @@ async def retrieve(
             doc_target_high_confidence=is_high_confidence_target,
             has_target_chunk=has_target_chunk,
             has_filename_match_chunk=has_filename_match_chunk,
+            query_understanding_confidence=qu_confidence,
         )
 
     # Collect document metadata for logging.

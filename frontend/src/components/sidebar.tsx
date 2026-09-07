@@ -63,9 +63,14 @@ export function Sidebar({
   onNewChat: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  /** Opens the file picker in place — passed straight to the library rail's
+   *  Upload files button, which only renders while the documents view is
+   *  already active (so "switch to the documents view" was always a no-op). */
   onOpenUpload: () => void;
   onDismissUpload: (id: string) => void;
-  onDeleteDocument: (id: string) => void;
+  /** Resolves to a user-facing failure message (null on success) so the rail
+   *  can toast delete failures where the click happened. */
+  onDeleteDocument: (id: string) => Promise<string | null> | string | null;
   onReprocessDocument: (id: string) => void;
   onApproveDocument: (id: string) => void;
   onRejectDocument: (id: string) => void;

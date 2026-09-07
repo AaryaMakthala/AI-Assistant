@@ -51,9 +51,11 @@ class Completion:
 class LLMError(RuntimeError):
     """A provider call failed.
 
-    `retryable` distinguishes a transient fault (timeout, rate limit, 5xx) from a
-    permanent one (bad key, malformed request). Only the former justifies failing over —
-    retrying a malformed request against a second provider just fails twice as slowly.
+    `retryable` distinguishes a provider-level fault (timeout, rate limit, 5xx,
+    auth/permission errors such as 401/403) from a fault in our own request
+    (HTTP 400 malformed payload). Only the former justifies failing over to the
+    next provider in the chain — a malformed request would be rejected by every
+    provider, so retrying it just fails twice as slowly.
     """
 
     def __init__(self, message: str, *, provider: str, retryable: bool = True) -> None:
@@ -73,8 +75,21 @@ class LLMProvider(Protocol):
     name: str
     model: str
 
-    def stream(self, messages: list[Message], *, completion: Completion) -> AsyncIterator[str]:
-        """Yield response text incrementally, recording usage into `completion`."""
+    def stream(
+        self,
+        messages: list[Message],
+        *,
+        completion: Completion,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield response text incrementally, recording usage into `completion`.
+
+        Parameters
+        ----------
+        max_tokens:
+            Override the default max output tokens for this call.  When None,
+            the provider's configured default is used.
+        """
         ...
 
 
@@ -87,7 +102,13 @@ class LLMRouterProtocol(Protocol):
     stub without touching the network.
     """
 
-    def stream(self, messages: list[Message], *, completion: Completion) -> AsyncIterator[str]: ...
+    def stream(
+        self,
+        messages: list[Message],
+        *,
+        completion: Completion,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]: ...
 
 
 __all__ = [

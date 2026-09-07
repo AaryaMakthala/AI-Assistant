@@ -11,6 +11,7 @@
 import { Building2, LogOut, PanelRightOpen, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/button";
+import { BrandWordmark } from "@/components/brand-wordmark";
 import { ChatPane } from "@/components/chat-pane";
 import { Sidebar } from "@/components/sidebar";
 import { SourcesPanel } from "@/components/sources-panel";
@@ -20,6 +21,7 @@ import { listWorkspaces, isWorkspaceNotFound } from "@/lib/api";
 import { useChat } from "@/lib/hooks/use-chat";
 import { useDocuments } from "@/lib/hooks/use-documents";
 import { useSessions } from "@/lib/hooks/use-sessions";
+import { cn } from "@/lib/utils";
 
 /** Roles allowed to see org administration. Mirrors the backend role model. */
 const ADMIN_ROLES = ["OWNER", "owner"];
@@ -49,6 +51,22 @@ export function Workspace() {
   // Upload view toggle: when true, the main area shows the upload interface
   // instead of the chat pane.
   const [showUpload, setShowUpload] = useState(false);
+
+  // The sidebar's "Upload files" button opens the file picker that lives inside
+  // UploadInterface's grid (the same input the "+ Add file" tile uses), so the
+  // staging flow — descriptions, validation, upload — is reused verbatim rather
+  // than duplicated in the rail. UploadInterface therefore stays mounted even
+  // while the chat pane is showing (hidden via CSS, not unmounted): the picker
+  // registration must exist BEFORE the first click on the sidebar button, or
+  // that first click would be a silent no-op. It registers its picker on mount
+  // and unregisters on unmount.
+  const filePickerRef = useRef<(() => void) | null>(null);
+  const registerFilePicker = useCallback((open: () => void) => {
+    filePickerRef.current = open;
+    return () => {
+      filePickerRef.current = null;
+    };
+  }, []);
 
   // --- Stale-workspace recovery ---
   // When the active workspace is deleted (or the user's membership removed),
@@ -136,12 +154,20 @@ export function Workspace() {
           if (id === chat.sessionId) chat.reset();
           void sessions.remove(id);
         }}
-        onOpenUpload={() => setShowUpload(true)}
+        onOpenUpload={() => {
+          // The picker registration exists as soon as UploadInterface has
+          // mounted (it stays mounted, hidden while the chat is showing), so
+          // this opens the picker on the very first click. Showing the
+          // documents view alongside is harmless and keeps the tab state
+          // consistent with what the grid is about to do.
+          setShowUpload(true);
+          filePickerRef.current?.();
+        }}
         onDismissUpload={documents.dismissUpload}
         documentsViewActive={showUpload}
         onSelectChats={() => setShowUpload(false)}
         onSelectDocuments={() => setShowUpload(true)}
-        onDeleteDocument={(id) => void documents.remove(id)}
+        onDeleteDocument={(id) => documents.remove(id)}
         onReprocessDocument={(id) => void documents.reprocess(id)}
         onApproveDocument={(id) => void documents.approve(id)}
         onRejectDocument={(id) => void documents.reject(id)}
@@ -156,7 +182,7 @@ export function Workspace() {
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-2.5">
           <div className="flex min-w-0 items-baseline gap-2">
-            <h1 className="font-sans text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80">OFFICE BRAIN</h1>
+            <BrandWordmark />
             {me?.workspace_name && (
               <span className="truncate text-xs text-muted">{me.workspace_name}</span>
             )}
@@ -196,17 +222,22 @@ export function Workspace() {
           setIsPanelOpen(false);
         }} token={token} />}
 
-        {!hasNoWorkspaces && showUpload && (
-          <UploadInterface
-            onUpload={(file, description) => void documents.upload(file, description)}
-            onDismissUpload={documents.dismissUpload}
-            uploads={documents.uploads}
-            documents={documents.documents}
-            onBack={() => setShowUpload(false)}
-            disabled={!isAuthenticated}
-            token={token}
-            workspaceId={workspaceId}
-          />
+        {!hasNoWorkspaces && (
+          <div className={cn("min-h-0 min-w-0 flex-1 flex-col", showUpload ? "flex" : "hidden")}>
+            <UploadInterface
+              onUpload={(file, description) => void documents.upload(file, description)}
+              onDismissUpload={documents.dismissUpload}
+              uploads={documents.uploads}
+              documents={documents.documents}
+              onBack={() => setShowUpload(false)}
+              disabled={!isAuthenticated}
+              token={token}
+              workspaceId={workspaceId}
+              onDeleteDocument={(id) => documents.remove(id)}
+              deletingDocumentIds={documents.deletingIds}
+              onRegisterFilePicker={registerFilePicker}
+            />
+          </div>
         )}
 
         {!hasNoWorkspaces && !showUpload && (

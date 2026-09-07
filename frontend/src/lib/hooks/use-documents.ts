@@ -207,23 +207,30 @@ export function useDocuments(token?: string, workspaceId?: string) {
 
   /**
    * Delete a document and everything derived from it.
+   *
+   * Returns a user-facing failure message, or null on success — callers show it
+   * where the delete was triggered from (a toast in the grids, inline in the
+   * detail modal). Delete failures deliberately do NOT go through the shared
+   * `error` channel: that renders as a banner inside the chat transcript, far
+   * from the row/modal the user clicked, so a failed delete read as a dead
+   * button with the explanation sitting somewhere unrelated.
    */
   const remove = useCallback(
-    async (documentId: string) => {
-      if (!token) return;
+    async (documentId: string): Promise<string | null> => {
+      if (!token) return null;
       setDeletingIds((current) => new Set(current).add(documentId));
+      let failure: string | null = null;
       try {
         await deleteDocument(documentId, { token, workspaceId });
       } catch (caught) {
+        // A 404 means it is already gone — treat that as success.
         if (!(caught instanceof ApiError && caught.status === 404)) {
-          if (mountedRef.current) {
-            setError(
-              caught instanceof ApiError
+          failure =
+            caught instanceof ApiError && caught.status === 403
+              ? "You can't delete this document — only the uploader or a workspace owner can remove it."
+              : caught instanceof ApiError
                 ? caught.message
-                : "The document could not be deleted.",
-            );
-          }
-          return;
+                : "The document could not be deleted.";
         }
       } finally {
         if (mountedRef.current) {
@@ -235,12 +242,13 @@ export function useDocuments(token?: string, workspaceId?: string) {
         }
       }
 
-      if (!mountedRef.current) return;
+      if (failure) return failure;
+      if (!mountedRef.current) return null;
       setDocuments((current) => current.filter((row) => row.id !== documentId));
       setUploads((current) =>
         current.filter((item) => item.documentId !== documentId),
       );
-      setError(undefined);
+      return null;
     },
     [token, workspaceId],
   );

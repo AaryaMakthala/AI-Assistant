@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import Document
+from app.llm.utils import strip_think_tags
 
 
 # ---------------------------------------------------------------------------
@@ -237,24 +238,9 @@ async def _llm_relevance_check(
 
         # Import the LLM provider from the same dependency the chat endpoint uses.
         from app.llm.base import Completion, Message
-        from app.config import get_settings
+        from app.api.dependencies import get_llm_provider
 
-        settings = get_settings()
-        chain_count = sum(
-            1
-            for key in (
-                settings.gemini_api_key,
-                settings.groq_api_key,
-                settings.openrouter_api_key,
-            )
-            if key is not None
-        )
-        if chain_count > 1:
-            from app.llm.fallback import FallbackChainProvider
-            provider = FallbackChainProvider()
-        else:
-            from app.llm.generic import GenericProvider
-            provider = GenericProvider()
+        provider = get_llm_provider()
         messages = [Message(role="user", content=classification_prompt)]
         completion = Completion()
 
@@ -263,7 +249,9 @@ async def _llm_relevance_check(
             pass
 
         # Parse the structured output.
-        response_text = completion.text.strip()
+        # Strip thinking tags first — models like Qwen3-Thinking emit reasoning
+        # in <think> blocks that would break JSON parsing.
+        response_text = strip_think_tags(completion.text)
         return _parse_relevance_response(response_text)
 
     except Exception as exc:

@@ -17,7 +17,7 @@
  * with the rest of the app — this is purely a presentation change.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -45,10 +45,11 @@ import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 
-/** Shared glass-dark card shell for the grid. */
+/** Shared glass-dark card shell for the grid — identical radius/border/blur on every tile. */
 const CARD_BASE = cn(
   "rounded-xl border border-[rgba(255,255,255,0.08)]",
   "bg-[rgba(20,40,30,0.2)] backdrop-blur-md",
+  "transition-colors duration-200",
 );
 
 /** One file with its description, tracked in the upload list. */
@@ -70,6 +71,19 @@ interface UploadInterfaceProps {
   disabled?: boolean;
   token?: string;
   workspaceId?: string;
+  /** Delete a document. Resolves to a user-facing failure message (null on
+   * success) — the detail modal surfaces failures inline where the click
+   * happened rather than in a page banner. */
+  onDeleteDocument?: (id: string) => Promise<string | null> | string | null;
+  /** Documents with a delete in flight, for the modal's busy state. */
+  deletingDocumentIds?: ReadonlySet<string>;
+  /**
+   * Register the grid's file-picker opener so the sidebar's "Upload files"
+   * button can trigger this exact input. Receives the opener, returns an
+   * unregister function (called on unmount). With the interface now kept
+   * mounted while hidden, the registration exists before the first click.
+   */
+  onRegisterFilePicker?: (open: () => void) => () => void;
 }
 
 export function UploadInterface({
@@ -81,10 +95,20 @@ export function UploadInterface({
   disabled,
   token,
   workspaceId,
+  onDeleteDocument,
+  deletingDocumentIds,
+  onRegisterFilePicker,
 }: UploadInterfaceProps) {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [detailDoc, setDetailDoc] = useState<DocumentSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // The sidebar's "Upload files" button triggers this exact input (same staging
+  // flow as the "+ Add file" tile — one picker, one list of staged cards). The
+  // effect re-runs if the opener's identity ever changes.
+  useEffect(() => {
+    return onRegisterFilePicker?.(() => inputRef.current?.click());
+  }, [onRegisterFilePicker]);
 
   const addFiles = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -132,6 +156,22 @@ export function UploadInterface({
 
   const activeUploads = uploads.filter(
     (u) => u.phase !== "ready" || !u.documentId,
+  );
+
+  /** Modal delete path: surface the failure inline in the modal (the hook
+   * resolves to a message instead of feeding the shared banner channel), and
+   * close the modal on success — the row is gone, so the dialog must not keep
+   * showing it. */
+  const handleModalDelete = useCallback(
+    async (id: string): Promise<string | null> => {
+      if (!onDeleteDocument) return null;
+      const failure = await onDeleteDocument(id);
+      if (!failure) {
+        setDetailDoc((current) => (current?.id === id ? null : current));
+      }
+      return failure;
+    },
+    [onDeleteDocument],
   );
 
   const stagedCount = items.length;
@@ -215,7 +255,9 @@ export function UploadInterface({
 
         {isEmpty && <p className="mb-3 text-xs text-muted">Add files to your workspace</p>}
 
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+        {/* auto-rows-fr makes every row exactly as tall as its tallest card, so
+         * cards in one row share a height instead of leaving ragged gaps. */}
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4 auto-rows-fr">
           {/* "+ Add file" tile — always first, never replaced */}
           <AddFileCard
             onClick={() => inputRef.current?.click()}
@@ -271,6 +313,8 @@ export function UploadInterface({
         token={token}
         workspaceId={workspaceId}
         onClose={() => setDetailDoc(null)}
+        onDelete={handleModalDelete}
+        isDeleting={detailDoc ? deletingDocumentIds?.has(detailDoc.id) : false}
       />
     </div>
   );
@@ -291,9 +335,9 @@ function AddFileCard({
       disabled={disabled}
       aria-label="Add file"
       className={cn(
-        "group flex min-h-[220px] flex-col items-center justify-center gap-2.5",
+        "group flex min-h-[200px] flex-col items-center justify-center gap-2.5 p-3",
         "rounded-xl border border-dashed border-[rgba(255,255,255,0.15)]",
-        "bg-[rgba(255,255,255,0.04)] backdrop-blur-md transition-colors",
+        "bg-[rgba(255,255,255,0.04)] backdrop-blur-md transition-colors duration-200",
         "hover:border-[rgba(245,243,236,0.45)] hover:bg-[rgba(255,255,255,0.08)]",
         "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-50",
@@ -301,7 +345,7 @@ function AddFileCard({
     >
       <span
         className={cn(
-          "flex size-11 items-center justify-center rounded-full bg-surface-raised",
+          "flex size-10 items-center justify-center rounded-lg bg-surface-raised",
           "text-muted transition-colors group-hover:bg-accent-subtle group-hover:text-accent",
         )}
       >
@@ -309,7 +353,7 @@ function AddFileCard({
       </span>
       <span
         className={cn(
-          "text-xs font-medium text-muted transition-colors group-hover:text-foreground",
+          "text-sm font-semibold text-foreground transition-colors group-hover:text-foreground",
         )}
       >
         Add file
@@ -334,16 +378,16 @@ function StagedFileCard({
   const missing = item.description.trim().length === 0;
 
   return (
-    <div className={cn(CARD_BASE, "flex flex-col p-3")}>
+    <div className={cn(CARD_BASE, "flex min-h-[200px] flex-col p-4")}>
       <div className="flex items-start gap-2.5">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-surface-raised">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-surface-raised">
           <FileTypeIcon name={item.file.name} className="size-5 text-muted" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-medium" title={item.file.name}>
+          <p className="truncate text-sm font-semibold" title={item.file.name}>
             {item.file.name}
           </p>
-          <p className="mt-0.5 text-[0.6875rem] text-muted">
+          <p className="mt-1 text-xs text-muted">
             {formatBytes(item.file.size)} · Not uploaded
           </p>
         </div>
@@ -361,10 +405,10 @@ function StagedFileCard({
         </button>
       </div>
 
-      <div className="mt-3">
+      <div className="mt-4">
         <label
           htmlFor={`desc-${item.id}`}
-          className="mb-1 block text-[0.6875rem] text-muted"
+          className="mb-1.5 block text-[0.6875rem] text-muted"
         >
           Description <span className="text-danger">*</span>
         </label>
@@ -407,22 +451,22 @@ function UploadStatusCard({
     <div
       className={cn(
         CARD_BASE,
-        "flex flex-col p-3",
+        "flex min-h-[200px] flex-col p-4",
         isFailed && "border-danger/30 bg-danger-subtle",
       )}
     >
       <div className="flex items-start gap-2.5">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-surface-raised">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-surface-raised">
           <FileTypeIcon
             name={upload.filename}
             className="size-5 text-muted"
           />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-medium" title={upload.filename}>
+          <p className="truncate text-sm font-semibold" title={upload.filename}>
             {upload.filename}
           </p>
-          <p className="mt-0.5 text-[0.6875rem] text-muted">
+          <p className="mt-1 text-xs text-muted">
             {formatBytes(upload.sizeBytes)}
           </p>
         </div>
@@ -533,28 +577,35 @@ function ExistingFileCard({
       aria-label={`Open details for ${row.filename}`}
       className={cn(
         CARD_BASE,
-        "group relative flex cursor-pointer flex-col p-3",
-        "transition-all duration-200 hover:-translate-y-0.5",
-        "hover:border-[rgba(255,255,255,0.18)] hover:shadow-lg hover:shadow-black/20",
+        "group relative flex min-h-[200px] cursor-pointer flex-col p-4",
+        // Lift on hover: transform (3px up), shadow (0 8px 24px @ 25% black) and a
+        // brighter hairline border, all on one 200ms ease transition. will-change
+        // keeps the transform on the compositor so the lift stays smooth. Purely
+        // visual — the hover-revealed download button is driven by the unchanged
+        // `group` class, so it keeps working during and after the lift.
+        "transition-all duration-200 ease-out will-change-transform",
+        "hover:-translate-y-[3px] hover:bg-[rgba(255,255,255,0.04)]",
+        "hover:border-[rgba(255,255,255,0.18)]",
+        "hover:shadow-[0_8px_24px_rgba(0,0,0,0.25)]",
         "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
         isFailed && "border-danger/30 bg-danger-subtle",
       )}
     >
       <div className="flex items-start gap-2.5">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-surface-raised">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-surface-raised">
           <FileTypeIcon name={row.filename} className="size-5 text-muted" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <p
-              className="min-w-0 flex-1 truncate text-xs font-medium"
+              className="min-w-0 flex-1 truncate text-sm font-semibold"
               title={row.filename}
             >
               {row.filename}
             </p>
             <StatusBadge status={row.status} className="shrink-0" />
           </div>
-          <p className="mt-0.5 text-[0.6875rem] text-muted">
+          <p className="mt-1 text-xs text-muted">
             {details.join(" · ")}
           </p>
         </div>
@@ -566,7 +617,7 @@ function ExistingFileCard({
           aria-label={`Download ${row.filename}`}
           title="Download"
           className={cn(
-            "absolute top-2 right-2 flex size-7 items-center justify-center rounded-md",
+            "absolute top-3 right-3 flex size-7 items-center justify-center rounded-md",
             "border border-[rgba(255,255,255,0.12)] bg-[rgba(12,20,16,0.6)] text-muted",
             "opacity-0 transition-opacity group-hover:opacity-100",
             "hover:border-[rgba(255,255,255,0.3)] hover:text-foreground",
@@ -582,13 +633,18 @@ function ExistingFileCard({
         </button>
       </div>
 
+      {/* Short 2-line preview for grid density — the full text is available on
+       * hover (native tooltip) and in the detail modal, unclamped. */}
       {row.description && (
-        <p className="mt-2 line-clamp-2 text-[0.6875rem] text-muted">
+        <p
+          className="mt-3 line-clamp-2 text-xs leading-relaxed text-muted/90"
+          title={row.description}
+        >
           {row.description}
         </p>
       )}
       {isFailed && row.error_message && (
-        <p className="mt-2 text-[0.6875rem] break-words text-danger">
+        <p className="mt-2 text-xs break-words text-danger">
           {row.error_message}
         </p>
       )}

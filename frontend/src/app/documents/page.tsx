@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { StatusBadge } from "@/components/status-badge";
+import { Toast } from "@/components/toast";
 import type { DocumentSummary } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
@@ -51,6 +52,10 @@ export default function DocumentsPage() {
   const canManageOrg = Boolean(role && ADMIN_ROLES.includes(role));
 
   const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
+  /** Failure of the last delete attempt, surfaced as a toast — delete errors
+   *  must not land in the shared page banner (that channel stays for list/
+   *  refresh failures, away from where the user clicked). */
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -320,11 +325,19 @@ export default function DocumentsPage() {
         }
         isBusy={pendingDelete ? library.deletingIds.has(pendingDelete.id) : false}
         onConfirm={() => {
-          if (pendingDelete) void library.remove(pendingDelete.id);
+          if (pendingDelete) {
+            void library.remove(pendingDelete.id).then((failure) => {
+              if (failure) setDeleteError(failure);
+            });
+          }
           setPendingDelete(null);
         }}
         onCancel={() => setPendingDelete(null)}
       />
+
+      {deleteError && (
+        <Toast message={deleteError} onDismiss={() => setDeleteError(null)} />
+      )}
     </div>
   );
 }

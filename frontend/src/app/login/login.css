@@ -71,9 +71,11 @@
 
 /* --- Blob layer ---------------------------------------------------------- */
 
-/* One container holding the three real PNG renders, above the background
- * image and below the nav + glass card (z-index 2). pointer-events: none so
- * the decorative layer never intercepts clicks near the form. */
+/* One container holding the blob renders configured in BLOBS (page.tsx) —
+ * above the background image and below the nav + glass card (z-index 2).
+ * pointer-events: none so the decorative layer never intercepts clicks near
+ * the form. Position classes for currently-unused blobs (stone, green) are
+ * kept so they can be re-added without touching CSS. */
 .login-blobs {
   position: absolute;
   inset: 0;
@@ -212,26 +214,13 @@
   }
 }
 
+/* Layout only — the wordmark's typography (caps, size, weight, tracking) comes
+ * from the shared BrandWordmark component so it matches the app's top bars
+ * exactly. The 12px mark-to-text gap is kept here on purpose. */
 .login-brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: #ffffff;
-}
-
-.login-brand-mark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  color: #ffffff;
 }
 
 .login-nav-demo {

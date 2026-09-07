@@ -15,16 +15,18 @@ from app.llm.base import LLMProvider
 from app.security.auth import Principal, get_principal
 
 
-def get_generic_llm() -> LLMProvider:
-    """The canonical Section 13 LLM provider (CLAUDE.md sections 2 and 13).
-
-    Built per request rather than cached: constructing it only reads settings, and
-    not caching means a reconfiguration takes effect without a process restart.
+def get_llm_provider() -> LLMProvider:
+    """Create the appropriate LLM provider for the current configuration.
 
     When multiple provider API keys are configured, returns a
-    :class:`~app.llm.fallback.FallbackChainProvider` that implements sequential
-    failover (primary → fallback → secondary fallback).  When only one key is
-    present, returns a plain :class:`~app.llm.generic.GenericProvider`.
+    :class:`~app.llm.fallback.RotatingProvider` that round-robins across all
+    configured providers (Groq, OpenRouter, Gemini, NVIDIA) with graceful
+    failover per request.  When only one key is present, returns a plain
+    :class:`~app.llm.generic.GenericProvider`.
+
+    This is the single factory for LLM providers across the application.
+    Both the Query Understanding call and the answer-generation call use
+    this same function — no duplicate provider-selection logic.
     """
     from app.config import get_settings
 
@@ -35,18 +37,25 @@ def get_generic_llm() -> LLMProvider:
             settings.gemini_api_key,
             settings.groq_api_key,
             settings.openrouter_api_key,
+            settings.nvidia_api_key,
         )
         if key is not None
     )
 
     if chain_count > 1:
-        from app.llm.fallback import FallbackChainProvider
+        from app.llm.fallback import RotatingProvider
 
-        return FallbackChainProvider()
+        return RotatingProvider()
 
     from app.llm.generic import GenericProvider
 
     return GenericProvider()
+
+
+# Legacy alias — the FastAPI Depends() injection references get_generic_llm.
+def get_generic_llm() -> LLMProvider:
+    """Alias for :func:`get_llm_provider`.  Kept for FastAPI Depends() compat."""
+    return get_llm_provider()
 
 
 def require_role(*allowed: str) -> Callable[[Principal], Principal]:

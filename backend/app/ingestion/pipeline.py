@@ -162,9 +162,8 @@ async def generate_document_description(
 
     try:
         from app.llm.base import Completion, Message
-        from app.llm.fallback import FallbackChainProvider
-
-        provider = FallbackChainProvider()
+        from app.api.dependencies import get_llm_provider
+        provider = get_llm_provider()
         messages = [
             Message(
                 role="system",

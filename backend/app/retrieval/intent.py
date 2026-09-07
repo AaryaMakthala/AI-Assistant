@@ -34,6 +34,8 @@ from typing import Literal
 
 from loguru import logger
 
+from app.llm.utils import strip_think_tags
+
 
 # ---------------------------------------------------------------------------
 # Intent taxonomy
@@ -851,21 +853,8 @@ async def _llm_classify_metadata_subintent(
     from app.config import get_settings
 
     settings = get_settings()
-    chain_count = sum(
-        1
-        for key in (
-            settings.gemini_api_key,
-            settings.groq_api_key,
-            settings.openrouter_api_key,
-        )
-        if key is not None
-    )
-    if chain_count > 1:
-        from app.llm.fallback import FallbackChainProvider
-        provider = FallbackChainProvider()
-    else:
-        from app.llm.generic import GenericProvider
-        provider = GenericProvider()
+    from app.api.dependencies import get_llm_provider
+    provider = get_llm_provider()
 
     system_prompt = (
         "You are a metadata sub-classifier for a company knowledge assistant.\n"
@@ -919,7 +908,9 @@ async def _llm_classify_metadata_subintent(
         async for _token in provider.stream(messages, completion=completion):
             pass
 
-        response_text = completion.text.strip()
+        # Strip thinking tags before JSON parsing — Qwen3-Thinking and
+        # similar models wrap their output in <think> blocks.
+        response_text = strip_think_tags(completion.text)
         if not response_text:
             return None
 

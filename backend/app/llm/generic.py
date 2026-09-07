@@ -52,7 +52,11 @@ class GenericProvider:
         self._settings = settings
 
     async def stream(
-        self, messages: list[Message], *, completion: Completion
+        self,
+        messages: list[Message],
+        *,
+        completion: Completion,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         completion.provider = self.name
         completion.model = self.model
@@ -61,7 +65,7 @@ class GenericProvider:
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": self._settings.llm_temperature,
-            "max_tokens": self._settings.llm_max_output_tokens,
+            "max_tokens": max_tokens or self._settings.llm_max_output_tokens,
             "stream": True,
         }
         headers = {

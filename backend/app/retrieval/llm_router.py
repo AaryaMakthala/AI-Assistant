@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import re
+
+from app.llm.utils import strip_think_tags
 from dataclasses import dataclass
 from typing import Literal
 
@@ -236,21 +238,8 @@ async def route_with_llm(
     from app.config import get_settings
 
     settings = get_settings()
-    chain_count = sum(
-        1
-        for key in (
-            settings.gemini_api_key,
-            settings.groq_api_key,
-            settings.openrouter_api_key,
-        )
-        if key is not None
-    )
-    if chain_count > 1:
-        from app.llm.fallback import FallbackChainProvider
-        provider = FallbackChainProvider()
-    else:
-        from app.llm.generic import GenericProvider
-        provider = GenericProvider()
+    from app.api.dependencies import get_llm_provider
+    provider = get_llm_provider()
 
     # Build workspace context section.
     ws_context = (
@@ -285,7 +274,9 @@ async def route_with_llm(
         async for _token in provider.stream(messages, completion=completion):
             pass
 
-        response_text = completion.text.strip()
+        # Strip thinking tags before JSON parsing — Qwen3-Thinking and
+        # similar models wrap their output in <think> blocks.
+        response_text = strip_think_tags(completion.text)
         if not response_text:
             logger.warning("LLM router returned empty response")
             return RouteResult(

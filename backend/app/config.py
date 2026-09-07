@@ -35,6 +35,7 @@ _PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "groq": "primary",
     "openrouter": "fallback",
     "gemini": "secondary_fallback",
+    "nvidia": "rotating",
 }
 
 
@@ -50,6 +51,10 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "model": "google/gemini-2.5-flash",
+    },
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": "openai/gpt-oss-20b",
     },
 }
 
@@ -112,11 +117,13 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = Field(default=None, min_length=1)
     groq_api_key: SecretStr | None = Field(default=None, min_length=1)
     openrouter_api_key: SecretStr | None = Field(default=None, min_length=1)
+    nvidia_api_key: SecretStr | None = Field(default=None, min_length=1)
 
     # --- Per-provider model overrides (optional) ---
     # These override the default model for each provider in the fallback chain.
     # When unset, the provider preset default is used.
     openrouter_model: str | None = None
+    nvidia_model: str | None = None  # override for openai/gpt-oss-20b
 
     # --- Generic LLM fields (optional when a provider key is set) ---
     # These are auto-derived from the provider key via a model validator.
@@ -215,7 +222,11 @@ class Settings(BaseSettings):
     retrieval_final_count: int = Field(default=8, ge=1)
     #: Layer-1 grounding threshold (CLAUDE.md 8.3): if the top reranked chunk scores
     #: below this, the LLM is never called and the question is refused honestly.
-    retrieval_relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    #: Cross-encoder scores are raw logits (range ~[-12, +12]), NOT probabilities.
+    #: Calibrated: relevant fact-lookup scores typically -0.5 to -5; clearly
+    #: irrelevant is ~-8.  Threshold set at -5.0 to catch marginal matches while
+    #: rejecting genuinely ungrounded retrievals.
+    retrieval_relevance_threshold: float = Field(default=-5.0)
 
     # --- Phase B-2: Absolute grounding thresholds (cross-encoder logits) ---
 
@@ -247,13 +258,11 @@ class Settings(BaseSettings):
         description="Absolute min score when high-confidence doc-target relaxes grounding",
     )
     #: Permissive floor for filename-matched queries.  When filename matching finds
-    #: a document and chunks from it are in the final set, we ground regardless of
-    #: the reranker score — the filename IS the evidence.  Set very low to accommodate
-    #: cases where the reranker scores the content poorly (e.g. "do you have any resume"
-    #: scores -11 against resume content).  Clearly irrelevant chunks still fail
-    #: because they won't be from the filename-matched document.
+    #: a document and chunks from it are in the final set, we ground with a
+    #: relaxed threshold — the filename IS evidence.  Set low but not impossibly
+    #: low: truly irrelevant content from the matched document should still fail.
     filename_match_relaxed_score: float = Field(
-        default=-15.0,
+        default=-12.0,
         description="Permissive floor when filename match + target chunks present",
     )
 
@@ -285,6 +294,10 @@ class Settings(BaseSettings):
 
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 4096
+    #: Max tokens for the Query Understanding call.  QU returns a compact JSON
+    #: object (corrected_query, search_query, intent, confidence, reasoning).
+    #: 512 gives comfortable headroom for the longest fields without waste.
+    qu_max_output_tokens: int = 512
     #: Time budget for the whole generation. A stalled provider must surface as an error
     #: rather than an open connection the client waits on indefinitely.
     llm_timeout_seconds: float = 60.0
@@ -409,6 +422,15 @@ class Settings(BaseSettings):
                 "base_url": _PROVIDER_PRESETS["gemini"]["base_url"],
             })
 
+        # NVIDIA NIM (if configured) — participates in rotation, not just fallback.
+        if self.nvidia_api_key:
+            chain.append({
+                "name": "nvidia",
+                "api_key": self.nvidia_api_key.get_secret_value(),
+                "model": self.nvidia_model or _PROVIDER_PRESETS["nvidia"]["model"],
+                "base_url": _PROVIDER_PRESETS["nvidia"]["base_url"],
+            })
+
         return chain
 
     @model_validator(mode="after")
@@ -494,11 +516,36 @@ def _format_validation_error(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
+def _warn_on_suspicious_thresholds(settings: Settings) -> None:
+    """Warn loudly when a grounding threshold is on the wrong scale (CLAUDE.md 8.3).
+
+    Cross-encoder rerank scores are raw logits (typically negative for this
+    model; relevant matches land around -0.5 to -5, irrelevant around -8).  A
+    *positive* configured threshold almost always means a probability-scale
+    value (e.g. 0.3) was pasted into an env var that expects a logit — the
+    exact drift that made every grounded answer refuse.  This is a warning,
+    not an error: a positive logit is technically valid, so startup proceeds,
+    but the operator should double-check the .env value.
+    """
+    if settings.retrieval_relevance_threshold > 0:
+        print(
+            "WARNING: RETRIEVAL_RELEVANCE_THRESHOLD="
+            f"{settings.retrieval_relevance_threshold} is positive. Cross-encoder "
+            "scores are raw logits (calibrated range roughly [-12, +12], relevant "
+            "matches ~-0.5 to -5). A positive value usually means a "
+            "probability-scale number (0.0-1.0) was configured by mistake and "
+            "will refuse every grounded answer. Check .env.",
+            file=sys.stderr,
+        )
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Load settings, exiting with a readable message rather than a raw traceback."""
     try:
-        return Settings()  # type: ignore[call-arg]
+        settings = Settings()  # type: ignore[call-arg]
     except ValidationError as exc:
         print(_format_validation_error(exc), file=sys.stderr)  # noqa: T201
         raise SystemExit(1) from exc
+    _warn_on_suspicious_thresholds(settings)
+    return settings

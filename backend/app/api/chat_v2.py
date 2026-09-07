@@ -29,6 +29,7 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -37,24 +38,25 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, insert, select
 
+from app.llm.utils import strip_think_tags as _strip_think_tags
+from app.llm.utils import stream_think_filtered as _stream_think_filtered
+
 from app.api.dependencies import get_generic_llm
 from app.api.workspace_deps import assert_workspace_role
 from app.db.models import ChatMessage, ChatSession, Document
 from app.llm.base import Completion, LLMError, LLMProvider
 from app.rag.prompts import build_messages
 from app.retrieval.intent import (
+    _DOC_SPECIFIC_DESCRIPTION_PATTERN,
     ConversationHistorySubIntent,
     Intent,
     IntentCategory,
     MetadataSubIntent,
-    QueryShape,
-    _DOC_SPECIFIC_DESCRIPTION_PATTERN,
-    classify_intent,
-    classify_intent_regex,
     classify_query_shape,
 )
 from app.retrieval.pipeline import RetrievedChunk, retrieve
 from app.retrieval.query_rewrite import ChatTurn
+from app.retrieval.query_understanding import understand_query
 from app.retrieval.refusals import ResponseReason, refusal_message
 from app.security.auth import CurrentPrincipal
 from app.security.rls import tenant_session
@@ -180,108 +182,8 @@ def _source_dict(chunk: RetrievedChunk, *, number: int) -> dict:
     }
 
 
-# Openers and closers for model-injected thinking/reasoning blocks.  Groq runs
-# qwen/qwen3.x and OpenRouter runs gemini-2.5-flash, both of which can emit a
-# reasoning preamble wrapped in control tags before the final answer.  The
-# most common is Qwen3's ``<|start_of_thought|>...</<|end_of_thought|>``.
-_THINK_OPENERS = re.compile(
-    r"<\|?(?:start_of_thought|thinking_start|thinking|think)\|?>",
-    re.IGNORECASE,
-)
-_THINK_CLOSERS = re.compile(
-    r"<\|?(?:end_of_thought|thinking_end|/think|/thinking)\|?>",
-    re.IGNORECASE,
-)
-
-
-def _strip_think_tags(text: str) -> str:
-    """Remove model-injected thinking/reasoning blocks from LLM output.
-
-    Some models (e.g. Qwen3 on Groq, Gemini-2.5 on OpenRouter) emit reasoning
-    wrapped in tags like ``<|start_of_thought|>...</<|end_of_thought|>``.
-    The user must see only the final answer.  This removes the entire block
-    (tags and the reasoning text between them), and also drops anything after
-    an opener that was never closed (a max-tokens cutoff mid-reasoning).
-    """
-    parts = _THINK_OPENERS.split(text)
-    if len(parts) == 1:
-        # No opener — nothing to strip.
-        return text.strip()
-
-    # Reassemble: keep the text before the first opener (parts[0]) and any
-    # segment that comes after a closing tag.  Content inside an unclosed block
-    # (no closer before the next opener or the end) is dropped.
-    kept = [parts[0]]
-    for segment in parts[1:]:
-        closed = _THINK_CLOSERS.split(segment, maxsplit=1)
-        if len(closed) == 2:
-            # Opener ... closer: drop the reasoning, keep what follows.
-            kept.append(closed[1])
-        # else: unclosed block — drop it entirely.
-    return "".join(kept).strip()
-
-
-#: Length of the rolling lookahead buffer used by the streaming think filter.
-#: Markers are short (``<|start_of_thought|>`` is 20 chars), so keeping the tail
-#: well past that means any marker is captured whole inside the window before its
-#: text could be emitted.  This bounds the added streaming latency to ~one short
-#: phrase while still never leaking reasoning.
-_THINK_TAIL = 40
-
-
-async def _stream_think_filtered(source: AsyncIterator[str]) -> AsyncIterator[str]:
-    """Wrap an LLM token stream, suppressing think-block reasoning text.
-
-    The streaming path must not send reasoning to the client, so this filters
-    tokens as they arrive rather than relying on a post-hoc strip.  It keeps a
-    rolling buffer and only yields text once it is known to be outside a
-    reasoning block (``<|start_of_thought|>...<|end_of_thought|>`` or
-    ``<thinking>...</thinking>``).  Markers that arrive split across stream
-    tokens are still caught because we scan the whole buffered window.  An
-    unclosed block (max-tokens cutoff mid-reasoning) is discarded entirely.
-    """
-    buf = ""
-    in_think = False
-    async for token in source:
-        buf += token
-        while True:
-            if in_think:
-                close = _THINK_CLOSERS.search(buf)
-                if close is not None:
-                    buf = buf[close.end():]
-                    in_think = False
-                else:
-                    # Still inside reasoning — hold.  Keep only the tail so an
-                    # arbitrarily long reasoning block cannot grow memory.
-                    if len(buf) > _THINK_TAIL:
-                        buf = buf[-_THINK_TAIL:]
-                    break
-            else:
-                open_m = _THINK_OPENERS.search(buf)
-                close_m = _THINK_CLOSERS.search(buf)
-                if open_m is not None and (close_m is None or open_m.start() < close_m.start()):
-                    # Emit everything before the opener, drop the opener, hide.
-                    if open_m.start():
-                        yield buf[:open_m.start()]
-                    buf = buf[open_m.end():]
-                    in_think = True
-                elif close_m is not None:
-                    # Stray closer with no preceding opener — drop just the closer.
-                    if close_m.start():
-                        yield buf[:close_m.start()]
-                    buf = buf[close_m.end():]
-                else:
-                    # No markers in the buffered window: emit all but the tail,
-                    # which we hold back in case a marker starts at the boundary.
-                    if len(buf) > _THINK_TAIL:
-                        yield buf[:-_THINK_TAIL]
-                        buf = buf[-_THINK_TAIL:]
-                    break
-    # End of stream.
-    if in_think:
-        return  # unclosed thinking block — discard the remainder (caught above too)
-    if buf:
-        yield buf
+# Think-tag stripping: definitions moved to app.llm.utils to avoid duplication.
+# _strip_think_tags and _stream_think_filtered are imported from there.
 
 
 def _display_provider_name(internal_name: str) -> str:
@@ -423,8 +325,8 @@ async def _answer_metadata_question(
                 Document.status == "READY",
             )
             if this_month:
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
+                from datetime import datetime
+                now = datetime.now(UTC)
                 month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 stmt = stmt.where(Document.created_at >= month_start)
             count = (await db.execute(stmt)).scalar_one()
@@ -1217,13 +1119,17 @@ async def _stream_chat(
     if session_created:
         yield await _sse_event("session", {"session_id": str(session_id)})
 
-    # 1a. Classify intent: LLM-first with cache, regex as failure fallback.
-    effective_query = question  # may be overridden by rewrite below
+    # 1a. Query Understanding: single LLM call for intent, typo correction,
+    # and search-query optimization.  Replaces the fragmented regex + LLM
+    # router approach.
+    effective_query = question  # may be overridden by QU below
+    search_query_for_retrieval: str | None = None
+    qu_confidence: float | None = None
     needs_clarification = False
     refusal_reason: ResponseReason | None = None
     history_turns: list[ChatTurn] = []
 
-    # Load history for context (needed by LLM router and query rewrite).
+    # Load history for context.
     history_turns = await _load_recent_history(
         workspace_id=workspace_id,
         user_id=principal.user_id,
@@ -1231,25 +1137,20 @@ async def _stream_chat(
     )
     history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
 
-    # LLM-first classification with workspace knowledge.
-    intent = await classify_intent(
-        question,
-        history=history_dicts,
+    # Query Understanding stage — single LLM call, every message.
+    qu_result = await understand_query(
+        query=question,
         workspace_id=workspace_id,
+        history=history_dicts,
     )
-
-    # 1b. Use rewritten query from router if available.
-    if intent.rewritten_query:
-        effective_query = intent.rewritten_query
-        # Re-classify after rewrite in case the rewritten query changed the intent.
-        if effective_query != question:
-            intent = await classify_intent(
-                effective_query,
-                history=history_dicts,
-                workspace_id=workspace_id,
-            )
-    elif intent.category == IntentCategory.AMBIGUOUS:
-        needs_clarification = True
+    intent = Intent(
+        category=qu_result.intent,
+        needs_clarification=(qu_result.intent == IntentCategory.AMBIGUOUS),
+        reason=f"query_understanding conf={qu_result.confidence:.2f}",
+    )
+    effective_query = qu_result.corrected_query
+    search_query_for_retrieval = qu_result.search_query
+    qu_confidence = qu_result.confidence
 
     # 1c. Handle ambiguity: ask for clarification instead of refusing.
     if needs_clarification or intent.needs_clarification:
@@ -1478,6 +1379,8 @@ async def _stream_chat(
             db, query=effective_query, workspace_id=workspace_id,
             query_shape=query_shape,
             doc_target_result=doc_target_result,
+            search_query=search_query_for_retrieval,
+            qu_confidence=qu_confidence,
         )
 
     if not result.grounded:
@@ -1695,9 +1598,11 @@ async def grounded_chat(
     workspace_id = principal.workspace_id
     member_role = await assert_workspace_role(workspace_id, principal)
 
-    # LLM-first classification with workspace knowledge.
+    # Query Understanding stage — single LLM call for intent, typo correction,
+    # and search-query optimization.
     effective_query = question
-    history_turns: list[ChatTurn] = []
+    search_query_for_retrieval: str | None = None
+    qu_confidence: float | None = None
 
     # Load history for context.
     history_turns = await _load_recent_history(
@@ -1706,22 +1611,21 @@ async def grounded_chat(
     )
     history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
 
-    intent = await classify_intent(
-        question,
-        history=history_dicts,
+    qu_result = await understand_query(
+        query=question,
         workspace_id=workspace_id,
+        history=history_dicts,
     )
+    intent = Intent(
+        category=qu_result.intent,
+        needs_clarification=(qu_result.intent == IntentCategory.AMBIGUOUS),
+        reason=f"query_understanding conf={qu_result.confidence:.2f}",
+    )
+    effective_query = qu_result.corrected_query
+    search_query_for_retrieval = qu_result.search_query
+    qu_confidence = qu_result.confidence
 
-    # Use rewritten query from router if available.
-    if intent.rewritten_query:
-        effective_query = intent.rewritten_query
-        if effective_query != question:
-            intent = await classify_intent(
-                effective_query,
-                history=history_dicts,
-                workspace_id=workspace_id,
-            )
-    elif intent.category == IntentCategory.AMBIGUOUS:
+    if intent.category == IntentCategory.AMBIGUOUS:
         return GroundedChatResponse(
             answer=refusal_message(ResponseReason.NEEDS_CLARIFICATION),
             grounded=True,
@@ -1846,10 +1750,23 @@ async def grounded_chat(
             sub=intent.metadata_sub.value if intent.metadata_sub else None,
             ws=workspace_id, refusal=refusal_reason.value if refusal_reason else None,
         )
-        return GroundedChatResponse(
-            answer=answer, grounded=True,
-            insufficient_evidence=refusal_reason is not None, sources=[],
-        )
+        # When the metadata handler can't resolve the specific field (sub is
+        # None) and returns a refusal, fall through to document-content search
+        # instead of dead-ending.  A well-spelled metadata question with a
+        # recognized sub-intent (DOC_COUNT, DOC_LIST, etc.) is answered above;
+        # an ambiguous or unresolvable one deserves a retrieval attempt, not a
+        # canned "I could not determine" refusal.
+        if refusal_reason == ResponseReason.METADATA_EMPTY and intent.metadata_sub is None:
+            logger.info(
+                "Metadata sub-intent unresolved for workspace={ws}, "
+                "falling through to document content search",
+                ws=workspace_id,
+            )
+        else:
+            return GroundedChatResponse(
+                answer=answer, grounded=True,
+                insufficient_evidence=refusal_reason is not None, sources=[],
+            )
 
     # --- Document content path (RAG) ---
     # Phase B-2: classify query shape + resolve doc target for filename-aware retrieval.
@@ -1883,6 +1800,8 @@ async def grounded_chat(
             session, query=effective_query, workspace_id=workspace_id,
             query_shape=query_shape,
             doc_target_result=doc_target_result,
+            search_query=search_query_for_retrieval,
+            qu_confidence=qu_confidence,
         )
 
     if not result.grounded:

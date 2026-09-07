@@ -34,6 +34,7 @@ def is_grounded(
     doc_target_high_confidence: bool = False,
     has_target_chunk: bool = False,
     has_filename_match_chunk: bool = False,
+    query_understanding_confidence: float | None = None,
 ) -> bool:
     """Whether the best rerank score clears the Layer-1 grounding threshold.
 
@@ -43,7 +44,7 @@ def is_grounded(
     Parameters
     ----------
     top_score:
-        Best rerank score across the candidates.
+        Best rerank score across the candidates (raw logit, range ~[-12, +12]).
     doc_target_high_confidence:
         Whether the query resolved a high-confidence document target.
     has_target_chunk:
@@ -51,7 +52,13 @@ def is_grounded(
         Required alongside ``doc_target_high_confidence`` for relaxation.
     has_filename_match_chunk:
         Whether at least one retrieved chunk belongs to a filename-matched document.
-        When True, uses a very permissive floor — the filename IS the evidence.
+        When True, uses a permissive floor — the filename IS evidence.
+    query_understanding_confidence:
+        Confidence from the Query Understanding stage.  When >= 0.85 and the
+        reranker score is in a plausible range (not deeply negative), this
+        acts as a secondary grounding signal — the query understanding model
+        judged the query as clearly relevant, so we trust it even when the
+        reranker score is marginal.
     """
     if top_score is None:
         return False
@@ -59,7 +66,7 @@ def is_grounded(
     settings = get_settings()
 
     # Filename match with chunks from the matched document: use the permissive
-    # floor.  The filename IS the evidence; the reranker score is secondary.
+    # floor.  The filename IS evidence; the reranker score is secondary.
     if has_filename_match_chunk:
         return top_score >= settings.filename_match_relaxed_score
 
@@ -68,9 +75,23 @@ def is_grounded(
     if doc_target_high_confidence and has_target_chunk:
         return top_score >= settings.doc_target_relaxed_score
 
-    # Normal fact-lookup: use the global relevance threshold.
-    # This threshold is on the [0, 1] scale — valid for positive-logit cases.
-    return top_score >= settings.retrieval_relevance_threshold
+    # Primary check: absolute threshold on the logit scale.
+    if top_score >= settings.retrieval_relevance_threshold:
+        return True
+
+    # Secondary signal: high-confidence query understanding + plausible score.
+    # "Plausible" means the reranker found something (not deeply irrelevant,
+    # i.e. not worse than the clearly-irrelevant floor ~-8).  When the query
+    # understanding model is confident this is a document_content question,
+    # we trust it even if the reranker score is marginal.
+    if (
+        query_understanding_confidence is not None
+        and query_understanding_confidence >= 0.85
+        and top_score >= -8.0  # not deeply irrelevant
+    ):
+        return True
+
+    return False
 
 
 def is_overview_grounded(
@@ -80,6 +101,7 @@ def is_overview_grounded(
     doc_target_high_confidence: bool = False,
     has_target_chunk: bool = False,
     has_filename_match_chunk: bool = False,
+    query_understanding_confidence: float | None = None,
 ) -> bool:
     """Grounding for OVERVIEW queries using absolute cross-encoder score thresholds.
 
@@ -106,6 +128,9 @@ def is_overview_grounded(
         Whether the query resolved a high-confidence document target.
     has_target_chunk:
         Whether at least one retrieved chunk belongs to the targeted document.
+    query_understanding_confidence:
+        Confidence from Query Understanding.  When >= 0.85 and the top score
+        is not deeply negative, acts as a secondary grounding signal.
 
     Returns
     -------
@@ -131,16 +156,30 @@ def is_overview_grounded(
 
     # Condition 1: the top chunk must clear the absolute minimum.
     if top_scores[0] < min_score:
-        return False
+        # Secondary signal: high-confidence QU + plausible score.
+        if (
+            query_understanding_confidence is not None
+            and query_understanding_confidence >= 0.85
+            and top_scores[0] >= -8.0
+        ):
+            pass  # continue to aggregate check
+        else:
+            return False
 
     # Condition 2: the mean of the top-k chunks must clear the aggregate minimum.
     top_mean = statistics.mean(top_scores)
     if top_mean < aggregate_min:
-        return False
+        # Secondary signal for aggregate too.
+        if (
+            query_understanding_confidence is not None
+            and query_understanding_confidence >= 0.85
+            and top_mean >= -10.0
+        ):
+            pass  # continue
+        else:
+            return False
 
     # Condition 3: there must be at least 2 chunks for diffuse evidence.
-    # (Already guaranteed by the len(scores) < 2 check above, but
-    # explicitly checking top_scores for clarity.)
     if len(top_scores) < 2:
         return False
 

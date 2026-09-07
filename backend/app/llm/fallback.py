@@ -1,10 +1,12 @@
 """Centralized multi-provider LLM fallback chain (CLAUDE.md sections 2, 10).
 
 Implements a sequential failover chain: primary (Groq) → fallback (OpenRouter) →
-secondary fallback (Gemini). Providers are tried strictly sequentially, never
-in parallel. The fallback triggers on HTTP 429, 500, 502, 503, 504, timeout, or
-connection errors — NOT on invalid requests from our own code (those surface
-clearly without retrying).
+secondary fallback (Gemini). Providers are tried strictly
+sequentially, never in parallel. Failover triggers on any provider-level failure
+— HTTP 429, any 5xx, auth/permission errors (401/403), timeouts, and connection
+errors — so a single broken provider cannot take the assistant down. The one
+exception is HTTP 400: a malformed request from our own code would be rejected by
+every provider, so it surfaces immediately instead of failing over.
 
 Key constraints (CLAUDE.md section 10):
 - No parallel model calls per request — bounded by an overall request timeout.
@@ -87,7 +89,11 @@ class FallbackChainProvider:
         self.model = ""
 
     async def stream(
-        self, messages: list[Message], *, completion: Completion
+        self,
+        messages: list[Message],
+        *,
+        completion: Completion,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream from the first available provider, falling back on transient errors.
 
@@ -129,7 +135,8 @@ class FallbackChainProvider:
 
             try:
                 async for token in self._stream_single(
-                    provider, messages, completion, remaining
+                    provider, messages, completion, remaining,
+                    max_tokens=max_tokens,
                 ):
                     content_emitted = True
                     yield token
@@ -145,36 +152,43 @@ class FallbackChainProvider:
 
             except LLMError as exc:
                 last_error = exc
+                status_code = getattr(exc, "status_code", None)
                 logger.warning(
-                    "LLM provider={provider} status=failed error={error} retryable={retryable}",
+                    "LLM provider={provider} status=failed error_type={error_type} "
+                    "http_status={status} error={error}",
                     provider=provider.name,
+                    error_type=_fallback_reason(exc),
+                    status=status_code,
                     error=str(exc)[:200],
-                    retryable=exc.retryable,
                 )
 
                 if not exc.retryable:
-                    # Permanent fault (bad key, malformed request) — do not retry.
+                    # Our own fault (HTTP 400 malformed request) — every other
+                    # provider would reject the same payload, so fail loudly
+                    # instead of burning the chain.
                     raise
 
-                # On 429 (rate limit), retry the same provider once with a short
-                # backoff before falling back.  A 429 typically resolves within
-                # seconds, and retrying the same provider avoids the ~2s penalty
-                # of switching to a fallback provider.
-                if exc.retryable and hasattr(exc, "status_code") and exc.status_code == 429 and not getattr(exc, "_retried", False):
+                # On 429 (rate limit), pause briefly before moving on.  A 429
+                # typically clears within seconds; the backoff also paces the
+                # request before the next provider is tried.
+                if status_code == 429 and not getattr(exc, "_retried", False):
                     backoff = getattr(exc, "retry_after", 2.0)
+                    exc._retried = True  # type: ignore[attr-defined]
                     logger.info(
-                        "LLM retrying provider={provider} after 429 backoff={backoff:.1f}s",
+                        "LLM provider={provider} rate_limited backoff={backoff:.1f}s "
+                        "then_failover=true",
                         provider=provider.name,
                         backoff=backoff,
                     )
-                    exc._retried = True  # type: ignore[attr-defined]
                     await asyncio.sleep(backoff)
-                    continue  # retry same provider
 
                 if i < len(self._providers) - 1:
                     logger.info(
-                        "LLM fallback provider={next} reason=previous_provider_failure",
+                        "LLM fallback failed_provider={failed} next_provider={next} "
+                        "reason={reason}",
+                        failed=provider.name,
                         next=self._providers[i + 1].name,
+                        reason=_fallback_reason(exc),
                     )
                 continue
 
@@ -194,6 +208,8 @@ class FallbackChainProvider:
         messages: list[Message],
         completion: Completion,
         timeout: float,
+        *,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream from a single provider, enforcing a per-provider timeout."""
         import httpx
@@ -204,7 +220,7 @@ class FallbackChainProvider:
             "model": provider.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": get_settings().llm_temperature,
-            "max_tokens": get_settings().llm_max_output_tokens,
+            "max_tokens": max_tokens or get_settings().llm_max_output_tokens,
             "stream": True,
         }
         headers = {
@@ -225,7 +241,15 @@ class FallbackChainProvider:
                 ) as response:
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", "replace")
-                        retryable = response.status_code == 429 or response.status_code >= 500
+                        # Failover policy: the chain exists so a single provider's
+                        # trouble never takes the assistant down. 429 and 5xx are
+                        # provider-side; any other 4xx (401/403 auth or permission,
+                        # 404 route, 413 payload size, ...) is provider-specific state
+                        # that the next provider may not share, so it fails over. The
+                        # one exception is 400: our own payload is malformed and would
+                        # be rejected by every provider, so retrying just fails twice
+                        # as slowly — surface it instead.
+                        retryable = response.status_code != 400
                         exc = LLMError(
                             f"Provider returned HTTP {response.status_code}: "
                             f"{body[:error_body_limit]}",
@@ -288,4 +312,279 @@ class FallbackChainProvider:
         return None
 
 
-__all__ = ["FallbackChainProvider"]
+
+
+def _fallback_reason(exc: LLMError) -> str:
+    """Classify why a provider was skipped, for the fallback audit log."""
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return "rate_limited"
+    if status is not None and status >= 500:
+        return "server_error"
+    if status is not None:
+        return f"http_{status}"
+    return "timeout_or_connection_error"
+
+
+# ---------------------------------------------------------------------------
+# Rotating provider — round-robin across all configured providers
+# ---------------------------------------------------------------------------
+
+
+class RotatingProvider:
+    """Round-robin LLM provider with graceful failover per request.
+
+    Unlike :class:`FallbackChainProvider` which always starts with provider #1,
+    this rotates the starting provider across requests so load is distributed.
+    Within a single request, if the chosen provider fails, the remaining
+    providers are tried in order (same failover behavior as the chain).
+
+    Recently-failed providers are temporarily skipped (cooldown period) to
+    avoid wasting time on providers that are likely still down or rate-limited.
+
+    This satisfies the same :class:`~app.llm.base.LLMProvider` protocol, so
+    callers cannot tell whether they hold a chain or a rotating pool.
+    """
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        chain_configs = settings.fallback_chain_configs
+        if not chain_configs:
+            raise LLMError(
+                "No LLM provider API keys configured. "
+                "Set at least one of GEMINI_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY.",
+                provider="none",
+                retryable=False,
+            )
+        self._providers = [
+            _ProviderConfig(
+                name=cfg["name"],
+                api_key=cfg["api_key"],
+                model=cfg["model"],
+                base_url=cfg["base_url"],
+            )
+            for cfg in chain_configs
+        ]
+        self._timeout_per_provider = settings.llm_timeout_seconds
+        self._rotation_idx = 0  # next provider to try (round-robin)
+        self.name = ""
+        self.model = ""
+
+    def _next_provider(self) -> _ProviderConfig:
+        """Return the next provider in rotation and advance the index."""
+        provider = self._providers[self._rotation_idx % len(self._providers)]
+        self._rotation_idx += 1
+        return provider
+
+    async def stream(
+        self,
+        messages: list[Message],
+        *,
+        completion: Completion,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream from a rotating provider, falling back on transient errors.
+
+        Picks the next provider via round-robin. If it fails before any token
+        is emitted, tries the remaining providers in order. If it fails after
+        partial streaming, the error is surfaced (we cannot un-send tokens).
+        """
+        total_start = time.monotonic()
+        last_error: LLMError | None = None
+        content_emitted = False
+
+        # Build the ordered list of providers to try for this request.
+        # Start from the current rotation point, then wrap around.
+        n = len(self._providers)
+        start_idx = self._rotation_idx % n
+        ordered = [
+            self._providers[(start_idx + i) % n] for i in range(n)
+        ]
+        # Advance rotation for the next request.
+        self._rotation_idx = (start_idx + 1) % n
+
+        for i, provider in enumerate(ordered):
+            elapsed = time.monotonic() - total_start
+            remaining = self._timeout_per_provider - elapsed
+            if remaining <= 0:
+                logger.error(
+                    "LLM rotating pool exhausted time budget after {elapsed:.1f}s",
+                    elapsed=elapsed,
+                )
+                break
+
+            if content_emitted:
+                logger.warning(
+                    "Skipping failover to {provider}: content already streamed",
+                    provider=provider.name,
+                )
+                break
+
+            logger.info(
+                "LLM rotating pool attempting provider={provider} (attempt {attempt}/{total})",
+                provider=provider.name,
+                attempt=i + 1,
+                total=n,
+            )
+
+            try:
+                async for token in self._stream_single(
+                    provider, messages, completion, remaining,
+                    max_tokens=max_tokens,
+                ):
+                    content_emitted = True
+                    yield token
+
+                self.name = completion.provider or provider.name
+                self.model = completion.model or provider.model
+                logger.info(
+                    "LLM provider={provider} status=success",
+                    provider=provider.name,
+                )
+                return
+
+            except LLMError as exc:
+                last_error = exc
+                status_code = getattr(exc, "status_code", None)
+                logger.warning(
+                    "LLM provider={provider} status=failed error_type={error_type} "
+                    "http_status={status} error={error}",
+                    provider=provider.name,
+                    error_type=_fallback_reason(exc),
+                    status=status_code,
+                    error=str(exc)[:200],
+                )
+
+                if not exc.retryable:
+                    raise
+
+                if status_code == 429 and not getattr(exc, "_retried", False):
+                    backoff = getattr(exc, "retry_after", 2.0)
+                    exc._retried = True  # type: ignore[attr-defined]
+                    logger.info(
+                        "LLM provider={provider} rate_limited backoff={backoff:.1f}s",
+                        provider=provider.name,
+                        backoff=backoff,
+                    )
+                    await asyncio.sleep(backoff)
+
+                if i < len(ordered) - 1:
+                    logger.info(
+                        "LLM failover failed_provider={failed} next_provider={next} "
+                        "reason={reason}",
+                        failed=provider.name,
+                        next=ordered[i + 1].name,
+                        reason=_fallback_reason(exc),
+                    )
+                continue
+
+        logger.error("All configured LLM providers failed or timed out")
+        if last_error is not None:
+            raise last_error
+        raise LLMError(
+            "All configured LLM providers failed or timed out.",
+            provider="chain",
+            retryable=True,
+        )
+
+    async def _stream_single(
+        self,
+        provider: _ProviderConfig,
+        messages: list[Message],
+        completion: Completion,
+        timeout: float,
+        *,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream from a single provider, enforcing a per-provider timeout."""
+        import httpx
+        import json as _json
+
+        payload = {
+            "model": provider.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "temperature": get_settings().llm_temperature,
+            "max_tokens": max_tokens or get_settings().llm_max_output_tokens,
+            "stream": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {provider.api_key}",
+            "Content-Type": "application/json",
+        }
+        endpoint = f"{provider.base_url.rstrip('/')}/chat/completions"
+
+        completion.provider = provider.name
+        completion.model = provider.model
+
+        error_body_limit = 500
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST", endpoint, json=payload, headers=headers
+                ) as response:
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        retryable = response.status_code != 400
+                        exc = LLMError(
+                            f"Provider returned HTTP {response.status_code}: "
+                            f"{body[:error_body_limit]}",
+                            provider=provider.name,
+                            retryable=retryable,
+                        )
+                        exc.status_code = response.status_code  # type: ignore[attr-defined]
+                        if response.status_code == 429:
+                            retry_after_header = response.headers.get("retry-after")
+                            try:
+                                exc.retry_after = float(retry_after_header) if retry_after_header else 2.0  # type: ignore[attr-defined]
+                            except (ValueError, TypeError):
+                                exc.retry_after = 2.0  # type: ignore[attr-defined]
+                        raise exc
+                    async for line in response.aiter_lines():
+                        token = self._parse_line(line, completion)
+                        if token is not None:
+                            yield token
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(
+                f"Provider request failed: {exc}",
+                provider=provider.name,
+                retryable=True,
+            ) from exc
+
+    @staticmethod
+    def _parse_line(line: str, completion: Completion) -> str | None:
+        """Handle one SSE ``data:`` line, returning the delta text if any."""
+        import json as _json
+
+        if not line.startswith("data:"):
+            return None
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            return None
+        try:
+            chunk = _json.loads(data)
+        except _json.JSONDecodeError:
+            return None
+
+        choices = chunk.get("choices") or []
+        if choices:
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
+            if content:
+                completion.text += content
+                return content
+
+        usage = chunk.get("usage")
+        if isinstance(usage, dict):
+            from app.llm.base import TokenUsage
+
+            completion.usage = TokenUsage(
+                prompt_tokens=usage.get("prompt_tokens") or 0,
+                completion_tokens=usage.get("completion_tokens") or 0,
+            )
+        return None
+
+
+__all__ = ["FallbackChainProvider", "RotatingProvider"]

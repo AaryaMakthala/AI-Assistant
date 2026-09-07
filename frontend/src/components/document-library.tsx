@@ -17,6 +17,7 @@ import { useMemo, useState } from "react";
 import { Button } from "./button";
 import { ConfirmDialog } from "./confirm-dialog";
 import { StatusBadge } from "./status-badge";
+import { Toast } from "./toast";
 import {
   type UploadState,
 } from "@/lib/hooks/use-documents";
@@ -50,9 +51,15 @@ export function DocumentLibrary({
   currentUserId?: string;
   /** Owners and admins only. Presentation; the server gates the action independently. */
   canManageOrg?: boolean;
+  /** Opens the file picker in place — the Documents tab rail is only rendered
+   *  while the documents view is already active, so this must not rely on
+   *  switching views (that is what made the button a silent no-op before). */
   onUpload: () => void;
   onDismissUpload: (id: string) => void;
-  onDelete: (id: string) => void;
+  /** Delete a document. Resolves to a user-facing failure message (null on
+   *  success) so failures can surface as a toast here instead of the shared
+   *  page-level error banner. */
+  onDelete: (id: string) => Promise<string | null> | string | null;
   onReprocess: (id: string) => void;
   onApprove: (id: string) => void;
   onReject: (id: string) => void;
@@ -60,6 +67,8 @@ export function DocumentLibrary({
 }) {
   const [section, setSection] = useState<Section>("company");
   const [pendingDelete, setPendingDelete] = useState<DocumentSummary | null>(null);
+  /** Failure of the last delete attempt, surfaced as a toast near the rail. */
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const { company, mine, pending } = useMemo(
     () => ({
@@ -78,6 +87,16 @@ export function DocumentLibrary({
   const activeUploads = uploads.filter(
     (upload) => upload.phase !== "ready" || !upload.documentId,
   );
+
+  /** Delete through the hook. `onDelete` resolves to a user-facing failure
+   * message (or null on success) instead of feeding the shared error channel —
+   * that channel renders as a banner inside the chat transcript, far from this
+   * rail, so a failed delete read as a dead button. Failures surface here as a
+   * toast instead. */
+  const handleDelete = async (row: DocumentSummary) => {
+    const failure = await onDelete(row.id);
+    if (failure) setDeleteError(failure);
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -192,11 +211,15 @@ export function DocumentLibrary({
         }
         isBusy={pendingDelete ? deletingIds?.has(pendingDelete.id) : false}
         onConfirm={() => {
-          if (pendingDelete) onDelete(pendingDelete.id);
+          if (pendingDelete) void handleDelete(pendingDelete);
           setPendingDelete(null);
         }}
         onCancel={() => setPendingDelete(null)}
       />
+
+      {deleteError && (
+        <Toast message={deleteError} onDismiss={() => setDeleteError(null)} />
+      )}
     </div>
   );
 }

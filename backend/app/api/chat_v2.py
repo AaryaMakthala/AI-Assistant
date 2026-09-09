@@ -29,7 +29,9 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -69,6 +71,223 @@ REFUSAL_NOT_RELEVANT = refusal_message(ResponseReason.NOT_RELEVANT)
 REFUSAL_ANSWER = REFUSAL_NO_EVIDENCE
 
 
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _refine_intent_from_qu(
+    *,
+    qu_result: object,
+    original_query: str,
+) -> Intent:
+    """Refine a QU classification with regex-based deterministic checks.
+
+    QU uses a 5-category model (greeting, workspace_metadata, document_content,
+    off_topic, needs_clarification) that may misclassify certain query types:
+    - Identity questions ("who are you", "what is your name") may be classified
+      as greeting or off_topic instead of identity_assistant.
+    - Name statements ("my name is X", "im Aarya") may be classified as greeting
+      instead of identity_user.
+    - Capability requests ("write code", "create a file") may be classified as
+      off_topic, which is correct, but we need to distinguish them from general
+      knowledge questions for a more specific refusal.
+
+    This function applies regex-based deterministic checks on top of QU's
+    classification to refine the intent where the regex patterns are confident.
+    """
+    from app.retrieval.intent import classify_intent_regex
+    from app.retrieval.query_understanding import QueryUnderstanding
+    from app.retrieval.intent import IntentCategory as _IC
+
+    # Type the QU result properly.
+    if not isinstance(qu_result, QueryUnderstanding):
+        raise TypeError(f"Expected QueryUnderstanding, got {type(qu_result)}")
+
+    # Start with QU's classification.
+    intent = Intent(
+        category=qu_result.intent,
+        needs_clarification=(qu_result.intent == _IC.AMBIGUOUS),
+        reason=f"query_understanding conf={qu_result.confidence:.2f}",
+    )
+
+    # Use regex to refine specific cases.
+    regex_intent = classify_intent_regex(original_query)
+
+    # If regex is confident about identity, greeting, OR metadata sub-intent,
+    # use it to refine QU's classification.  QU's 5-category model correctly
+    # identifies workspace_metadata questions but does not populate the specific
+    # sub-intent (doc_count, doc_list, member_count, etc.) that the metadata
+    # handler needs — the regex classifier does.
+    #
+    # Priority order: identity > greeting > metadata-refined > QU's original.
+    #
+    # This handles:
+    #   "who are you" → identity_assistant (not greeting/off_topic)
+    #   "my name is X" → identity_user (not greeting)
+    #   "hi" → greeting (not document_content)
+    #   "how many files are there" → workspace_metadata + metadata_sub=doc_count
+    #   (even when QU classifies it as workspace_metadata, the regex populates
+    #    the sub-intent the handler needs)
+    if regex_intent.category in (
+        _IC.IDENTITY_ASSISTANT,
+        _IC.IDENTITY_USER,
+        _IC.GREETING,
+    ):
+        return regex_intent
+
+    # Metadata refinement: when QU classified the query as workspace_metadata or
+    # document_list and the regex classifier can resolve the specific sub-intent,
+    # use the regex's richer Intent (with metadata_sub populated).
+    if regex_intent.category in (
+        _IC.WORKSPACE_METADATA,
+        _IC.DOCUMENT_LIST,
+    ) and regex_intent.metadata_sub is not None:
+        # Use the regex's Intent which has the specific sub-intent set.
+        # Build a fresh Intent that merges the regex's sub-intent with QU's
+        # confidence for traceability (the regex Intent is frozen).
+        return Intent(
+            category=regex_intent.category,
+            metadata_sub=regex_intent.metadata_sub,
+            member_status=regex_intent.member_status,
+            member_role=regex_intent.member_role,
+            skip_rewrite=regex_intent.skip_rewrite,
+            reason=f"query_understanding conf={qu_result.confidence:.2f} + regex:{regex_intent.reason}",
+        )
+
+    # --- ISSUE 2 fallback: typo-tolerant metadata sub-intent inference ---
+    # When QU classified the query as workspace_metadata or DOCUMENT_LIST
+    # but the regex couldn't resolve the specific sub-intent (due to typos,
+    # unusual phrasing, etc.), try to infer the sub-intent from the corrected
+    # query.  This avoids sending clearly-metadata queries through the
+    # retrieval + LLM pipeline when we have enough signal to answer from DB.
+    if qu_result.intent in (_IC.WORKSPACE_METADATA, _IC.DOCUMENT_LIST):
+        inferred_sub = _infer_metadata_sub_from_query(qu_result.corrected_query)
+        if inferred_sub is not None:
+            from app.retrieval.intent import MetadataSubIntent as _MSI
+            return Intent(
+                category=qu_result.intent,
+                metadata_sub=inferred_sub,
+                skip_rewrite=True,
+                reason=(
+                    f"query_understanding conf={qu_result.confidence:.2f}"
+                    f" + inferred_sub:{inferred_sub.value}"
+                ),
+            )
+
+    return intent
+
+
+def _infer_metadata_sub_from_query(query: str) -> "MetadataSubIntent | None":
+    """Infer a metadata sub-intent from the corrected query string.
+
+    Used as a fallback when regex classification doesn't match (e.g. due to
+    typos) but QU correctly identified the query as workspace_metadata.
+    Returns a MetadataSubIntent if a confident match is found, None otherwise.
+    """
+    from app.retrieval.intent import MetadataSubIntent as _MSI
+    q = query.strip().lower()
+
+    # Company/workspace name
+    if re.search(r"\b(?:name|title)\b.*\b(?:workspace|company|org)\b", q) or \
+       re.search(r"\b(?:workspace|company|org)\b.*\b(?:name|title)\b", q):
+        return _MSI.COMPANY_NAME
+
+    # Member count/list — accept "member" or "members"
+    if re.search(r"\bmembers?\b", q):
+        if re.search(r"\b(?:how\s+\w*(?:many|manu|much)|count|number)\b", q):
+            return _MSI.MEMBER_COUNT
+        if re.search(r"\b(?:list|show|name|who)\b", q):
+            return _MSI.MEMBER_LIST
+        return _MSI.MEMBER_COUNT
+
+    # Role/permission
+    if re.search(r"\b(?:role|permission|access)\b", q):
+        return _MSI.ROLE
+
+    # Document page count — accept "page" or "pages"
+    if re.search(r"\bpages?\b", q):
+        return _MSI.DOC_PAGE_COUNT
+
+    # Document description/summary
+    if re.search(r"\b(?:description|summary|summarize|describe)\b", q):
+        return _MSI.DOC_DESCRIPTION
+
+    # Document list: questions about what docs exist, their names, etc.
+    # Accept singular and plural forms: document/documents, file/files, doc/docs
+    if re.search(r"\b(?:what|which|list|show|name)\b.*\b(?:documents?|files?|docs?)\b", q) or \
+       re.search(r"\b(?:documents?|files?|docs?)\b.*\b(?:present|presnt|exist|are|have|there)\b", q):
+        # Differentiate: "how many" → count, "what are" → list
+        # Typo-tolerant: "how manu" or "how meny" via how\s+\w*
+        if re.search(r"\b(?:how\s+\w*(?:many|manu|much)|count|number)\b", q):
+            return _MSI.DOC_COUNT
+        return _MSI.DOC_LIST
+
+    # Document count: "how many" (typo-tolerant) + docs/files context
+    if re.search(r"\b(?:how\s+\w*(?:many|manu|much)|count|number)\b", q) and \
+       re.search(r"\b(?:documents?|files?|docs?|uploaded|there)\b", q):
+        return _MSI.DOC_COUNT
+
+    # Generic "what are the docs" / "docs present" → doc_list
+    if re.search(r"\b(?:what|which)\b.*\b(?:documents?|files?|docs?)\b", q):
+        return _MSI.DOC_LIST
+
+    return None
+
+
+def _is_capability_request(question: str) -> bool:
+    """Detect requests for capabilities the assistant doesn't provide.
+
+    Catches: write code, create files, design posters, generate images,
+    build websites, make apps, etc. — things a document Q&A assistant
+    should refuse with a capability-specific message rather than the
+    generic out-of-scope response.
+    """
+    q = question.strip().lower()
+
+    # Code/programming requests
+    if re.search(
+        r"\b(?:write|create|make|build|generate|develop|code|program)\s+(?:me\s+)?"
+        r"(?:a\s+)?\w*\s*(?:code|program|script|function|game|app|software|application)\b",
+        q,
+    ):
+        return True
+
+    # File creation requests
+    if re.search(
+        r"\b(?:create|make|generate|produce|build|write)\s+(?:me\s+)?"
+        r"(?:a\s+)?\w*\s*(?:file|document|pdf|image|picture|graphic|poster|drawing|logo)\b",
+        q,
+    ):
+        return True
+
+    # Design/creative requests
+    if re.search(
+        r"\b(?:design|create|make|generate|create|draw|paint|illustrate|compose)\s+"
+        r"(?:me\s+)?(?:a\s+)?\w*\s*(?:poster|logo|image|graphic|design|banner|illustration|art|drawing)|"
+        r"\b(?:can|could|would|will)\s+you\s+(?:design|create|make|generate|build|write|develop)\b",
+        q,
+    ):
+        return True
+
+    # Website/app building requests
+    if re.search(
+        r"\b(?:build|create|make|generate|develop|design|code)\s+(?:me\s+)?"
+        r"(?:a\s+)?\w*\s*(?:website|web\s+site|page|landing|portfolio|blog|store)\b",
+        q,
+    ):
+        return True
+
+    # General "can you make/create/do X" where X is a creative deliverable
+    if re.search(
+        r"\b(?:can|could|would|will)\s+you\s+(?:make|create|generate|build|design|write|draw|compose|produce)\b",
+        q,
+    ):
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1143,10 +1362,13 @@ async def _stream_chat(
         workspace_id=workspace_id,
         history=history_dicts,
     )
-    intent = Intent(
-        category=qu_result.intent,
-        needs_clarification=(qu_result.intent == IntentCategory.AMBIGUOUS),
-        reason=f"query_understanding conf={qu_result.confidence:.2f}",
+    
+    # Build intent from QU result, but refine with regex for specific cases
+    # that QU's 5-category model may misclassify (identity questions, name
+    # statements) — these are deterministic and should never need an LLM.
+    intent = _refine_intent_from_qu(
+        qu_result=qu_result,
+        original_query=question,
     )
     effective_query = qu_result.corrected_query
     search_query_for_retrieval = qu_result.search_query
@@ -1200,11 +1422,18 @@ async def _stream_chat(
         )
 
     elif intent.category == IntentCategory.OUT_OF_SCOPE:
-        answer = refusal_message(ResponseReason.OUT_OF_SCOPE)
+        # Distinguish capability requests (write code, create files, design)
+        # from general knowledge questions for a more specific response.
+        if _is_capability_request(effective_query):
+            answer = refusal_message(ResponseReason.OUT_OF_SCOPE_CAPABILITY)
+        else:
+            answer = refusal_message(ResponseReason.OUT_OF_SCOPE)
         refusal_reason = ResponseReason.OUT_OF_SCOPE
         logger.info(
-            "intent=out_of_scope workspace={ws} retrieval_called=False",
+            "intent=out_of_scope workspace={ws} retrieval_called=False "
+            "capability_request={cap}",
             ws=workspace_id,
+            cap=_is_capability_request(effective_query),
         )
 
     elif intent.category == IntentCategory.IDENTITY_ASSISTANT:
@@ -1468,11 +1697,24 @@ async def _stream_chat(
     # Strip model-injected thinking/reasoning blocks (e.g. Qwen3 `` tags).
     full_text = _strip_think_tags(full_text)
 
-    if not full_text.strip():
+    if not full_text or not full_text.strip():
+        logger.warning(
+            "LLM returned empty answer after stripping think tags (streaming) "
+            "for user {user} in workspace {ws}: grounded={grounded} sources={n} "
+            "provider={provider}",
+            user=principal.user_id,
+            ws=workspace_id,
+            grounded=result.grounded,
+            n=len(result.chunks),
+            provider=completion.provider or llm.name,
+        )
         yield await _sse_event(
             "error",
             {
-                "detail": "The language model returned an empty response. Please try again.",
+                "detail": (
+                    "I found relevant documents, but I couldn't generate an answer "
+                    "from them. Please try asking the question again."
+                ),
                 "partial": False,
             },
         )
@@ -1616,10 +1858,37 @@ async def grounded_chat(
         workspace_id=workspace_id,
         history=history_dicts,
     )
-    intent = Intent(
-        category=qu_result.intent,
-        needs_clarification=(qu_result.intent == IntentCategory.AMBIGUOUS),
-        reason=f"query_understanding conf={qu_result.confidence:.2f}",
+
+    # QU degraded (LLM failure, empty response, or truncation): record the
+    # routing attribution that the normal intent= log lines would have produced,
+    # so every request has a traceable routing decision even when QU itself
+    # failed.  Only fire this for genuine QU failures — a successful
+    # workspace_metadata classification must not be mislabeled as degraded.
+    # Failure reasoning values: parse_failure, empty_response,
+    # unclosed_think_block, empty_query, llm_error:*
+    _QU_FAILURE_REASONS = {"parse_failure", "empty_response", "unclosed_think_block", "empty_query"}
+    _qu_failed = bool(
+        qu_result.reasoning
+        and qu_result.reasoning not in ("", "parse_success")
+        and (
+            qu_result.reasoning in _QU_FAILURE_REASONS
+            or qu_result.reasoning.startswith("llm_error:")
+        ),
+    )
+    if _qu_failed:
+        logger.info(
+            "intent=document_content qu_degraded=true reason={reason} "
+            "retrieval_called=True workspace={ws}",
+            reason=qu_result.reasoning[:80],
+            ws=workspace_id,
+        )
+
+    # Build intent from QU result, but refine with regex for specific cases
+    # that QU's 5-category model may misclassify (identity questions, name
+    # statements).
+    intent = _refine_intent_from_qu(
+        qu_result=qu_result,
+        original_query=question,
     )
     effective_query = qu_result.corrected_query
     search_query_for_retrieval = qu_result.search_query
@@ -1653,9 +1922,18 @@ async def grounded_chat(
         )
 
     if intent.category == IntentCategory.OUT_OF_SCOPE:
-        logger.info("intent=out_of_scope workspace={ws} retrieval_called=False", ws=workspace_id)
+        if _is_capability_request(effective_query):
+            answer = refusal_message(ResponseReason.OUT_OF_SCOPE_CAPABILITY)
+        else:
+            answer = refusal_message(ResponseReason.OUT_OF_SCOPE)
+        logger.info(
+            "intent=out_of_scope workspace={ws} retrieval_called=False "
+            "capability_request={cap}",
+            ws=workspace_id,
+            cap=_is_capability_request(effective_query),
+        )
         return GroundedChatResponse(
-            answer=refusal_message(ResponseReason.OUT_OF_SCOPE),
+            answer=answer,
             grounded=True, insufficient_evidence=False, sources=[],
         )
 
@@ -1839,20 +2117,37 @@ async def grounded_chat(
             detail="The language model is currently unavailable. Please try again.",
         ) from exc
 
-    if not completion.text.strip():
-        logger.error(
-            "Provider returned an empty completion for user {user} in workspace {ws}",
+    # Strip model-injected thinking/reasoning blocks (e.g. Qwen3 `` tags)
+    # BEFORE the empty-response check.  The raw completion may be non-empty
+    # (it contains a thinking block) but the stripped answer is empty — that
+    # must be treated as a generation failure, not passed to the frontend.
+    answer_text = _strip_think_tags(completion.text)
+
+    if not answer_text or not answer_text.strip():
+        logger.warning(
+            "LLM returned empty answer after stripping think tags "
+            "for user {user} in workspace {ws}: grounded={grounded} "
+            "insufficient_evidence={ie} sources={n} provider={provider}",
             user=principal.user_id,
             ws=workspace_id,
+            grounded=result.grounded,
+            ie=not result.grounded,
+            n=len(result.chunks),
+            provider=completion.provider or llm.name,
         )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The language model returned an empty response. Please try again.",
+        answer_text = (
+            "I found relevant documents, but I couldn't generate an answer "
+            "from them. Please try asking the question again."
+        )
+        sources = [_source(chunk) for chunk in result.chunks]
+        return GroundedChatResponse(
+            answer=answer_text,
+            grounded=True,
+            insufficient_evidence=False,
+            sources=sources,
         )
 
     sources = [_source(chunk) for chunk in result.chunks]
-    # Strip model-injected thinking/reasoning blocks (e.g. Qwen3 `` tags).
-    answer_text = _strip_think_tags(completion.text)
 
     # ISSUE E: filter the sources returned to only those the answer actually cited.
     # The LLM cites [1], [2], ... matching the prompt position (index+1) of

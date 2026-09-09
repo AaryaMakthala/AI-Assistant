@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { Mail, ArrowLeft, Loader2, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getSupabaseClient } from '@/lib/supabase/client';
+import { mapSupabaseAuthError } from '@/lib/supabase/auth-errors';
+import { Toast } from '@/components/toast';
 
 function CheckEmailContent() {
   const searchParams = useSearchParams();
@@ -14,6 +16,7 @@ function CheckEmailContent() {
   const [isResending, setIsResending] = useState(false);
   const [resendSuccess, setResendSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | undefined>();
 
   const handleResend = async () => {
     if (!email) return;
@@ -36,7 +39,12 @@ function CheckEmailContent() {
       });
 
       if (resendError) {
-        setError(resendError.message);
+        const [errorCode, userMessage] = mapSupabaseAuthError(resendError);
+        if (errorCode === 'EMAIL_LIMIT_EXCEEDED') {
+          setToastMessage(userMessage);
+        } else {
+          setError(userMessage);
+        }
         return;
       }
 
@@ -83,6 +91,11 @@ function CheckEmailContent() {
               Verification email sent successfully!
             </div>
           )}
+
+          <Toast
+            message={toastMessage ?? ''}
+            onDismiss={() => setToastMessage(undefined)}
+          />
 
           <div className="flex w-full flex-col space-y-4">
             {email && (

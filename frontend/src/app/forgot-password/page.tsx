@@ -5,12 +5,15 @@ import Link from 'next/link';
 import { ArrowLeft, Loader2, AlertCircle, CheckCircle2, KeyRound } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { getSupabaseClient } from '@/lib/supabase/client';
+import { mapSupabaseAuthError } from '@/lib/supabase/auth-errors';
+import { Toast } from '@/components/toast';
 
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | undefined>();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,10 +34,21 @@ export default function ForgotPasswordPage() {
         redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
       });
 
-      // Deliberately not surfaced: whether an address is registered is not something an
-      // unauthenticated visitor should be able to probe. The same confirmation shows either
-      // way, so a failure here is logged rather than shown.
-      if (resetError) console.warn('Password reset request failed', resetError);
+      if (resetError) {
+        const [errorCode, userMessage] = mapSupabaseAuthError(resetError);
+
+        // Email rate-limit / quota errors are real operational failures that
+        // the user must know about — they cannot resolve them by retrying.
+        // Show these honestly instead of a false "reset link sent".
+        if (errorCode === 'EMAIL_LIMIT_EXCEEDED' || errorCode === 'EMAIL_NOT_AUTHORIZED') {
+          setToastMessage(userMessage);
+          return;
+        }
+
+        // All other errors (including unknown email) are suppressed to avoid
+        // email enumeration: the same confirmation shows either way.
+        console.warn('Password reset request failed', resetError);
+      }
 
       setIsSuccess(true);
     } catch {
@@ -109,6 +123,11 @@ export default function ForgotPasswordPage() {
             </button>
           </form>
         )}
+
+        <Toast
+          message={toastMessage ?? ''}
+          onDismiss={() => setToastMessage(undefined)}
+        />
 
         <div className="flex justify-center">
           <Link 

@@ -19,7 +19,9 @@ import {
   listWorkspaces,
 } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
+import { mapSupabaseAuthError } from "@/lib/supabase/auth-errors";
 import { BrandWordmark } from "@/components/brand-wordmark";
+import { Toast } from "@/components/toast";
 import { cn } from "@/lib/utils";
 import "./login.css";
 
@@ -71,6 +73,7 @@ export default function LoginPage() {
   const [isUnverified, setIsUnverified] = useState(false);
   const [resendSuccess, setResendSuccess] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | undefined>();
 
   // Zero-workspace state: user authenticated but has no organizations.
   const [needsOrg, setNeedsOrg] = useState(false);
@@ -118,7 +121,12 @@ export default function LoginPage() {
         },
       });
       if (resendError) {
-        setError(resendError.message);
+        const [errorCode, userMessage] = mapSupabaseAuthError(resendError);
+        if (errorCode === "EMAIL_LIMIT_EXCEEDED") {
+          setToastMessage(userMessage);
+        } else {
+          setError(userMessage);
+        }
       } else {
         setResendSuccess(true);
       }
@@ -223,15 +231,11 @@ export default function LoginPage() {
       });
 
       if (failure) {
-        const msg = failure.message;
-        if (msg.includes("User already registered")) {
-          setError(
-            "An account with this email already exists. Try signing in instead.",
-          );
-        } else if (msg.includes("Password should be at least 6 characters")) {
-          setError("Password must be at least 6 characters long.");
+        const [errorCode, userMessage] = mapSupabaseAuthError(failure);
+        if (errorCode === "EMAIL_LIMIT_EXCEEDED") {
+          setToastMessage(userMessage);
         } else {
-          setError(msg);
+          setError(userMessage);
         }
         return;
       }
@@ -309,8 +313,8 @@ export default function LoginPage() {
             <>
               <div className="login-alert login-alert-success">
                 <p role="status">
-                  Organization created. We&apos;ve sent a verification email to
-                  your email address.
+                  Organization created. You can now continue to the
+                  application.
                 </p>
               </div>
               <button
@@ -557,6 +561,10 @@ export default function LoginPage() {
           </div>
         </div>
       </form>
+      <Toast
+        message={toastMessage ?? ""}
+        onDismiss={() => setToastMessage(undefined)}
+      />
     </LoginShell>
   );
 }
@@ -649,7 +657,7 @@ function LoginShell({
               <h1 className="login-headline">
                 {title.includes("Office Brain") ? (
                   <>
-                    Sign in to <span style={{ color: "#9CB88F" }}>Office Brain</span>
+                    Sign in to <span style={{ color: "#B8E6A0", textShadow: "0 2px 12px rgba(0, 0, 0, 0.35)" }}>Office Brain</span>
                   </>
                 ) : (
                   title

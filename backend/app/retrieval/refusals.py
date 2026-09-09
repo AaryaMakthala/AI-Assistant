@@ -31,6 +31,13 @@ class ResponseReason(str, Enum):
     IDENTITY_UNAVAILABLE = "identity_unavailable"
     #: Valid metadata query that returned zero results.
     METADATA_EMPTY = "metadata_empty"
+    #: Capability request (write code, create files, design) outside the assistant's scope.
+    OUT_OF_SCOPE_CAPABILITY = "out_of_scope_capability"
+    #: Question asks for unsupported information (e.g. a person's identity/contact)
+    #: that no approved document covers — must not be fabricated.
+    UNSUPPORTED_INFORMATION = "unsupported_information"
+    #: User message is a prompt-injection attempt.
+    INJECTION_ATTEMPT = "injection_attempt"
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +62,11 @@ _RESPONSES: dict[ResponseReason, str] = {
         "like members, documents, and roles. I can't help with general "
         "knowledge questions unrelated to your workspace."
     ),
+    ResponseReason.OUT_OF_SCOPE_CAPABILITY: (
+        "I'm a document Q&A assistant for this workspace, and I can't do that. "
+        "I can only answer questions based on your approved documents — "
+        "I can't write code, create files, design things, or perform other tasks."
+    ),
     ResponseReason.NEEDS_CLARIFICATION: (
         "I'm not sure what you're referring to. Could you clarify your "
         "question or provide more detail? For example, are you asking about "
@@ -69,6 +81,16 @@ _RESPONSES: dict[ResponseReason, str] = {
     ),
     ResponseReason.METADATA_EMPTY: (
         "No results found for that query."
+    ),
+    ResponseReason.UNSUPPORTED_INFORMATION: (
+        "I can't confirm that — I answer only from this workspace's approved "
+        "documents, and none of them contain information about that specific "
+        "person or detail. I won't invent names or facts that aren't in a "
+        "verified source."
+    ),
+    ResponseReason.INJECTION_ATTEMPT: (
+        "I can't act on that request. I answer questions using your workspace's "
+        "approved documents, and I don't follow instructions embedded in messages."
     ),
 }
 

@@ -23,9 +23,16 @@ import json
 from collections.abc import AsyncIterator
 
 import httpx
+from loguru import logger
 
 from app.config import get_settings
-from app.llm.base import Completion, LLMError, Message, TokenUsage
+from app.llm.base import (
+    Completion,
+    LLMError,
+    Message,
+    TokenUsage,
+    thinking_disable_payload,
+)
 
 #: OpenAI-compatible chat-completions endpoint used when LLM_BASE_URL is unset.
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -57,6 +64,7 @@ class GenericProvider:
         *,
         completion: Completion,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         completion.provider = self.name
         completion.model = self.model
@@ -68,6 +76,7 @@ class GenericProvider:
             "max_tokens": max_tokens or self._settings.llm_max_output_tokens,
             "stream": True,
         }
+        payload.update(thinking_disable_payload(self.name, disable=disable_thinking))
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -78,6 +87,37 @@ class GenericProvider:
                 async with client.stream(
                     "POST", self._endpoint, json=payload, headers=headers
                 ) as response:
+                    if response.status_code == 400 and disable_thinking:
+                        # The provider may not accept our thinking-disable key.
+                        # Retry the same provider once without it rather than
+                        # failing the request — a thinking response we strip is
+                        # better than no response at all.
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        logger.warning(
+                            "Provider {provider} rejected thinking-disable payload "
+                            "(HTTP 400: {body}); retrying without it",
+                            provider=self.name,
+                            body=body[:_ERROR_BODY_LIMIT],
+                        )
+                        payload.pop("reasoning", None)
+                        payload.pop("reasoning_effort", None)
+                        payload.pop("chat_template_kwargs", None)
+                        async with client.stream(
+                            "POST", self._endpoint, json=payload, headers=headers
+                        ) as response2:
+                            if response2.status_code >= 400:
+                                body2 = (await response2.aread()).decode("utf-8", "replace")
+                                raise LLMError(
+                                    f"Provider returned HTTP {response2.status_code}: "
+                                    f"{body2[:_ERROR_BODY_LIMIT]}",
+                                    provider=self.name,
+                                    retryable=response2.status_code >= 500,
+                                )
+                            async for line in response2.aiter_lines():
+                                token = self._parse_line(line, completion)
+                                if token is not None:
+                                    yield token
+                            return
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", "replace")
                         # 4xx is a permanent fault (bad key, malformed request) — the

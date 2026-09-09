@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.llm.utils import strip_think_tags
+from app.llm.utils import detect_unclosed_think_block, strip_think_tags
 from app.retrieval.intent import IntentCategory
 
 
@@ -122,6 +122,9 @@ def _extract_first_json(text: str) -> str | None:
     Handles trailing garbage, nested braces, and escaped quotes — unlike a
     greedy ``{.+}`` regex which captures everything from the first ``{`` to
     the *last* ``}`` in the string (breaking when the model appends text).
+
+    Also handles the case where text before the JSON is not a markdown fence
+    (e.g. model returns "Here is the JSON: {...}" or just appends text after).
     """
     start = text.find('{')
     if start == -1:
@@ -148,6 +151,9 @@ def _extract_first_json(text: str) -> str | None:
             depth -= 1
             if depth == 0:
                 return text[start:i + 1]
+    # If we reach here, we found an opening brace but never closed it.
+    # This can happen if the model's output was truncated (max_tokens cutoff)
+    # mid-JSON. Return None so the caller can log and retry.
     return None
 
 
@@ -185,9 +191,18 @@ def _parse_query_understanding(
                 confidence=max(0.0, min(1.0, confidence)),
                 reasoning=reasoning,
             )
+
+        # _extract_first_json returned None — log what we actually got.
+        logger.warning(
+            "Query understanding: _extract_first_json returned None. "
+            "Raw cleaned content (first 500 chars): {raw}",
+            raw=cleaned[:500],
+        )
     except (json.JSONDecodeError, ValueError, KeyError) as exc:
         logger.warning(
-            "Could not parse query understanding response: {error}",
+            "Query understanding: JSON parse failed. "
+            "Raw content (first 500 chars): {raw} error={error}",
+            raw=response_text[:500],
             error=str(exc)[:200],
         )
 
@@ -311,6 +326,7 @@ async def understand_query(
         async for _token in provider.stream(
             llm_messages, completion=completion,
             max_tokens=settings.qu_max_output_tokens,
+            disable_thinking=True,
         ):
             pass
 
@@ -318,23 +334,50 @@ async def understand_query(
         # similar models wrap their output in <think> blocks.
         response_text = strip_think_tags(completion.text)
         if not response_text:
-            logger.warning(
-                "Query understanding returned empty response, degrading",
-            )
-            return QueryUnderstanding(
-                corrected_query=text,
-                search_query=text,
-                intent=IntentCategory.DOCUMENT_CONTENT,
-                confidence=0.0,
-                reasoning="empty_response",
-            )
+            # Log the raw completion text BEFORE stripping for debugging.
+            raw_preview = completion.text[:500] if completion.text else "(empty)"
+            if detect_unclosed_think_block(completion.text or ""):
+                # Distinct failure mode: the model was still reasoning when the
+                # token budget ran out — its JSON answer was never emitted. This
+                # is a truncation, not an empty response, and must not be
+                # counted the same way in metrics.  Fall through to the retry
+                # path below: the second attempt may land on a different
+                # provider and produce a complete response.
+                logger.warning(
+                    "Query understanding truncated mid-thinking (unclosed think "
+                    "block, max_tokens={max_tokens}). Raw completion text "
+                    "(first 500 chars): {raw}",
+                    max_tokens=settings.qu_max_output_tokens,
+                    raw=raw_preview,
+                )
+                result = QueryUnderstanding(
+                    corrected_query=text,
+                    search_query=text,
+                    intent=IntentCategory.DOCUMENT_CONTENT,
+                    confidence=0.0,
+                    reasoning="unclosed_think_block",
+                )
+            else:
+                logger.warning(
+                    "Query understanding returned empty after strip_think_tags. "
+                    "Raw completion text (first 500 chars): {raw}",
+                    raw=raw_preview,
+                )
+                return QueryUnderstanding(
+                    corrected_query=text,
+                    search_query=text,
+                    intent=IntentCategory.DOCUMENT_CONTENT,
+                    confidence=0.0,
+                    reasoning="empty_response",
+                )
+        else:
+            result = _parse_query_understanding(response_text, text)
 
-        result = _parse_query_understanding(response_text, text)
-
-        # If parsing failed (model returned unparseable text), retry once.
-        # Models intermittently return plain text or malformed JSON; a second
-        # attempt often succeeds because the failure is non-deterministic.
-        if result.reasoning == "parse_failure":
+        # If parsing failed (model returned unparseable text) or the response
+        # was truncated mid-thinking, retry once.  A second attempt often
+        # succeeds because the failure is non-deterministic, and the rotating
+        # provider may pick a different provider on the retry.
+        if result.reasoning in ("parse_failure", "unclosed_think_block"):
             logger.info(
                 "Query understanding parse failed, retrying (attempt 2/2)",
             )
@@ -342,6 +385,7 @@ async def understand_query(
             async for _token in provider.stream(
                 llm_messages, completion=completion2,
                 max_tokens=settings.qu_max_output_tokens,
+                disable_thinking=True,
             ):
                 pass
             response_text2 = strip_think_tags(completion2.text)
@@ -357,7 +401,15 @@ async def understand_query(
                     )
                     return result2
                 logger.warning(
-                    "Query understanding retry also failed to parse",
+                    "Query understanding retry also failed to parse. "
+                    "Raw content (first 500 chars): {raw}",
+                    raw=response_text2[:500],
+                )
+            else:
+                logger.warning(
+                    "Query understanding retry returned empty after strip_think_tags. "
+                    "Raw completion (first 500 chars): {raw}",
+                    raw=completion2.text[:500] if completion2.text else "(empty)",
                 )
 
         logger.info(

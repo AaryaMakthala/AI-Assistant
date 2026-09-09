@@ -127,6 +127,29 @@ class TestRefineIntentFromQuTypoMetadata:
             reasoning="test",
         )
 
+    def test_qu_clarification_overridden_by_doc_explain(self) -> None:
+        """'explain any one documetn' → QU says needs_clarification, but the
+        DOC_DESCRIPTION regex resolves it — no clarification prompt should be returned."""
+        qu = self._make_qu(IntentCategory.AMBIGUOUS, "explain any one documetn", confidence=0.8)
+        result = _refine_intent_from_qu(qu_result=qu, original_query="explain any one documetn")
+        assert result.category == IntentCategory.WORKSPACE_METADATA
+        assert result.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+        assert result.needs_clarification is False
+        assert result.skip_rewrite is True
+
+    def test_qu_document_content_overridden_by_doc_explain(self) -> None:
+        """QU classifies the typo'd explain-document query as document_content —
+        the regex DOC_DESCRIPTION route wins so it reaches the metadata handler."""
+        qu = self._make_qu(
+            IntentCategory.DOCUMENT_CONTENT, "explain any one documetn", confidence=0.9
+        )
+        result = _refine_intent_from_qu(
+            qu_result=qu, original_query="explain any one documetn"
+        )
+        assert result.category == IntentCategory.WORKSPACE_METADATA
+        assert result.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+        assert "doc_description_explain" in result.reason
+
     @patch("app.retrieval.intent.classify_intent_regex")
     def test_typo_doc_count_infers_sub_intent(self, mock_regex: MagicMock) -> None:
         """'how manu files hee=re' → QU says workspace_metadata, regex returns

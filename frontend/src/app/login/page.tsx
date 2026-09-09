@@ -539,7 +539,7 @@ export default function LoginPage() {
             <p className="login-demo-error">{demoError}</p>
           )}
 
-          <p className="text-center text-xs text-white/50">
+          <p className="text-center text-xs" style={{ color: "#F2F5EF" }}>
             A pre-loaded demo workspace with sample company documents. No
             account needed.
           </p>
@@ -624,8 +624,8 @@ function LoginShell({
       <header className="login-nav">
         <BrandWordmark
           withMark
-          markClassName="size-[34px] rounded-[10px]"
           className="login-brand"
+          textClassName="font-sans text-[11px] font-semibold uppercase text-[#9CB88F] tracking-[0.08em]"
         />
         {onDemo && (
           <button
@@ -645,7 +645,17 @@ function LoginShell({
       <main className="login-main">
         {(title || subtitle) && (
           <div className="login-hero">
-            {title && <h1 className="login-headline">{title}</h1>}
+            {title && (
+              <h1 className="login-headline">
+                {title.includes("Office Brain") ? (
+                  <>
+                    Sign in to <span style={{ color: "#9CB88F" }}>Office Brain</span>
+                  </>
+                ) : (
+                  title
+                )}
+              </h1>
+            )}
             {subtitle && <p className="login-subtext">{subtitle}</p>}
           </div>
         )}

@@ -507,6 +507,38 @@ _DOC_SPECIFIC_DESCRIPTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Verb-phrased document description: "explain any one documetn", "describe each file".
+# Requires an explicit document noun at the end so content questions ("explain the
+# vacation policy") and bare "explain" stay on the document-content path.
+_DOC_EXPLAIN_PATTERN = re.compile(
+    r"(?:can\s+you\s+)?(?:explain|describe)\s+"
+    r"(?:(?:each|every|all|any|some|one|the|this|that|my|your)\s+)*"
+    r"(?:uploaded\s+)?(?:own\s+)?"
+    r"(?:documentation|documents?|doucuments?|documetns?|documants?|files?|docs?)\s*$",
+    re.IGNORECASE,
+)
+
+# "tell about" + number + document nouns: "tell about any five files".
+# Requires an explicit document/file noun so bare "tell about" stays on
+# the content path.  Number can be a digit or a word (typo-tolerant).
+_TELL_ABOUT_NUM_PATTERN = re.compile(
+    r"(?:tell\s+(?:me\s+)?about\s+)"
+    r"(?:(?:any|some|the|a|one|\d+)\s+)?"
+    r"(?:\d+|"  # digit
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|"  # word numbers
+    r"f(?:ive|iv|ie|uve)|"  # five typos: fiv, fie, fuve
+    r"fou?r|for|"  # four/for typos
+    r"t(?:wo|hree|hre)|"  # two/three typos
+    r"s(?:ix|even|ix)|"  # six/seven typos
+    r"e(?:ight|ight)|"  # eight typos
+    r"n(?:ine|in)|"  # nine/nin typos
+    r"ten|fifteen|twenty)"  # ten/fifteen/twenty
+    r")\s+"
+    r"(?:uploaded\s+)?(?:own\s+)?"
+    r"(?:documentation|documents?|doucuments?|documetns?|documants?|files?|docs?)\s*$",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Text normalization for classification
 # ---------------------------------------------------------------------------
@@ -721,6 +753,23 @@ def classify_intent_regex(query: str) -> Intent:
         r"|(?:describe\s+(?:that|it|them|this))\b",
         re.IGNORECASE,
     )
+
+    # Describe-like typos + anaphoric pronouns → DOC_DESCRIPTION directly.
+    # Catches "descrivbe them", "descibe it", etc. without going through
+    # the LLM router, since the LLM may not resolve the typo.
+    _DOC_DESCRIBE_ANAPHORIC = re.compile(
+        r"(?:desc(?:ribe|ibe|rivbe|ription|rption|ipte?))\s+(?:that|it|them|this)\b",
+        re.IGNORECASE,
+    )
+    # Describe typos + anaphoric pronouns → DOC_DESCRIPTION directly.
+    if _DOC_DESCRIBE_ANAPHORIC.search(q) or _DOC_DESCRIBE_ANAPHORIC.search(q_normalized):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
+            skip_rewrite=True,
+            reason="doc_description_anaphoric_typo",
+        )
+
     if _ANAPHORIC_PATTERN.search(q) or _ANAPHORIC_PATTERN.search(q_normalized):
         return Intent(
             category=IntentCategory.AMBIGUOUS,
@@ -810,6 +859,16 @@ def classify_intent_regex(query: str) -> Intent:
     member_intent = _classify_member_metadata(q) or _classify_member_metadata(q_normalized)
     if member_intent is not None:
         return member_intent
+
+    # --- 8b. "tell about" + number + document nouns (before _classify_document_metadata
+    # because _TOPIC_QUALIFIERS blocks queries containing "about").
+    if _TELL_ABOUT_NUM_PATTERN.search(q) or _TELL_ABOUT_NUM_PATTERN.search(q_normalized):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
+            skip_rewrite=True,
+            reason="doc_description_tell_about",
+        )
 
     # --- 9. Metadata: document list/count queries (exact pattern match) ---
     doc_intent = _classify_document_metadata(q) or _classify_document_metadata(q_normalized)
@@ -1277,6 +1336,24 @@ def _classify_document_metadata(q: str) -> Intent | None:
             metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
             skip_rewrite=True,
             reason="doc_description",
+        )
+
+    # Verb-phrased document description: "explain any one documetn".
+    if _DOC_EXPLAIN_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
+            skip_rewrite=True,
+            reason="doc_description_explain",
+        )
+
+    # "tell about" + number + document nouns: "tell about any five files".
+    if _TELL_ABOUT_NUM_PATTERN.search(q):
+        return Intent(
+            category=IntentCategory.WORKSPACE_METADATA,
+            metadata_sub=MetadataSubIntent.DOC_DESCRIPTION,
+            skip_rewrite=True,
+            reason="doc_description_tell_about",
         )
 
     # Specific document description: "summary of [docname]".

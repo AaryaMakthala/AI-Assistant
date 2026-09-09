@@ -29,7 +29,7 @@ from collections.abc import AsyncIterator
 from loguru import logger
 
 from app.config import get_settings
-from app.llm.base import Completion, LLMError, Message
+from app.llm.base import Completion, LLMError, Message, thinking_disable_payload
 
 
 class _ProviderConfig:
@@ -94,6 +94,7 @@ class FallbackChainProvider:
         *,
         completion: Completion,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         """Stream from the first available provider, falling back on transient errors.
 
@@ -137,6 +138,7 @@ class FallbackChainProvider:
                 async for token in self._stream_single(
                     provider, messages, completion, remaining,
                     max_tokens=max_tokens,
+                    disable_thinking=disable_thinking,
                 ):
                     content_emitted = True
                     yield token
@@ -210,6 +212,7 @@ class FallbackChainProvider:
         timeout: float,
         *,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         """Stream from a single provider, enforcing a per-provider timeout."""
         import httpx
@@ -223,6 +226,7 @@ class FallbackChainProvider:
             "max_tokens": max_tokens or get_settings().llm_max_output_tokens,
             "stream": True,
         }
+        payload.update(thinking_disable_payload(provider.name, disable=disable_thinking))
         headers = {
             "Authorization": f"Bearer {provider.api_key}",
             "Content-Type": "application/json",
@@ -239,6 +243,37 @@ class FallbackChainProvider:
                 async with client.stream(
                     "POST", endpoint, json=payload, headers=headers
                 ) as response:
+                    if response.status_code == 400 and disable_thinking:
+                        # The provider may not accept our thinking-disable key.
+                        # Retry the same provider once without it rather than
+                        # failing over — a thinking response we strip is better
+                        # than no response at all.
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        logger.warning(
+                            "Provider {provider} rejected thinking-disable payload "
+                            "(HTTP 400: {body}); retrying without it",
+                            provider=provider.name,
+                            body=body[:error_body_limit],
+                        )
+                        payload.pop("reasoning", None)
+                        payload.pop("reasoning_effort", None)
+                        payload.pop("chat_template_kwargs", None)
+                        async with client.stream(
+                            "POST", endpoint, json=payload, headers=headers
+                        ) as response2:
+                            if response2.status_code >= 400:
+                                body2 = (await response2.aread()).decode("utf-8", "replace")
+                                raise LLMError(
+                                    f"Provider returned HTTP {response2.status_code}: "
+                                    f"{body2[:error_body_limit]}",
+                                    provider=provider.name,
+                                    retryable=response2.status_code >= 500,
+                                )
+                            async for line in response2.aiter_lines():
+                                token = self._parse_line(line, completion)
+                                if token is not None:
+                                    yield token
+                            return
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", "replace")
                         # Failover policy: the chain exists so a single provider's
@@ -382,6 +417,7 @@ class RotatingProvider:
         *,
         completion: Completion,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         """Stream from a rotating provider, falling back on transient errors.
 
@@ -431,6 +467,7 @@ class RotatingProvider:
                 async for token in self._stream_single(
                     provider, messages, completion, remaining,
                     max_tokens=max_tokens,
+                    disable_thinking=disable_thinking,
                 ):
                     content_emitted = True
                     yield token
@@ -495,6 +532,7 @@ class RotatingProvider:
         timeout: float,
         *,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         """Stream from a single provider, enforcing a per-provider timeout."""
         import httpx
@@ -507,6 +545,7 @@ class RotatingProvider:
             "max_tokens": max_tokens or get_settings().llm_max_output_tokens,
             "stream": True,
         }
+        payload.update(thinking_disable_payload(provider.name, disable=disable_thinking))
         headers = {
             "Authorization": f"Bearer {provider.api_key}",
             "Content-Type": "application/json",
@@ -523,6 +562,37 @@ class RotatingProvider:
                 async with client.stream(
                     "POST", endpoint, json=payload, headers=headers
                 ) as response:
+                    if response.status_code == 400 and disable_thinking:
+                        # The provider may not accept our thinking-disable key.
+                        # Retry the same provider once without it rather than
+                        # failing over — a thinking response we strip is better
+                        # than no response at all.
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        logger.warning(
+                            "Provider {provider} rejected thinking-disable payload "
+                            "(HTTP 400: {body}); retrying without it",
+                            provider=provider.name,
+                            body=body[:error_body_limit],
+                        )
+                        payload.pop("reasoning", None)
+                        payload.pop("reasoning_effort", None)
+                        payload.pop("chat_template_kwargs", None)
+                        async with client.stream(
+                            "POST", endpoint, json=payload, headers=headers
+                        ) as response2:
+                            if response2.status_code >= 400:
+                                body2 = (await response2.aread()).decode("utf-8", "replace")
+                                raise LLMError(
+                                    f"Provider returned HTTP {response2.status_code}: "
+                                    f"{body2[:error_body_limit]}",
+                                    provider=provider.name,
+                                    retryable=response2.status_code >= 500,
+                                )
+                            async for line in response2.aiter_lines():
+                                token = self._parse_line(line, completion)
+                                if token is not None:
+                                    yield token
+                            return
                     if response.status_code >= 400:
                         body = (await response.aread()).decode("utf-8", "replace")
                         retryable = response.status_code != 400

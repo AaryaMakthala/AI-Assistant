@@ -75,6 +75,131 @@ class TestDescriptionRouting:
         assert intent.category == IntentCategory.DOCUMENT_CONTENT
         assert intent.metadata_sub != MetadataSubIntent.DOC_DESCRIPTION
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "explain any one document",
+            "explain any one documetn",
+            "explain the documents",
+            "explain any file",
+            "describe each document",
+            "can you explain every document",
+        ],
+    )
+    def test_explain_document_routes_to_doc_description(self, query: str) -> None:
+        """'explain/describe <doc-noun>' routes to DOC_DESCRIPTION (typo-tolerant)."""
+        intent = classify_intent_regex(query)
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
+        assert intent.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+        assert intent.reason == "doc_description_explain"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "explain the vacation policy",
+            "explain the Kanban section",
+            "explain",
+            "explain everything about workforce",
+            "describe what the handbook says",
+        ],
+    )
+    def test_explain_content_question_stays_document_content(self, query: str) -> None:
+        """Content questions must NOT be hijacked by the doc-noun explain pattern."""
+        intent = classify_intent_regex(query)
+        assert intent.category == IntentCategory.DOCUMENT_CONTENT
+        assert intent.metadata_sub != MetadataSubIntent.DOC_DESCRIPTION
+
+    def test_explain_anaphoric_stays_ambiguous(self) -> None:
+        """'explain that' remains the anaphoric/ambiguous path, not metadata."""
+        intent = classify_intent_regex("explain that")
+        assert intent.category == IntentCategory.AMBIGUOUS
+
+    def test_pick_any_five_not_doc_description(self) -> None:
+        """'pick any five' must not become a metadata description request."""
+        intent = classify_intent_regex("pick any five")
+        assert intent.metadata_sub != MetadataSubIntent.DOC_DESCRIPTION
+
+
+class TestAnaphoricTypoDescription:
+    """Verify describe typos + anaphoric pronouns route to DOC_DESCRIPTION."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "descrivbe them",
+            "descibe it",
+            "descrption that",
+            "describe this",
+        ],
+    )
+    def test_describe_typo_anaphoric_routes_to_doc_description(self, query: str) -> None:
+        intent = classify_intent_regex(query)
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
+        assert intent.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+        assert "anaphoric_typo" in intent.reason
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "explain that",
+            "how about it",
+            "what about them",
+        ],
+    )
+    def test_other_anaphoric_stays_ambiguous(self, query: str) -> None:
+        """Non-describe anaphoric references remain AMBIGUOUS (LLM disambiguates)."""
+        intent = classify_intent_regex(query)
+        assert intent.category == IntentCategory.AMBIGUOUS
+        assert intent.metadata_sub is None
+
+
+class TestTellAboutNumberFiles:
+    """Verify 'tell about' + number + document nouns routes to DOC_DESCRIPTION."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "tell about any five files",
+            "tell about 5 files",
+            "tell me about any three documents",
+            "tell about the seven docs",
+            "tell about some two files",
+        ],
+    )
+    def test_tell_about_number_files_routes_to_doc_description(self, query: str) -> None:
+        intent = classify_intent_regex(query)
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
+        assert intent.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+        assert "tell_about" in intent.reason
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "tell about any fuve files",
+            "tell about fiv docs",
+            "tell about fie files",
+        ],
+    )
+    def test_tell_about_typo_number_routes_to_doc_description(self, query: str) -> None:
+        """Typo-tolerant number words should still route to DOC_DESCRIPTION."""
+        intent = classify_intent_regex(query)
+        assert intent.category == IntentCategory.WORKSPACE_METADATA
+        assert intent.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "tell about",
+            "tell me more",
+            "tell me about the vacation policy",
+            "tell about any five",
+        ],
+    )
+    def test_tell_about_no_hijack(self, query: str) -> None:
+        """Bare 'tell about' or content-qualified 'tell about' must NOT become DOC_DESCRIPTION."""
+        intent = classify_intent_regex(query)
+        assert intent.metadata_sub != MetadataSubIntent.DOC_DESCRIPTION
+
 
 class TestCompanyNameRouting:
     """Verify company/workspace name queries route to COMPANY_NAME."""

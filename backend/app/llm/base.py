@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 Role = Literal["system", "user", "assistant"]
 
@@ -48,6 +48,39 @@ class Completion:
     provider: str = ""
 
 
+def thinking_disable_payload(name: str | None, *, disable: bool) -> dict[str, Any]:
+    """Map a generic "disable thinking" request onto provider-specific payload keys.
+
+    Every provider in the configured rotation (Groq, OpenRouter, Gemini,
+    NVIDIA NIM) serves a reasoning-capable model, but each disables reasoning
+    differently.  This keeps the mapping in one place so callers (e.g. the
+    Query Understanding stage) can request a fast, non-thinking response
+    without knowing which provider will actually serve the call.
+
+    Returns an empty dict when ``disable`` is False or the provider is
+    unknown — callers must then tolerate a thinking response.
+    """
+    if not disable:
+        return {}
+    name_l = (name or "").lower()
+    if "openrouter" in name_l:
+        # OpenRouter: documented ``reasoning`` block; also disables Gemini
+        # thinking on OpenRouter-hosted models.
+        return {"reasoning": {"enabled": False}}
+    if "groq" in name_l:
+        # Groq docs (Qwen3 family): ``reasoning_effort: none`` disables
+        # reasoning — the model emits no reasoning tokens.
+        return {"reasoning_effort": "none"}
+    if "gemini" in name_l:
+        # Gemini native OpenAI-compat endpoint: ``reasoning_effort: none``
+        # turns thinking off for thinking-enabled models.
+        return {"reasoning_effort": "none"}
+    if "nvidia" in name_l:
+        # NVIDIA NIM / vLLM convention for Qwen3-style chat templates.
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    return {}
+
+
 class LLMError(RuntimeError):
     """A provider call failed.
 
@@ -81,6 +114,7 @@ class LLMProvider(Protocol):
         *,
         completion: Completion,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
         """Yield response text incrementally, recording usage into `completion`.
 
@@ -89,6 +123,14 @@ class LLMProvider(Protocol):
         max_tokens:
             Override the default max output tokens for this call.  When None,
             the provider's configured default is used.
+        disable_thinking:
+            Request a non-thinking response (reasoning disabled at the API
+            level).  Used by the Query Understanding stage, which needs fast
+            structured JSON output and has no use for reasoning tokens.
+            Implementations translate this into the provider-specific payload
+            key (``reasoning_effort`` on Groq, ``reasoning`` on OpenRouter,
+            ``chat_template_kwargs`` on NVIDIA NIM).  Providers that cannot
+            honor it must fall back to a normal call rather than fail.
         """
         ...
 
@@ -108,6 +150,7 @@ class LLMRouterProtocol(Protocol):
         *,
         completion: Completion,
         max_tokens: int | None = None,
+        disable_thinking: bool = False,
     ) -> AsyncIterator[str]: ...
 
 
@@ -119,4 +162,5 @@ __all__ = [
     "Message",
     "Role",
     "TokenUsage",
+    "thinking_disable_payload",
 ]

@@ -89,6 +89,7 @@
   position: absolute;
   height: auto;
   will-change: transform;
+  filter: blur(3px);
 }
 
 /* Each blob's PNG canvas has wide transparent margins (the opaque shape is
@@ -223,6 +224,12 @@
   gap: 12px;
 }
 
+/* Wordmark text color: sage green, tighter tracking for logotype feel. */
+.login-brand .wordmark-text {
+  color: #9CB88F;
+  letter-spacing: 0.08em;
+}
+
 .login-nav-demo {
   height: 40px;
   padding: 0 20px;
@@ -291,7 +298,7 @@
 .login-subtext {
   margin: 0;
   max-width: 380px;
-  color: rgba(201, 212, 198, 0.8);
+  color: #F2F5EF;
   font-size: 16px;
   line-height: 1.6;
   animation: login-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
@@ -317,12 +324,14 @@
   /* Slightly stronger fill (0.28) so the card reads as a clean, distinct
    * surface against the photo — the frosted backdrop no longer lets the
    * photo's bright areas dominate the card's silhouette. */
-  background: rgba(20, 40, 30, 0.28);
-  -webkit-backdrop-filter: blur(20px);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 28px;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+  background: linear-gradient(135deg, rgba(20, 51, 32, 0.65), rgba(13, 40, 24, 0.45));
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  backdrop-filter: blur(28px) saturate(140%);
+  border: 1px solid rgba(156, 184, 143, 0.22);
+  border-radius: 24px;
+  box-shadow:
+    0 8px 40px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
   animation: login-fade 600ms cubic-bezier(0.16, 1, 0.3, 1) 400ms both;
 }
 
@@ -387,10 +396,10 @@
   gap: 6px;
 }
 
-/* Sentence-case labels: quiet, muted, no all-caps tracking. */
+/* Sentence-case labels: clean white, no all-caps tracking. */
 .login-label {
   display: block;
-  color: rgba(255, 255, 255, 0.6);
+  color: #F2F5EF;
   font-size: 13px;
   font-weight: 500;
 }
@@ -401,10 +410,9 @@
   height: 44px;
   padding: 0 16px;
   background: rgba(255, 255, 255, 0.06);
-  /* More visible border so the fields read clearly as input boxes. */
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid rgba(156, 184, 143, 0.15);
   border-radius: 10px;
-  color: #ffffff;
+  color: #EAF0E6;
   font-family: inherit;
   font-size: 15px;
   transition: all 0.2s ease;
@@ -484,16 +492,18 @@
   pointer-events: none;
 }
 
-/* Primary: warm off-white fill, deep green text. Hover is a brightness lift
+/* Primary: green gradient, light text. Hover is a brightness lift
  * only — no translate, per the "card stays still" contract. */
 .login-btn-primary {
-  background: #f5f3ec;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #0c1410;
+  background: linear-gradient(135deg, #3B7A4F, #2A5C3A);
+  border: none;
+  color: #F2F5EF;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(59, 122, 79, 0.3);
 }
 
 .login-btn-primary:hover {
-  filter: brightness(1.04);
+  filter: brightness(1.1);
 }
 
 .login-btn-secondary {
@@ -507,7 +517,7 @@
 }
 
 .login-link {
-  color: rgba(255, 255, 255, 0.7);
+  color: #F2F5EF;
   font-size: 13px;
   transition: color 0.2s ease;
 }

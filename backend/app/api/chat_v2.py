@@ -177,6 +177,25 @@ def _refine_intent_from_qu(
                 ),
             )
 
+    # --- Degraded-QU fallback: honor a confident regex classification ---
+    # When QU itself degraded (LLM failure / parse failure / truncation) it
+    # returns DOCUMENT_CONTENT with confidence 0.0 for *everything*, so a query
+    # like "i have an doubt" or "write a pyathon code" would otherwise fall
+    # through to retrieval with no evidence it is really general conversation
+    # or out-of-scope.  When QU is clearly degraded, trust a confident regex
+    # classification.  When QU ran normally (confidence >= 0.5), trust QU even
+    # if the regex disagrees — a healthy QU resolves "can you help me with the
+    # vacation policy" better than a substring regex ("can you help me").
+    if (
+        qu_result.intent == _IC.DOCUMENT_CONTENT
+        and qu_result.confidence < 0.5
+        and regex_intent.category not in (
+            _IC.DOCUMENT_CONTENT,
+            _IC.AMBIGUOUS,
+        )
+    ):
+        return regex_intent
+
     return intent
 
 
@@ -291,8 +310,63 @@ def _is_capability_request(question: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Request / response models
+# Person-info and injection gates
 # ---------------------------------------------------------------------------
+
+# Questions that ask for one specific person's identity, role, or contact
+# details (who is the owner/CEO, who uploaded this document, who handles X).
+# These are plausibly answered from org charts / team directories in approved
+# documents, so they must go through the evidence path (RAG) — never be
+# answered from the LLM's prior knowledge, and never fabricated when no
+# verified source exists.  Matches the intent of relevance.py's
+# _CONTACT_PERSONNEL_PATTERN, which already passes personnel questions
+# through the relevance gate (Layer 1 gives relevant=True).
+_PERSON_INFO_PATTERN = re.compile(
+    r"\bwho\s+(?:is|are|was|were)\s+(?:the\s+)?"
+    r"(?:owner|co-?owner|ceo|founder|co-?founder|admin|administrator|"
+    r"manager|lead|leader|head|director|supervisor|recruiter|hr)\b"
+    r"|(?:who\s+(?:uploaded|added|created|wrote|authored|submitted|published)"
+    r"\s(?:the|this|that|our))"
+    r"|(?:who\s+is\s+the\s+(?:author|creator|uploader)\s+of)"
+    r"|(?:who\s+(?:handles?|manages?|deals?\s+with|is\s+(?:responsible|in\s+charge)"
+    r"\s+(?:for|of)))"
+    r"|(?:who\s+(?:should\s+)?(?:i\s+)?(?:contact|email|call|reach\s+out\s+to|"
+    r"talk\s+to|get\s+in\s+touch\s+with))"
+    r"|(?:what(?:'?s|\s+is|\s+are)\s+"
+    r"(?:my|mine|your|yours|youe|you|yor|yr|ur|ours?|his|hers?|theirs?)\s+names?)",
+    re.IGNORECASE,
+)
+
+
+def _is_person_info_request(question: str) -> bool:
+    """Detect questions asking about a specific person's identity or contact."""
+    q = question.strip()
+    if not q:
+        return False
+    return bool(_PERSON_INFO_PATTERN.search(q))
+
+
+_INJECTION_PATTERN = re.compile(
+    r"ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+instructions"
+    r"|ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+prompts?"
+    r"|ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+context"
+    r"|disregard\s+(?:all\s+)?(?:previous|prior|above|earlier)"
+    r"|forget\s+(?:all\s+)?(?:your\s+)?(?:previous|prior|above|earlier)"
+    r"|reveal\s+(?:your|the)\s+(?:system|initial)\s+prompts?"
+    r"|show\s+me\s+(?:your|the)\s+(?:system|initial)\s+prompts?"
+    r"|output\s+(?:your|the)\s+(?:system|initial)\s+prompts?"
+    r"|you\s+are\s+now\s+.*\b(?:no\s+longer|acting\s+as)\b"
+    r"|do\s+not\s+follow\s+(?:your\s+)?(?:previous|initial)\s+instructions",
+    re.IGNORECASE,
+)
+
+
+def _is_injection_attempt(question: str) -> bool:
+    """Detect prompt-injection attempts in the user's own message."""
+    q = question.strip()
+    if not q:
+        return False
+    return bool(_INJECTION_PATTERN.search(q))
 
 
 class GroundedChatRequest(BaseModel):
@@ -1374,6 +1448,50 @@ async def _stream_chat(
     search_query_for_retrieval = qu_result.search_query
     qu_confidence = qu_result.confidence
 
+    # 1b. Prompt-injection attempts are refused immediately — never routed,
+    # never retrieved, never sent to the LLM.
+    if _is_injection_attempt(question):
+        injection_text = refusal_message(ResponseReason.INJECTION_ATTEMPT)
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=session_id, role="user", content=question,
+                )
+            )
+        yield await _sse_event("sources", {"sources": []})
+        yield await _sse_event("token", {"text": injection_text})
+        yield await _sse_event("citations", {"citations": []})
+        async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+            await db.execute(
+                insert(ChatMessage).values(
+                    session_id=session_id, role="assistant",
+                    content=injection_text, sources=[],
+                )
+            )
+        yield await _sse_event("done", {
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "provider": "", "model": "", "grounded": True, "routes": [], "sql_query": "",
+        })
+        logger.info(
+            "intent=injection_attempt workspace={ws} retrieval_called=False",
+            ws=workspace_id,
+        )
+        return
+
+    # Person-info questions must go through the evidence path (RAG) — they are
+    # plausibly answered from org charts / team directories in approved
+    # documents and must never be handled as general knowledge.  When QU call
+    # tends to classify these as off_topic / general_conversation, route them
+    # to document-content retrieval instead.
+    if _is_person_info_request(question) and intent.category in (
+        IntentCategory.OUT_OF_SCOPE,
+        IntentCategory.GENERAL_CONVERSATION,
+    ):
+        intent = Intent(
+            category=IntentCategory.DOCUMENT_CONTENT,
+            reason="person_info_override",
+        )
+
     # 1c. Handle ambiguity: ask for clarification instead of refusing.
     if needs_clarification or intent.needs_clarification:
         # Persist the exchange under the session resolved in step 0.
@@ -1519,6 +1637,17 @@ async def _stream_chat(
             ws=workspace_id,
             refusal=refusal_reason.value if refusal_reason else None,
         )
+        # Unify with the sync endpoint: when the metadata handler can't resolve
+        # the specific field (sub is None) and returns a refusal, fall through
+        # to document-content search instead of dead-ending with a canned
+        # "I could not determine" refusal.
+        if refusal_reason == ResponseReason.METADATA_EMPTY and intent.metadata_sub is None:
+            logger.info(
+                "Metadata sub-intent unresolved for workspace={ws}, "
+                "falling through to document content search",
+                ws=workspace_id,
+            )
+            answer = None
 
     # For non-document intents, emit the answer and persist under the session
     # resolved in step 0 — no new ChatSession per turn.
@@ -1613,8 +1742,14 @@ async def _stream_chat(
         )
 
     if not result.grounded:
-        # Choose the right refusal: documents exist but irrelevant, or nothing found.
-        refusal_reason = _pick_refusal_reason(had_candidates=bool(result.chunks))
+        # Person-info questions that found no evidence get the unsupported-
+        # information refusal — a specific person's identity/contact must never
+        # be fabricated, even when retrieval came up empty.
+        if _is_person_info_request(question) or _is_person_info_request(effective_query):
+            refusal_reason = ResponseReason.UNSUPPORTED_INFORMATION
+        else:
+            # Choose the right refusal: documents exist but irrelevant, or nothing found.
+            refusal_reason = _pick_refusal_reason(had_candidates=bool(result.chunks))
         refusal = refusal_message(refusal_reason)
         logger.info(
             "intent=document_content refusal={reason} top_score={score} "
@@ -1894,6 +2029,34 @@ async def grounded_chat(
     search_query_for_retrieval = qu_result.search_query
     qu_confidence = qu_result.confidence
 
+    # Prompt-injection attempts are refused immediately — never routed, never
+    # retrieved, never sent to the LLM.
+    if _is_injection_attempt(question):
+        logger.info(
+            "intent=injection_attempt workspace={ws} retrieval_called=False",
+            ws=workspace_id,
+        )
+        return GroundedChatResponse(
+            answer=refusal_message(ResponseReason.INJECTION_ATTEMPT),
+            grounded=True,
+            insufficient_evidence=False,
+            sources=[],
+        )
+
+    # Person-info questions must go through the evidence path (RAG) — they are
+    # plausibly answered from org charts / team directories in approved
+    # documents and must never be handled as general knowledge.  When QU tends
+    # to classify these as off_topic / general_conversation, route them to
+    # document-content retrieval instead.
+    if _is_person_info_request(question) and intent.category in (
+        IntentCategory.OUT_OF_SCOPE,
+        IntentCategory.GENERAL_CONVERSATION,
+    ):
+        intent = Intent(
+            category=IntentCategory.DOCUMENT_CONTENT,
+            reason="person_info_override",
+        )
+
     if intent.category == IntentCategory.AMBIGUOUS:
         return GroundedChatResponse(
             answer=refusal_message(ResponseReason.NEEDS_CLARIFICATION),
@@ -2083,7 +2246,13 @@ async def grounded_chat(
         )
 
     if not result.grounded:
-        refusal_reason = _pick_refusal_reason(had_candidates=bool(result.chunks))
+        # Person-info questions that found no evidence get the unsupported-
+        # information refusal — a specific person's identity/contact must never
+        # be fabricated, even when retrieval came up empty.
+        if _is_person_info_request(question) or _is_person_info_request(effective_query):
+            refusal_reason = ResponseReason.UNSUPPORTED_INFORMATION
+        else:
+            refusal_reason = _pick_refusal_reason(had_candidates=bool(result.chunks))
         refusal = refusal_message(refusal_reason)
         logger.info(
             "intent=document_content refusal={reason} top_score={score} "

@@ -9,7 +9,6 @@
  * wordmark appears only in top-left brand positions.
  */
 
-import { Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /** The wordmark's canonical typographic treatment. */
@@ -20,27 +19,22 @@ export function BrandWordmark({
   className,
   withMark = false,
   markClassName,
+  textClassName,
 }: {
   className?: string;
   /** Render the rounded Building2 mark before the text (login nav lockup). */
   withMark?: boolean;
   /** Extra classes for the mark box, e.g. sizing on the login page. */
   markClassName?: string;
+  /** Override the wordmark text classes (color, tracking, etc.). */
+  textClassName?: string;
 }) {
   return (
     <span className={cn("inline-flex items-center gap-2", className)}>
       {withMark && (
-        <span
-          className={cn(
-            "flex size-6 items-center justify-center rounded-md",
-            "bg-[rgba(255,255,255,0.1)] text-foreground/80",
-            markClassName,
-          )}
-        >
-          <Building2 className="size-4" aria-hidden="true" />
-        </span>
+          <img src="/logo.png" alt="" className="h-[40px] w-auto object-contain" aria-hidden="true" />
       )}
-      <span className={WORDMARK_CLASS}>Office Brain</span>
+      <span className={textClassName || cn(WORDMARK_CLASS, "wordmark-text")}>Office Brain</span>
     </span>
   );
 }

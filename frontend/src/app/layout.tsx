@@ -24,6 +24,12 @@ export const metadata: Metadata = {
   title: "Office Brain",
   description:
     "Ask questions across your organization's documents, business data and code.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "any" },
+      { url: "/logo-512.png", type: "image/png", sizes: "512x512" },
+    ],
+  },
 };
 
 export default function RootLayout({
@@ -36,6 +42,9 @@ export default function RootLayout({
       lang="en"
       className={`${inter.variable} ${ibmPlexMono.variable} ${fraunces.variable} h-full antialiased`}
     >
+      <head>
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+      </head>
       <body className="min-h-full font-sans">
         {/* At the root, not in a page: /login needs the same session state the workspace
             does, and a provider per page would give each its own. */}

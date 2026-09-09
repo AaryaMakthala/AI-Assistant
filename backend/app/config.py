@@ -296,8 +296,10 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 4096
     #: Max tokens for the Query Understanding call.  QU returns a compact JSON
     #: object (corrected_query, search_query, intent, confidence, reasoning).
-    #: 512 gives comfortable headroom for the longest fields without waste.
-    qu_max_output_tokens: int = 512
+    #: QU requests thinking to be disabled at the API level; when a provider
+    #: rejects that flag and the model still reasons, 1024 leaves room for the
+    #: reasoning to complete before the JSON instead of truncating mid-think.
+    qu_max_output_tokens: int = 1024
     #: Time budget for the whole generation. A stalled provider must surface as an error
     #: rather than an open connection the client waits on indefinitely.
     llm_timeout_seconds: float = 60.0

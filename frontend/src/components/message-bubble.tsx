@@ -75,7 +75,7 @@ export function MessageBubble({
         )}
         aria-hidden
       >
-        AI
+        <img src="/logo.png" alt="" className="size-5 rounded-full object-cover" />
       </div>
 
       <div className="min-w-0 flex-1">

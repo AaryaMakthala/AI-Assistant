@@ -43,6 +43,7 @@ export function AuthLayout({
   onDemo,
   demoBusy,
   cardWide = false,
+  className,
   children,
 }: {
   title?: string;
@@ -52,10 +53,11 @@ export function AuthLayout({
   /** Use a wider glass card. Signup mode pairs this with a two-column field
    *  grid so the form reads as a wide horizontal panel, not a tall stack. */
   cardWide?: boolean;
+  className?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="auth-page">
+    <div className={cn("auth-page", className)}>
       {/* Full-bleed background: one next/image layer of login-bg-5K.png,
        * object-fit: cover — fills the entire viewport edge-to-edge with zero
        * letterboxing. The photo's calm dark zone on the left is what the
@@ -72,6 +74,14 @@ export function AuthLayout({
         style={{ objectFit: "cover", objectPosition: "center" }}
         className="auth-bg"
       />
+
+      {/* SVG noise filter for dithering blob gradients — hidden, referenced by CSS. */}
+      <svg className="sr-only" aria-hidden="true">
+        <filter id="blob-noise">
+          <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch" />
+          <feColorMatrix type="saturate" values="0" />
+        </filter>
+      </svg>
 
       {/* Decorative blob layer — above background, below nav + card. */}
       <div className="auth-blobs" aria-hidden="true">

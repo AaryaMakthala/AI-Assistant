@@ -60,7 +60,22 @@
   position: absolute;
   height: auto;
   will-change: transform;
-  filter: blur(3px);
+  filter: blur(6px);
+}
+
+/* Noise overlay on blobs to break up gradient banding — uses the hidden SVG
+ * feTurbulence filter defined in auth-layout.tsx. A pseudo-element fills the
+ * same area as each blob image, applies the noise filter, and blends it at
+ * low opacity to dither visible color-stop steps. */
+.auth-blob::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  filter: url(#blob-noise);
+  opacity: 0.045;
+  mix-blend-mode: soft-light;
+  pointer-events: none;
+  border-radius: inherit;
 }
 
 /* The gcircle slot uses stone.png (muted matte family). Green is a small accent. */
@@ -528,6 +543,41 @@
 }
 
 @media (max-width: 767px) {
+  /* --- Mobile background: solid dark with subtle grid pattern ---------- */
+  /* Hide the photo background and decorative blobs — replace with a
+   * minimal, flat surface: the page's existing dark base color overlaid
+   * with a faint blueprint-style grid of thin lines at ~7% opacity. */
+  .auth-bg {
+    display: none;
+  }
+
+  .auth-blobs {
+    display: none;
+  }
+
+  .auth-page {
+    /* reuse the existing base color (#0b1a11) — no new color introduced */
+    background:
+      /* Vertical grid lines — thin, low-opacity, evenly spaced */
+      repeating-linear-gradient(
+        to right,
+        rgba(156, 184, 143, 0.07) 0,
+        rgba(156, 184, 143, 0.07) 1px,
+        transparent 1px,
+        transparent 36px
+      ),
+      /* Horizontal grid lines */
+      repeating-linear-gradient(
+        to bottom,
+        rgba(156, 184, 143, 0.07) 0,
+        rgba(156, 184, 143, 0.07) 1px,
+        transparent 1px,
+        transparent 36px
+      ),
+      /* Solid base fill */
+      #0b1a11;
+  }
+
   .auth-glass {
     padding: 28px 24px;
   }
@@ -641,6 +691,22 @@
   flex-shrink: 0;
 }
 
+/* --- Login → demo transition ---------------------------------------------- */
+
+/* Applied by login page after /demo/enter succeeds; fades the entire auth
+ * page out before navigating to the workspace. Transition completes in
+ * ~400 ms — short enough to feel snappy, long enough to register visually.
+ * The blob layer fades at the same rate for a cohesive exit. */
+.auth-page-exit .auth-bg,
+.auth-page-exit .auth-blobs,
+.auth-page-exit .auth-nav,
+.auth-page-exit .auth-main,
+.auth-page-exit .auth-footer {
+  transition: opacity 400ms ease-in;
+  opacity: 0 !important;
+  animation: none !important;
+}
+
 /* --- Reduced motion ------------------------------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {
@@ -654,5 +720,14 @@
   .auth-alert,
   .auth-footer {
     animation: none;
+  }
+
+  /* Transition becomes effectively instant for reduced-motion users. */
+  .auth-page-exit .auth-bg,
+  .auth-page-exit .auth-blobs,
+  .auth-page-exit .auth-nav,
+  .auth-page-exit .auth-main,
+  .auth-page-exit .auth-footer {
+    transition-duration: 80ms !important;
   }
 }

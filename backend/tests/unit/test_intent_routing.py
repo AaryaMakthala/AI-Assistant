@@ -200,16 +200,16 @@ class TestIntentClassification:
         assert intent.category == IntentCategory.CONVERSATION_HISTORY
         assert intent.skip_rewrite is True
 
-    def test_identity_not_in_fast_path(self) -> None:
-        """Identity patterns deliberately NOT in fast-path — need LLM sub-typing.
+    def test_personal_name_query_in_fast_path(self) -> None:
+        """'What is my name' is a personal-name boundary, resolved in fast-path.
 
-        'who are you' (IDENTITY_ASSISTANT) and 'my name is X' (IDENTITY_USER)
-        need different handling that only the LLM router can provide.
+        'who are you' (IDENTITY_ASSISTANT) still needs the LLM router,
+        but asking about the user's own name never reaches the LLM or RAG.
         """
         intent = classify_intent_regex("What is my name")
-        # Falls through to LLM router because identity is not in fast-path.
-        assert intent.category == IntentCategory.DOCUMENT_CONTENT
-        assert intent.reason == "regex_fallback_to_llm"
+        assert intent.category == IntentCategory.GENERAL_CONVERSATION
+        assert intent.reason == "personal_name_boundary"
+        assert intent.skip_rewrite is True
 
     def test_app_help_upload(self) -> None:
         intent = classify_intent_regex("Who can upload documents")
@@ -332,8 +332,8 @@ class TestIdentity:
     def test_what_is_my_name(
         self, monkeypatch: pytest.MonkeyPatch, client: tuple[TestClient, Principal]
     ) -> None:
-        """'what is my name' → IDENTITY_USER via LLM router."""
-        from app.retrieval.llm_router import RouteResult
+        """'what is my name' → fixed personal-name boundary (no RAG, no LLM)."""
+        from app.retrieval.query_understanding import QueryUnderstanding
 
         test_client, _ = client
 
@@ -341,14 +341,22 @@ class TestIdentity:
 
         async def _retrieve(*args: Any, **kwargs: Any) -> RetrievalResult:
             retrieval_called.append("called")
-            raise AssertionError("retrieval must NOT run for identity")
+            raise AssertionError("retrieval must NOT run for a personal-name query")
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> RouteResult:
-            return RouteResult(route="IDENTITY_USER", confidence=0.9, reasoning="test")
+        # Even if QU were to classify the message as document_content, the
+        # personal-name boundary must win — no retrieval, no LLM.
+        async def _qu(*args: Any, **kwargs: Any) -> QueryUnderstanding:  # noqa: ARG001
+            return QueryUnderstanding(
+                corrected_query="what is my name",
+                search_query="what is my name",
+                intent=IntentCategory.DOCUMENT_CONTENT,
+                confidence=0.9,
+                reasoning="test",
+            )
 
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+        monkeypatch.setattr(chat_module, "understand_query", _qu)
 
         stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
@@ -359,10 +367,9 @@ class TestIdentity:
         assert response.status_code == 200
         body = response.json()
         assert body["grounded"] is True
-        # The answer explains what user info is available — may mention
-        # 'name', 'profile', or 'workspace' depending on the handler.
-        answer_lower = body["answer"].lower()
-        assert any(kw in answer_lower for kw in ("name", "profile", "workspace", "member"))
+        assert body["insufficient_evidence"] is False
+        assert body["answer"] == refusal_message(ResponseReason.PERSONAL_NAME)
+        assert "don't store personal names" in body["answer"].lower()
         assert body["sources"] == []
         assert retrieval_called == []
         assert stub.calls == []
@@ -1000,16 +1007,162 @@ class TestRobustIntentClassification:
         intent = classify_intent_regex("ciao")
         assert intent.category == IntentCategory.GREETING
 
-    def test_whats_your_name_not_in_fast_path(self) -> None:
-        """'what is your name' → falls through to LLM router."""
+    def test_whats_your_name_fast_path(self) -> None:
+        """'what is your name' → IDENTITY_ASSISTANT fast-path (no LLM/RAG)."""
         intent = classify_intent_regex("what is your name")
-        # Identity is not in the fast-path — needs LLM sub-typing.
-        assert intent.reason == "regex_fallback_to_llm"
+        assert intent.category == IntentCategory.IDENTITY_ASSISTANT
+        assert intent.reason == "bot_name_question"
+
+    def test_whats_youe_name_typo_fast_path(self) -> None:
+        """'what is youe name' → IDENTITY_ASSISTANT fast-path (typo-tolerant)."""
+        intent = classify_intent_regex("what is youe name")
+        assert intent.category == IntentCategory.IDENTITY_ASSISTANT
+        assert intent.reason == "bot_name_question"
 
     def test_whats_your_purpose_not_in_fast_path(self) -> None:
         """'what is your purpose' → falls through to LLM router."""
         intent = classify_intent_regex("what is your purpose")
         assert intent.reason == "regex_fallback_to_llm"
+
+
+# ===========================================================================
+# Conversational fast-path (name statements, greetings, acknowledgements)
+# ===========================================================================
+
+
+class TestConversationalFastPath:
+    """Conversational messages must route conversationally, never to RAG.
+
+    These lanes are checked in the regex fast-path BEFORE any retrieval or
+    no-evidence fallback, so the sync/streaming endpoints never call retrieve
+    or the LLM for them.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "im aarya",
+            "i'm aarya",
+            "iam aarya",
+            "my name is aarya",
+            "my name's aarya",
+            "my name is Aarya",
+            "call me aarya",
+            "can you call me aarya",
+            "please call me aarya",
+            "you can call me aarya",
+            "hi my name is aarya",
+            "hey my name is aarya",
+        ],
+    )
+    def test_personal_name_statements_route_to_boundary(self, message: str) -> None:
+        """User-name statements route to the fixed personal-name boundary.
+
+        No name is extracted — routing is boolean only, and the handler answers
+        with the single centralized boundary message.
+        """
+        intent = classify_intent_regex(message)
+        assert intent.category == IntentCategory.GENERAL_CONVERSATION
+        assert intent.reason == "personal_name_boundary"
+        assert intent.skip_rewrite is True
+
+    @pytest.mark.parametrize(
+        "message",
+        ["hi", "hello", "heyyy", "hey", "howdy", "yo", "namaste", "nameste", "vanakam"],
+    )
+    def test_greetings_route_to_greeting(self, message: str) -> None:
+        intent = classify_intent_regex(message)
+        assert intent.category == IntentCategory.GREETING
+        assert intent.reason == "greeting"
+
+    @pytest.mark.parametrize(
+        "message",
+        ["okay", "ok", "thanks", "thank you", "good boy", "nice", "cool", "good job", "well done"],
+    )
+    def test_acknowledgements_route_to_greeting(self, message: str) -> None:
+        intent = classify_intent_regex(message)
+        assert intent.category == IntentCategory.GREETING
+        assert intent.reason == "greeting"
+
+    def test_greeting_expansions_normalize_typos(self) -> None:
+        """'nameste'/'vanakam' normalize like their well-formed siblings."""
+        from app.retrieval.intent import normalize_for_classification
+
+        assert classify_intent_regex("nameste").category == IntentCategory.GREETING
+        assert classify_intent_regex("vanakam").category == IntentCategory.GREETING
+        # Normalization maps both to the same canonical form.
+        assert normalize_for_classification("nameste") == normalize_for_classification("namaste")
+        assert normalize_for_classification("vanakam") == normalize_for_classification("hello")
+
+    @pytest.mark.parametrize(
+        "message",
+        ["im good", "i'm good", "my name is", "call me later", "im fine", "call me", "i am"],
+    )
+    def test_non_name_statements_do_not_become_personal_name_boundary(self, message: str) -> None:
+        """Casual continuations must NOT be treated as personal-name queries."""
+        intent = classify_intent_regex(message)
+        assert intent.category != IntentCategory.IDENTITY_USER
+        assert intent.reason != "personal_name_boundary"
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "what is my name",
+            "what's my name",
+            "whats my name",
+            "what is my name say",
+            "tell me my name",
+            "do you know my name",
+            "my name",
+            "use your own memory and say my name",
+        ],
+    )
+    def test_personal_name_questions_route_to_boundary(self, message: str) -> None:
+        """User-name questions route to the fixed personal-name boundary."""
+        intent = classify_intent_regex(message)
+        assert intent.category == IntentCategory.GENERAL_CONVERSATION
+        assert intent.reason == "personal_name_boundary"
+
+    @pytest.mark.parametrize(
+        "message,expected_reason",
+        [
+            ("what is your name", "bot_name_question"),
+            ("what is youe name", "bot_name_question"),
+            ("whats your name", "bot_name_question"),
+            ("what is your name?", "bot_name_question"),
+        ],
+    )
+    def test_bot_name_question_fast_path(self, message: str, expected_reason: str) -> None:
+        intent = classify_intent_regex(message)
+        assert intent.category == IntentCategory.IDENTITY_ASSISTANT
+        assert intent.reason == expected_reason
+
+    @pytest.mark.parametrize(
+        "message",
+        ["what is my name", "what is your purpose", "who am I"],
+    )
+    def test_other_identity_queries_stay_on_existing_path(self, message: str) -> None:
+        """Self-identity and purpose questions must NOT be re-routed."""
+        intent = classify_intent_regex(message)
+        assert intent.category != IntentCategory.IDENTITY_ASSISTANT
+
+    def test_document_routing_unchanged(self) -> None:
+        """Document/workspace questions keep their existing lanes."""
+        assert classify_intent_regex("what are docs present").reason == "regex_fallback_to_llm"
+        assert classify_intent_regex("explain the vacation policy").category == (
+            IntentCategory.DOCUMENT_CONTENT
+        )
+        assert classify_intent_regex("tell me more").reason == "regex_fallback_to_llm"
+        assert classify_intent_regex("why?").reason == "regex_fallback_to_llm"
+        # Descriptive doc-metadata lanes are unchanged too.
+        for msg in ("describe them", "tell about any five files"):
+            intent = classify_intent_regex(msg)
+            assert intent.category == IntentCategory.WORKSPACE_METADATA
+            assert intent.metadata_sub == MetadataSubIntent.DOC_DESCRIPTION
+        # Anaphoric "explain that" still needs clarification.
+        intent = classify_intent_regex("explain that")
+        assert intent.category == IntentCategory.AMBIGUOUS
+        assert intent.needs_clarification is True
 
 
 # ===========================================================================
@@ -1096,18 +1249,27 @@ class TestLLMRouterClassification:
         assert intent.category == IntentCategory.IDENTITY_ASSISTANT
 
     @pytest.mark.asyncio
-    async def test_my_name_is_aarya_routes_to_user_identity(
+    async def test_my_name_is_aarya_routes_to_personal_name_boundary(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """'my name is aarya' → IDENTITY_USER via LLM router."""
+        """'my name is aarya' → personal-name boundary via regex fast-path.
+
+        The regex fast-path intercepts the name statement before any LLM
+        routing — the LLM router is never called.
+        """
         from app.retrieval.llm_router import RouteResult
 
-        async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> RouteResult:
+        llm_calls: list[str] = []
+
+        async def _spy_route(*, query: str, history: list | None = None, **kw: Any) -> RouteResult:
+            llm_calls.append("called")
             return RouteResult(route="IDENTITY_USER", confidence=0.9, reasoning="test")
 
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _spy_route)
         intent = await classify_intent("my name is aarya")
-        assert intent.category == IntentCategory.IDENTITY_USER
+        assert intent.category == IntentCategory.GENERAL_CONVERSATION
+        assert intent.reason == "personal_name_boundary"
+        assert llm_calls == [], "regex fast-path should intercept before the LLM router"
 
     @pytest.mark.asyncio
     async def test_what_is_my_info_routes_to_user_identity(

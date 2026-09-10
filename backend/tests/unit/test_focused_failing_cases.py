@@ -6,7 +6,7 @@ relevance gate and returned \"I couldn't find any relevant information...\":
   2. \"how manu docs there\"  → METADATA/DOC_COUNT (direct)
   3. \"i have an doubt\"      → GENERAL_CONVERSATION (direct)
   4. \"write a pyathon code\" → OUT_OF_SCOPE (direct)
-  5. \"hi my name is aarya\"  → IDENTITY_USER (direct)
+  5. \"hi my name is aarya\"  → personal_name_boundary (direct)
 
 Plus 3 already-working messages (regression check):
   6. \"hey\"                           → GREETING (direct)
@@ -249,7 +249,7 @@ class TestPreviouslyFailingCases:
     def test_hi_my_name_is_aarya(
         self, monkeypatch: pytest.MonkeyPatch, client: tuple[TestClient, Principal]
     ) -> None:
-        """'hi my name is aarya' → IDENTITY_USER, no retrieval."""
+        """'hi my name is aarya' → personal-name boundary, no retrieval, no LLM."""
         test_client, _ = client
         retrieval_called = _track_retrieval(monkeypatch)
         stub = StubLLM()
@@ -259,11 +259,13 @@ class TestPreviouslyFailingCases:
         assert response.status_code == 200
         body = response.json()
         assert body["grounded"] is True
+        assert body["insufficient_evidence"] is False
         assert body["sources"] == []
         assert retrieval_called == [], "retrieval must NOT be called"
         assert stub.calls == [], "LLM must NOT be called"
-        answer_lower = body["answer"].lower()
-        assert any(kw in answer_lower for kw in ("name", "workspace", "member", "profile"))
+        from app.retrieval.refusals import ResponseReason, refusal_message
+
+        assert body["answer"] == refusal_message(ResponseReason.PERSONAL_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -474,12 +476,13 @@ class TestRegexFastPath:
 
     def test_hi_my_name_is_fast_path(self) -> None:
         intent = classify_intent_regex("hi my name is aarya")
-        assert intent.category == IntentCategory.IDENTITY_USER
-        assert intent.reason == "greeting_name_statement"
+        assert intent.category == IntentCategory.GENERAL_CONVERSATION
+        assert intent.reason == "personal_name_boundary"
 
     def test_hey_my_name_is_fast_path(self) -> None:
         intent = classify_intent_regex("hey my name is john")
-        assert intent.category == IntentCategory.IDENTITY_USER
+        assert intent.category == IntentCategory.GENERAL_CONVERSATION
+        assert intent.reason == "personal_name_boundary"
 
     def test_existing_greeting_still_works(self) -> None:
         """'hey' without 'my name is' should still be GREETING."""

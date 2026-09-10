@@ -429,10 +429,8 @@ def test_unsupported_person_info_is_refused_without_fabrication(
 @pytest.mark.parametrize(
     "message",
     [
-        "what is youe name",
-        "what is your name",
-        "what's your name",
         "what is my name",
+        "what's my name",
     ],
 )
 def test_name_query_with_no_evidence_uses_unsupported_information(
@@ -440,7 +438,7 @@ def test_name_query_with_no_evidence_uses_unsupported_information(
     client: tuple[TestClient, Principal],
     message: str,
 ) -> None:
-    """A typo'd name request with no evidence uses the canonical unsupported reply."""
+    """A name request with no evidence uses the canonical unsupported reply."""
     test_client, _ = client
     stub = _StubLLM()
     test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
@@ -654,3 +652,170 @@ def test_retrieved_prompt_injection_is_treated_as_untrusted_data(
     body = response.json()
     assert body["answer"] == "The documents do not address that."
     assert "system prompt" not in body["answer"]
+
+
+# --- Conversational messages bypass RAG --------------------------------------
+
+
+def _stub_qu_and_no_retrieve(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> QueryUnderstanding:
+    """Script understand_query to DOCUMENT_CONTENT and forbid retrieval.
+
+    If any conversational message reaches retrieval, ``retrieve`` raises and the
+    request becomes an opaque 500 — so a 200 with a conversational answer is
+    direct proof the message never reached RAG.
+    """
+    qu = QueryUnderstanding(
+        corrected_query=message,
+        search_query=message,
+        intent=IntentCategory.DOCUMENT_CONTENT,
+        confidence=0.9,
+        reasoning="test",
+    )
+
+    async def _qu(*args: Any, **kwargs: Any) -> QueryUnderstanding:  # noqa: ARG001
+        return qu
+
+    monkeypatch.setattr(chat_module, "understand_query", _qu)
+
+    async def _retrieve(  # noqa: ARG001
+        session, *, query: str, workspace_id: uuid.UUID, **kwargs: Any
+    ) -> RetrievalResult:
+        raise AssertionError("retrieval must not run for a conversational message")
+
+    monkeypatch.setattr(chat_module, "retrieve", _retrieve)
+    return qu
+
+
+_CONVERSATIONAL_MESSAGES = [
+    "im aarya",
+    "i'm aarya",
+    "my name is aarya",
+    "call me aarya",
+    "you can call me aarya",
+    "hi",
+    "hello",
+    "heyyy",
+    "namaste",
+    "nameste",
+    "vanakam",
+    "thanks",
+    "thank you",
+    "good boy",
+    "nice",
+    "cool",
+    "okay",
+    "what is youe name",
+    "what is your name",
+]
+
+
+@pytest.mark.parametrize("message", _CONVERSATIONAL_MESSAGES)
+def test_conversational_messages_bypass_rag(
+    monkeypatch: pytest.MonkeyPatch,
+    client: tuple[TestClient, Principal],
+    message: str,
+) -> None:
+    """Conversational messages return a natural reply, never RAG/no-evidence."""
+    test_client, _ = client
+    stub = _StubLLM()
+    test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
+
+    _stub_qu_and_no_retrieve(monkeypatch, message)
+
+    response = test_client.post("/chat/grounded", json={"message": message})
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["grounded"] is True
+    assert body["insufficient_evidence"] is False
+    assert body["sources"] == []
+    assert stub.calls == []  # no LLM call either
+
+    refusals = {
+        REFUSAL_ANSWER,
+        REFUSAL_NO_EVIDENCE,
+        REFUSAL_NOT_RELEVANT,
+        chat_module.refusal_message(chat_module.ResponseReason.UNSUPPORTED_INFORMATION),
+        chat_module.refusal_message(chat_module.ResponseReason.NEEDS_CLARIFICATION),
+    }
+    assert body["answer"] not in refusals
+    assert body["answer"].strip()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "im aarya",
+        "i'm aarya",
+        "iam aarya",
+        "my name is aarya",
+        "my name's aarya",
+        "my name is Aarya",
+        "call me aarya",
+        "can you call me aarya",
+        "please call me aarya",
+        "you can call me aarya",
+        "hi my name is aarya",
+        "what is my name",
+        "what's my name",
+        "whats my name",
+        "what is my name say",
+        "tell me my name",
+        "do you know my name",
+        "my name",
+        "use your own memory and say my name",
+    ],
+)
+def test_personal_name_queries_return_boundary_message(
+    monkeypatch: pytest.MonkeyPatch,
+    client: tuple[TestClient, Principal],
+    message: str,
+) -> None:
+    """Personal-name queries return the single fixed boundary message.
+
+    Never a name-personalized reply ("Nice to meet you…", "Got it…"), never
+    RAG / retrieval / no-evidence, never an LLM call.
+    """
+    test_client, _ = client
+    stub = _StubLLM()
+    test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
+
+    _stub_qu_and_no_retrieve(monkeypatch, message)
+
+    response = test_client.post("/chat/grounded", json={"message": message})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["grounded"] is True
+    assert body["insufficient_evidence"] is False
+    assert body["sources"] == []
+    assert stub.calls == []  # no LLM call either
+    expected = chat_module.refusal_message(
+        chat_module.ResponseReason.PERSONAL_NAME
+    )
+    assert body["answer"] == expected
+    assert "don't store personal names" in body["answer"].lower()
+
+
+@pytest.mark.parametrize(
+    "message,expects_correction",
+    [("what is youe name", True), ("what is your name", False)],
+)
+def test_bot_name_question_bypasses_rag(
+    monkeypatch: pytest.MonkeyPatch,
+    client: tuple[TestClient, Principal],
+    message: str,
+    expects_correction: bool,
+) -> None:
+    """'what is your name' is answered conversationally, typo corrected once."""
+    test_client, _ = client
+    test_client.app.dependency_overrides[get_generic_llm] = lambda: _StubLLM()
+
+    _stub_qu_and_no_retrieve(monkeypatch, message)
+
+    response = test_client.post("/chat/grounded", json={"message": message})
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    assert "Office Brain" in answer
+    assert ("you meant" in answer) is expects_correction

@@ -345,36 +345,36 @@ def test_streaming_injection_attempt_is_refused_without_retrieval(
     assert db.messages[1]["content"] == token_text
 
 
-def test_streaming_name_query_without_evidence_uses_unsupported_information(
+def test_streaming_personal_name_query_uses_boundary_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Name query with no evidence → canonical unsupported reply, streamed once."""
+    """'what is my name' → the fixed boundary message, never retrieval/no-evidence."""
     from app.retrieval.intent import IntentCategory
     from app.retrieval.query_understanding import QueryUnderstanding
 
     qu = QueryUnderstanding(
-        corrected_query="what is your name",
-        search_query="what is youe name",
+        corrected_query="what is my name",
+        search_query="what is my name",
         intent=IntentCategory.DOCUMENT_CONTENT,
         confidence=0.9,
         reasoning="test",
     )
 
-    async def _ungrounded_retrieve(session: Any, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
-        return RetrievalResult(chunks=[], grounded=False, top_score=None)
+    async def _no_retrieve(session: Any, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
+        raise AssertionError("retrieval must not run for a personal-name query")
 
     app, db, _ = _build_streaming_harness(
-        monkeypatch, qu=qu, retrieve_fn=_ungrounded_retrieve
+        monkeypatch, qu=qu, retrieve_fn=_no_retrieve
     )
 
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
-            status, events = _post(client, {"message": "what is youe name"})
+            status, events = _post(client, {"message": "what is my name"})
     finally:
         app.dependency_overrides.clear()
 
     expected = chat_module.refusal_message(
-        chat_module.ResponseReason.UNSUPPORTED_INFORMATION
+        chat_module.ResponseReason.PERSONAL_NAME
     )
     assert status == 200
     tokens = [e for e in events if e["event"] == "token"]
@@ -386,6 +386,90 @@ def test_streaming_name_query_without_evidence_uses_unsupported_information(
     assert len(db.sessions) == 1
     assert [m["role"] for m in db.messages] == ["user", "assistant"]
     assert db.messages[1]["content"] == expected
+
+
+def test_streaming_name_statement_uses_boundary_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'im aarya' streams the boundary message and never calls retrieval."""
+    from app.retrieval.intent import IntentCategory
+    from app.retrieval.query_understanding import QueryUnderstanding
+
+    qu = QueryUnderstanding(
+        corrected_query="im aarya",
+        search_query="im aarya",
+        intent=IntentCategory.DOCUMENT_CONTENT,
+        confidence=0.9,
+        reasoning="test",
+    )
+
+    async def _no_retrieve(session: Any, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
+        raise AssertionError("retrieval must not run for a name statement")
+
+    app, db, _ = _build_streaming_harness(
+        monkeypatch, qu=qu, retrieve_fn=_no_retrieve
+    )
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            status, events = _post(client, {"message": "im aarya"})
+    finally:
+        app.dependency_overrides.clear()
+
+    expected = chat_module.refusal_message(
+        chat_module.ResponseReason.PERSONAL_NAME
+    )
+    assert status == 200
+    tokens = [e for e in events if e["event"] == "token"]
+    assert len(tokens) == 1
+    token_text = json.loads(tokens[0]["data"])["text"]
+    assert token_text == expected
+    assert [e["event"] for e in events].count("done") == 1
+
+    assert len(db.sessions) == 1
+    assert [m["role"] for m in db.messages] == ["user", "assistant"]
+    assert db.messages[1]["content"] == token_text
+
+
+def test_streaming_bot_name_typo_bypasses_rag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'what is youe name' is answered conversationally with a typo note."""
+    from app.retrieval.intent import IntentCategory
+    from app.retrieval.query_understanding import QueryUnderstanding
+
+    qu = QueryUnderstanding(
+        corrected_query="what is your name",
+        search_query="what is youe name",
+        intent=IntentCategory.DOCUMENT_CONTENT,
+        confidence=0.9,
+        reasoning="test",
+    )
+
+    async def _no_retrieve(session: Any, **kwargs: Any) -> RetrievalResult:  # noqa: ARG001
+        raise AssertionError("retrieval must not run for a bot-name question")
+
+    app, db, _ = _build_streaming_harness(
+        monkeypatch, qu=qu, retrieve_fn=_no_retrieve
+    )
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            status, events = _post(client, {"message": "what is youe name"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert status == 200
+    tokens = [e for e in events if e["event"] == "token"]
+    assert len(tokens) == 1
+    token_text = json.loads(tokens[0]["data"])["text"]
+    assert "you meant" in token_text
+    assert "Office Brain" in token_text
+    assert [e["event"] for e in events].count("done") == 1
+
+    assert len(db.sessions) == 1
+    assert [m["role"] for m in db.messages] == ["user", "assistant"]
+    assert db.messages[1]["content"] == token_text
 
 
 def test_streaming_metadata_unresolved_falls_through_to_retrieval(

@@ -77,6 +77,5 @@ def test_health_still_works(client: TestClient) -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
-    # Asserted by key rather than as a whole dict: /health also reports environment and
-    # observability state, and those grow as subsystems are added.
-    assert response.json()["status"] == "ok"
+    # /health is the minimal liveness probe: {"status": "ok"} and nothing else.
+    assert response.json() == {"status": "ok"}

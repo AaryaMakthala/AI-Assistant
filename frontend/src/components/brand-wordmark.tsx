@@ -22,7 +22,7 @@ export function BrandWordmark({
   textClassName,
 }: {
   className?: string;
-  /** Render the rounded Building2 mark before the text (login nav lockup). */
+  /** Render the logo mark before the text (login nav lockup). */
   withMark?: boolean;
   /** Extra classes for the mark box, e.g. sizing on the login page. */
   markClassName?: string;

@@ -3,22 +3,21 @@
 /**
  * The organization's members and invitation management.
  *
- * Visible to owners and admins. Shows the member list and allows inviting new members
- * by email. The invitation flow (CLAUDE.md section 4):
- * 1. Owner creates an invitation by email.
- * 2. Invitee authenticates with Supabase, then accepts the invitation.
- * 3. Accept creates an ACTIVE MEMBER row.
+ * Visible to owners and admins. Shows the member list and the invitation form.
+ * The invite form is demo-only (see INVITE_UNAVAILABLE_MESSAGE): it stays
+ * interactive but always resolves to the free-tier limit message instead of
+ * creating an invitation. The invitations list below it still shows any
+ * invitation records that already exist.
  *
  * The hiding is presentation, not protection — `/workspaces/{id}/members` returns 403
  * to anyone else regardless of what the UI chose to render (CLAUDE.md 4.6).
  */
 
-import { AlertCircle, Check, Loader2, Send, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
+import { AlertCircle, Loader2, Send, ShieldCheck, Trash2, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "./button";
 import {
   ApiError,
-  createInvitation,
   deleteWorkspace,
   listInvitations,
   listWorkspaceMembers,
@@ -26,7 +25,17 @@ import {
   type OrgMember,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { Toast } from "./toast";
 import { cn } from "@/lib/utils";
+
+/**
+ * Demo limitation: this deployment runs on the Supabase free tier, so real
+ * invitation emails cannot be sent. The invite form stays interactive so the
+ * demo flow looks real, but submitting always resolves to this message
+ * instead of calling the backend invitation endpoint.
+ */
+const INVITE_UNAVAILABLE_MESSAGE =
+  "Email limit exceeded for this organization due to free tier.";
 
 export function MembersPanel({
   token,
@@ -43,8 +52,7 @@ export function MembersPanel({
   const [error, setError] = useState<string | undefined>();
   const [isLoading, setIsLoading] = useState(true);
   const [inviteEmail, setInviteEmail] = useState("");
-  const [isInviting, setIsInviting] = useState(false);
-  const [inviteSuccess, setInviteSuccess] = useState<string | undefined>();
+  const [inviteToast, setInviteToast] = useState<string | undefined>();
   const [activeTab, setActiveTab] = useState<"members" | "invitations">("members");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -89,32 +97,16 @@ export function MembersPanel({
   }, [fetchData]);
 
   const handleInvite = useCallback(
-    async (e: React.FormEvent) => {
+    (e: React.FormEvent) => {
       e.preventDefault();
-      if (!token || !workspaceId || !inviteEmail.trim()) return;
+      if (!inviteEmail.trim()) return;
 
-      setIsInviting(true);
-      setError(undefined);
-      setInviteSuccess(undefined);
-
-      try {
-        const invitation = await createInvitation(workspaceId, inviteEmail.trim(), {
-          token,
-        });
-        setInvitations((current) => [invitation, ...current]);
-        setInviteSuccess(`Invitation sent to ${invitation.email}`);
-        setInviteEmail("");
-      } catch (caught) {
-        setError(
-          caught instanceof ApiError
-            ? caught.message
-            : "Could not send the invitation.",
-        );
-      } finally {
-        setIsInviting(false);
-      }
+      // Demo short-circuit: never call the invitation endpoint. Show the
+      // free-tier limit message the way EMAIL_LIMIT_EXCEEDED is shown
+      // elsewhere in the app.
+      setInviteToast(INVITE_UNAVAILABLE_MESSAGE);
     },
-    [token, workspaceId, inviteEmail],
+    [inviteEmail],
   );
 
   const handleDeleteOrganization = useCallback(async () => {
@@ -262,22 +254,12 @@ export function MembersPanel({
               <Button
                 type="submit"
                 variant="primary"
-                disabled={isInviting || !inviteEmail.trim()}
+                disabled={!inviteEmail.trim()}
               >
-                {isInviting ? (
-                  <Loader2 className="size-3 animate-spin" aria-hidden />
-                ) : (
-                  <Send className="size-3" aria-hidden />
-                )}
+                <Send className="size-3" aria-hidden />
                 Invite
               </Button>
             </div>
-            {inviteSuccess && (
-              <p className="mt-1.5 flex items-center gap-1 text-[0.6875rem] text-success">
-                <Check className="size-3" aria-hidden />
-                {inviteSuccess}
-              </p>
-            )}
           </form>
 
           {/* Invitations list */}
@@ -308,6 +290,11 @@ export function MembersPanel({
           )}
         </div>
       )}
+
+      <Toast
+        message={inviteToast ?? ""}
+        onDismiss={() => setInviteToast(undefined)}
+      />
 
       {/* Delete Organization - Owner only */}
       {isOwner && (

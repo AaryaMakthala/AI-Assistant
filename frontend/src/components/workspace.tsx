@@ -8,7 +8,7 @@
  * the data flow readable.
  */
 
-import { Building2, LogOut, PanelRightOpen, Upload } from "lucide-react";
+import { Building2, LogOut, PanelRightOpen, ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { BrandWordmark } from "@/components/brand-wordmark";
@@ -51,6 +51,25 @@ export function Workspace() {
   // Upload view toggle: when true, the main area shows the upload interface
   // instead of the chat pane.
   const [showUpload, setShowUpload] = useState(false);
+
+  // Sidebar collapse — persisted to localStorage. When collapsed the sidebar
+  // shrinks to zero width and a small chevron handle sits on the divider.
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return localStorage.getItem("sidebar-collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const setSidebarCollapsed = (collapsed: boolean) => {
+    setIsSidebarCollapsed(collapsed);
+    try {
+      localStorage.setItem("sidebar-collapsed", String(collapsed));
+    } catch {
+      // localStorage unavailable — state-only fallback.
+    }
+  };
 
   // The sidebar's "Upload files" button opens the file picker that lives inside
   // UploadInterface's grid (the same input the "+ Add file" tile uses), so the
@@ -125,62 +144,84 @@ export function Workspace() {
 
   return (
     <div className="flex h-dvh w-full overflow-hidden">
-      <Sidebar
-        sessions={sessions.sessions}
-        activeSessionId={chat.sessionId}
-        documents={documents.documents}
-        uploads={documents.uploads}
-        deletingDocumentIds={documents.deletingIds}
-        approvingDocumentIds={documents.approvingIds}
-        rejectingDocumentIds={documents.rejectingIds}
-        isDisabled={!isAuthenticated}
-        canManageOrg={canManageOrg}
-        currentUserId={me?.user_id}
-        token={token}
-        workspaceId={workspaceId}
-        onNewChat={() => {
-          chat.reset();
-          setActiveChunkId(undefined);
-          setIsPanelOpen(false);
-          setShowUpload(false);
-        }}
-        onSelectSession={(id) => {
-          setActiveChunkId(undefined);
-          setIsPanelOpen(false);
-          setShowUpload(false);
-          void chat.loadSession(id);
-        }}
-        onDeleteSession={(id) => {
-          if (id === chat.sessionId) chat.reset();
-          void sessions.remove(id);
-        }}
-        onOpenUpload={() => {
-          // The picker registration exists as soon as UploadInterface has
-          // mounted (it stays mounted, hidden while the chat is showing), so
-          // this opens the picker on the very first click. Showing the
-          // documents view alongside is harmless and keeps the tab state
-          // consistent with what the grid is about to do.
-          setShowUpload(true);
-          filePickerRef.current?.();
-        }}
-        onDismissUpload={documents.dismissUpload}
-        documentsViewActive={showUpload}
-        onSelectChats={() => setShowUpload(false)}
-        onSelectDocuments={() => setShowUpload(true)}
-        onDeleteDocument={(id) => documents.remove(id)}
-        onReprocessDocument={(id) => void documents.reprocess(id)}
-        onApproveDocument={(id) => void documents.approve(id)}
-        onRejectDocument={(id) => void documents.reject(id)}
-        onDeleteWorkspace={() => {
-          // Organization was deleted AND the owner's auth account was removed
-          // by the backend. Sign out and redirect to the login page — do NOT
-          // show the zero-org view, because the account itself is now gone.
-          void signOut();
-        }}
-      />
+      {/* Sidebar — width transitions smoothly when collapsed. */}
+      <div
+        className={cn(
+          "relative flex h-full shrink-0 flex-col border-r border-border bg-[#0F1A15] transition-[width] duration-200 ease-in-out",
+          isSidebarCollapsed ? "w-0 overflow-hidden" : "w-64",
+        )}
+      >
+        {!isSidebarCollapsed && (
+          <Sidebar
+            sessions={sessions.sessions}
+            activeSessionId={chat.sessionId}
+            documents={documents.documents}
+            uploads={documents.uploads}
+            deletingDocumentIds={documents.deletingIds}
+            approvingDocumentIds={documents.approvingIds}
+            rejectingDocumentIds={documents.rejectingIds}
+            isDisabled={!isAuthenticated}
+            canManageOrg={canManageOrg}
+            currentUserId={me?.user_id}
+            token={token}
+            workspaceId={workspaceId}
+            onNewChat={() => {
+              chat.reset();
+              setActiveChunkId(undefined);
+              setIsPanelOpen(false);
+              setShowUpload(false);
+            }}
+            onSelectSession={(id) => {
+              setActiveChunkId(undefined);
+              setIsPanelOpen(false);
+              setShowUpload(false);
+              void chat.loadSession(id);
+            }}
+            onDeleteSession={(id) => {
+              if (id === chat.sessionId) chat.reset();
+              void sessions.remove(id);
+            }}
+            onOpenUpload={() => {
+              setShowUpload(true);
+              filePickerRef.current?.();
+            }}
+            onDismissUpload={documents.dismissUpload}
+            documentsViewActive={showUpload}
+            onSelectChats={() => setShowUpload(false)}
+            onSelectDocuments={() => setShowUpload(true)}
+            onDeleteDocument={(id) => documents.remove(id)}
+            onReprocessDocument={(id) => void documents.reprocess(id)}
+            onApproveDocument={(id) => void documents.approve(id)}
+            onRejectDocument={(id) => void documents.reject(id)}
+            onDeleteWorkspace={() => {
+              void signOut();
+            }}
+          />
+        )}
+      </div>
 
+      {/* Collapse handle — sits on the divider between sidebar and main. */}
+      <button
+        type="button"
+        onClick={() => setSidebarCollapsed(!isSidebarCollapsed)}
+        className={cn(
+          "group relative z-30 flex h-full w-5 shrink-0 items-center justify-center",
+          "border-r border-border bg-[#0F1A15] transition-colors hover:bg-[#162319]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+        )}
+        title={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {isSidebarCollapsed ? (
+          <ChevronRight className="size-3.5 text-muted transition-colors group-hover:text-foreground" />
+        ) : (
+          <ChevronLeft className="size-3.5 text-muted transition-colors group-hover:text-foreground" />
+        )}
+      </button>
+
+      {/* Main area — fills remaining width. */}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-2.5">
+        <header className="flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-1.5">
           <div className="flex min-w-0 items-baseline gap-2">
             <BrandWordmark />
             {me?.workspace_name && (

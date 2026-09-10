@@ -14,8 +14,6 @@ import type { ChatStreamEvent } from "./types";
  * adding a frame server-side cannot break an older client. */
 const KNOWN_EVENTS = new Set([
   "session",
-  "routing",
-  "step",
   "sources",
   "token",
   "citations",

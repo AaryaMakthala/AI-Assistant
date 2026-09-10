@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel
 
 from app.api.auth import router as auth_router
 from app.api.chat_v2 import router as grounded_chat_router
@@ -17,20 +16,7 @@ from app.db.session import dispose_engine
 from app.errors import register_exception_handlers, register_request_context
 from app.logging_config import configure_logging
 from app.observability import configure_sentry, configure_tracing
-from app.observability.sentry import sentry_is_active
-from app.observability.tracing import tracing_is_enabled
 from app.security.rate_limit import register_rate_limiting
-
-
-class HealthResponse(BaseModel):
-    status: str
-    environment: str
-    #: Whether errors reach Sentry from this process. Reported so a deploy can confirm
-    #: observability is live without waiting for something to break — the alternative is
-    #: discovering an unset DSN during the incident it was meant to help with.
-    error_reporting: bool = False
-    #: Whether agent traces are being shipped. Expected false in production.
-    agent_tracing: bool = False
 
 
 @asynccontextmanager
@@ -149,18 +135,14 @@ def create_app() -> FastAPI:
 
     # Workspace-switching middleware: reads X-Workspace-ID header and stores
     # the override in request state for get_principal to pick up.
-    from app.security.workspace_switch import workspace_switch_middleware
     from starlette.middleware.base import BaseHTTPMiddleware
+
+    from app.security.workspace_switch import workspace_switch_middleware
     app.add_middleware(BaseHTTPMiddleware, dispatch=workspace_switch_middleware)
 
-    @app.get("/health", response_model=HealthResponse)
-    async def health() -> HealthResponse:
-        return HealthResponse(
-            status="ok",
-            environment=settings.environment,
-            error_reporting=sentry_is_active(),
-            agent_tracing=tracing_is_enabled(),
-        )
+    @app.get("/health", response_model=dict[str, str])
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
 
     app.include_router(auth_router)
     app.include_router(documents_router)

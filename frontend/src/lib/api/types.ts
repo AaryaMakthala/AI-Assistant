@@ -55,10 +55,6 @@ export interface ChatMessage {
   created_at: string;
   /** Generation stopped early; the content is a partial answer. */
   incomplete: boolean;
-  /** Which sources the supervisor consulted for this turn. Empty on user turns. */
-  routes: AgentRoute[];
-  /** The validated SELECT behind a business-data answer; empty when no SQL ran. */
-  sql_query: string;
 }
 
 export interface ChatMessageListResponse {
@@ -66,9 +62,6 @@ export interface ChatMessageListResponse {
 }
 
 export type DocumentStatus = "PENDING" | "READY" | "REJECTED" | "FAILED";
-
-/** Who may read a document. Kept for UI compatibility. */
-export type DocumentVisibility = "org" | "personal";
 
 /** Canonical document shape matching the backend `DocumentResponse`. */
 export interface DocumentSummary {
@@ -103,31 +96,10 @@ export interface UploadAcceptedResponse {
 
 /* --- SSE frames emitted by POST /chat --- */
 
-/**
- * A source the supervisor can route a question to. `direct` is not an agent: it means the
- * question needed no lookup at all.
- */
-export type AgentRoute =
-  | "documents"
-  | "business_data"
-  | "external"
-  | "direct";
-
 /** Sent first, before generation. Carries the id of a newly created session. */
 export interface SessionEvent {
   type: "session";
   session_id: string;
-}
-
-/**
- * The supervisor's routing decision, sent once as soon as it is made and before any agent
- * runs. Drives the "thinking/routing" indicator.
- */
-export interface RoutingEvent {
-  type: "routing";
-  routes: AgentRoute[];
-  /** The router's short justification. May be empty. */
-  reason: string;
 }
 
 /** Everything retrieved, sent before the first token so the UI can show what is being
@@ -156,10 +128,6 @@ export interface DoneEvent {
   model: string;
   /** False when nothing was retrieved — the answer is an honest non-answer. */
   grounded: boolean;
-  /** Which agents contributed to this answer. */
-  routes: AgentRoute[];
-  /** The validated SELECT the SQL agent ran; empty string when none did. */
-  sql_query: string;
 }
 
 /** Terminal failure frame. Arrives after a 200 header, so it is not an HTTP error. */
@@ -170,16 +138,8 @@ export interface ErrorEvent {
   partial: boolean;
 }
 
-/** One line of the agent trace, emitted as each node completes. */
-export interface StepEvent {
-  type: "step";
-  text: string;
-}
-
 export type ChatStreamEvent =
   | SessionEvent
-  | RoutingEvent
-  | StepEvent
   | SourcesEvent
   | TokenEvent
   | CitationsEvent

@@ -1,0 +1,578 @@
+/*
+ * Auth layout design system — shared by login, signup, and other auth pages.
+ * Scoped to .auth-page and its descendants. Derived from the original login.css
+ * to guarantee visual consistency across all authentication flows.
+ *
+ * Layout contract:
+ *   One full-bleed login-bg-5K.png layer behind everything (z-index 0),
+ *   object-fit: cover — fills the entire viewport edge-to-edge with zero
+ *   letterboxing. The photo's calm, dark zone spans the left half; the
+ *   headline is pushed off the hard left edge into that zone by
+ *   --auth-shift (see .auth-page). Three real blob renders (public/blobs/*.png)
+ *   float above it (z-index 1) as small, individually positioned accents.
+ *   The nav floats on top (brand top-left, demo pill top-right).
+ *   Left-center: headline + subhead on the background's calm zone. Center-right:
+ *   one wide/short frosted glass card holding the form. A small secondary brand
+ *   mark sits bottom-left. The page is exactly one viewport tall — no scrollbars.
+ */
+
+.auth-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  color: #ffffff;
+  --auth-shift: 0px;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  background: #0b1a11;
+}
+
+/* --- Background ---------------------------------------------------------- */
+
+.auth-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  animation: auth-fade-in 600ms ease-out both;
+}
+
+/* --- Blob layer ---------------------------------------------------------- */
+
+.auth-blobs {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  animation: auth-fade-in 600ms ease-out both;
+}
+
+.auth-blob {
+  position: absolute;
+  height: auto;
+  will-change: transform;
+  filter: blur(3px);
+}
+
+/* The gcircle slot uses stone.png (muted matte family). Green is a small accent. */
+.auth-blob-gcircle {
+  width: 260px;
+  top: 12%;
+  left: -10%;
+  animation: float-a 11s ease-in-out infinite alternate;
+}
+
+.auth-blob-stone {
+  width: 160px;
+  top: 16%;
+  left: 68%;
+  animation: float-c 13s ease-in-out 3s infinite alternate;
+}
+
+.auth-blob-green {
+  width: 150px;
+  top: 34%;
+  left: 8%;
+  animation: float-b 9s ease-in-out 1.5s infinite alternate;
+}
+
+/* Desktop (≥1100px): anchor blobs to the hero text block. */
+@media (min-width: 1100px) {
+  .auth-blob-gcircle {
+    width: 390px;
+    left: calc(-100px + var(--auth-shift));
+    top: calc(50% - 344px);
+  }
+
+  .auth-blob-stone {
+    width: 175px;
+    left: calc(331px + var(--auth-shift));
+    top: calc(50% - 321px);
+  }
+
+  .auth-blob-green {
+    width: 195px;
+    left: calc(322px + var(--auth-shift));
+    top: calc(50% + 60px);
+  }
+}
+
+@keyframes auth-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes float-a {
+  from { transform: translate(0, 0); }
+  to { transform: translate(-15px, 15px); }
+}
+
+@keyframes float-b {
+  from { transform: translate(0, 0); }
+  to { transform: translate(18px, -18px); }
+}
+
+@keyframes float-c {
+  from { transform: translate(0, 0); }
+  to { transform: translate(-10px, -10px); }
+}
+
+/* --- Top nav ------------------------------------------------------------- */
+
+.auth-nav {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 76px;
+  flex-shrink: 0;
+  padding: 0 24px;
+  animation: auth-slide-down 500ms cubic-bezier(0.16, 1, 0.3, 1) 200ms both;
+}
+
+@media (min-width: 768px) {
+  .auth-nav {
+    padding: 0 80px;
+  }
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-brand .wordmark-text {
+  color: #9CB88F;
+  letter-spacing: 0.08em;
+}
+
+.auth-nav-demo {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(156, 184, 143, 0.32);
+  background: transparent;
+  color: #9CB88F;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+.auth-nav-demo:hover {
+  background: rgba(156, 184, 143, 0.12);
+  border-color: rgba(156, 184, 143, 0.5);
+  color: #F2F5EF;
+}
+
+.auth-nav-demo:focus-visible {
+  outline: none;
+  border-color: rgba(156, 184, 143, 0.65);
+  box-shadow: 0 0 0 3px rgba(156, 184, 143, 0.18);
+}
+
+.auth-nav-demo:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* --- Two-column content area --------------------------------------------- */
+
+.auth-main {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 56px;
+  padding: 16px 24px 24px;
+  overflow-y: auto;
+}
+
+@media (min-width: 768px) {
+  .auth-main {
+    padding: 16px 80px 40px;
+  }
+}
+
+/* Hero text block — sits directly on the background's calm left zone. */
+.auth-hero {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 480px;
+}
+
+.auth-headline {
+  margin: 0 0 14px;
+  font-family: var(--font-fraunces), "Source Serif 4", Georgia, serif;
+  font-weight: 500;
+  font-size: clamp(28px, 3.2vw, 40px);
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+  animation: auth-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 600ms both;
+}
+
+.auth-subtext {
+  margin: 0;
+  max-width: 380px;
+  color: #F2F5EF;
+  font-size: 16px;
+  line-height: 1.6;
+  animation: auth-fade 500ms cubic-bezier(0.16, 1, 0.3, 1) 700ms both;
+}
+
+/* --- Glass card ---------------------------------------------------------- */
+
+.auth-glass {
+  position: relative;
+  z-index: 2;
+  flex: 0 1 460px;
+  width: min(100%, 460px);
+  margin-left: auto;
+  padding: 32px 36px;
+  background: linear-gradient(135deg, rgba(20, 51, 32, 0.65), rgba(13, 40, 24, 0.45));
+  -webkit-backdrop-filter: blur(28px) saturate(140%);
+  backdrop-filter: blur(28px) saturate(140%);
+  border: 1px solid rgba(156, 184, 143, 0.22);
+  border-radius: 24px;
+  box-shadow:
+    0 8px 40px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  animation: auth-fade 600ms cubic-bezier(0.16, 1, 0.3, 1) 400ms both;
+}
+
+/* Signup mode: a moderately wider glass panel so the two-column field grid
+ * reads as a wide horizontal card instead of a tall vertical form. Same
+ * surface treatment — only the width family changes. */
+.auth-glass-wide {
+  flex-basis: 560px;
+  width: min(100%, 560px);
+}
+
+/* Two-column row layout (≥1100px). */
+@media (min-width: 1100px) {
+  .auth-page {
+    --auth-shift: clamp(0px, (100vw - 1120px) / 2, 200px);
+  }
+
+  .auth-main {
+    gap: 0;
+  }
+
+  .auth-hero {
+    margin-left: var(--auth-shift);
+  }
+
+  .auth-glass {
+    margin-left: max(0px, calc((100% - 1060px) / 2));
+  }
+
+  /* Wider card variant: 480px hero + 560px card + 120px shift allowance =
+   * 1160px, keeping the same balanced center-right position as signin. */
+  .auth-glass-wide {
+    margin-left: max(0px, calc((100% - 1160px) / 2));
+  }
+}
+
+/* --- Form helpers -------------------------------------------------------- */
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Signup two-column field grid — pairs with the wider .auth-glass card so the
+ * form reads as a wide horizontal panel. Rows: Full name | Email, Password |
+ * Confirm, then full-width Organization name and password-strength indicator.
+ * On narrow screens the grid collapses to a single column so fields stack. */
+.auth-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.auth-fields-grid .auth-field-span-2 {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 767px) {
+  .auth-fields-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .auth-fields-grid .auth-field-span-2 {
+    grid-column: auto;
+  }
+}
+
+.auth-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.auth-label {
+  display: block;
+  color: #F2F5EF;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.auth-input {
+  display: block;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(156, 184, 143, 0.15);
+  border-radius: 10px;
+  color: #EAF0E6;
+  font-family: inherit;
+  font-size: 15px;
+  transition: all 0.2s ease;
+}
+
+.auth-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.auth-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.auth-hint {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.auth-password-wrap {
+  position: relative;
+}
+
+.auth-password-wrap .auth-input {
+  padding-right: 48px;
+}
+
+.auth-password-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.auth-password-toggle:hover {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+
+.auth-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 44px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.auth-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.auth-btn-primary {
+  background: linear-gradient(135deg, #3B7A4F, #2A5C3A);
+  border: none;
+  color: #F2F5EF;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(59, 122, 79, 0.3);
+}
+
+.auth-btn-primary:hover {
+  filter: brightness(1.1);
+}
+
+.auth-btn-secondary {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+}
+
+.auth-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.auth-link {
+  color: #F2F5EF;
+  font-size: 13px;
+  transition: color 0.2s ease;
+}
+
+.auth-link:hover {
+  color: #ffffff;
+}
+
+/* --- Alerts (error / success / warning) ---------------------------------- */
+
+.auth-alert {
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.5;
+  animation: auth-fade 300ms ease-out both;
+}
+
+.auth-alert-error {
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  background: rgba(255, 107, 107, 0.12);
+  color: #ff6b6b;
+}
+
+.auth-alert-success {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.auth-alert-warning {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.auth-demo-error {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: center;
+  font-size: 12px;
+  color: #ff6b6b;
+}
+
+/* --- Stacked layout (tablet / mobile) ------------------------------------ */
+
+@media (max-width: 1099px) {
+  .auth-main {
+    flex-direction: column;
+    justify-content: center;
+    gap: 32px;
+    padding: 16px 24px 32px;
+  }
+
+  .auth-hero {
+    flex: none;
+    max-width: 460px;
+    text-align: center;
+  }
+
+  .auth-subtext {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .auth-glass {
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .auth-glass {
+    padding: 28px 24px;
+  }
+
+  .auth-blob-gcircle {
+    width: 95px;
+    top: 11%;
+    left: 6%;
+  }
+
+  .auth-blob-stone {
+    width: 80px;
+    top: 12%;
+    left: 60%;
+  }
+
+  .auth-blob-green {
+    width: 95px;
+    top: 7%;
+    left: 32%;
+  }
+}
+
+/* --- Entrance keyframes -------------------------------------------------- */
+
+@keyframes auth-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes auth-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Reduced motion ------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-bg,
+  .auth-blobs,
+  .auth-blob,
+  .auth-nav,
+  .auth-glass,
+  .auth-headline,
+  .auth-subtext,
+  .auth-alert {
+    animation: none;
+  }
+}

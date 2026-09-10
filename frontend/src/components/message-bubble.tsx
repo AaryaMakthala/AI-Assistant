@@ -17,8 +17,6 @@
 import { AlertTriangle, Info, User } from "lucide-react";
 import { CitationChips } from "./citation-chips";
 import { Markdown } from "./markdown";
-import { RoutingIndicator } from "./routing-indicator";
-import { SqlDisclosure } from "./sql-disclosure";
 import type { Citation } from "@/lib/api";
 import type { Turn } from "@/lib/hooks/use-chat";
 import { cn } from "@/lib/utils";
@@ -81,14 +79,6 @@ export function MessageBubble({
       <div className="min-w-0 flex-1">
         <div className="glass-message p-5">
           <div className="space-y-3">
-            <RoutingIndicator
-              routes={turn.routes}
-              reason={turn.routeReason}
-              steps={turn.steps}
-              isStreaming={isStreaming}
-              hasContent={hasContent}
-            />
-
             {hasContent && (
               <div>
                 <Markdown content={turn.content} />
@@ -133,10 +123,6 @@ export function MessageBubble({
               </div>
             )}
 
-            <SqlDisclosure sql={turn.sqlQuery} />
-
-            {/* Sources sit as a slightly differentiated sub-section of the same
-             * card: hairline top separator. Only rendered when citations exist. */}
             <CitationChips
               citations={turn.citations}
               activeChunkId={activeChunkId}

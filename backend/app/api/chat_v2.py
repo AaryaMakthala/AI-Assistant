@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -61,6 +61,7 @@ from app.retrieval.query_rewrite import ChatTurn
 from app.retrieval.query_understanding import understand_query
 from app.retrieval.refusals import ResponseReason, refusal_message
 from app.security.auth import CurrentPrincipal
+from app.security.rate_limit import CHAT_RATE_LIMIT, limiter
 from app.security.rls import tenant_session
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -70,7 +71,24 @@ REFUSAL_NO_EVIDENCE = refusal_message(ResponseReason.NO_EVIDENCE)
 REFUSAL_NOT_RELEVANT = refusal_message(ResponseReason.NOT_RELEVANT)
 REFUSAL_ANSWER = REFUSAL_NO_EVIDENCE
 
+#: Matches "[1]" / "[2, 3]" / "[1][4]" in the model's answer.
+_CITATION_REF = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
+
+def cited_numbers(answer: str) -> list[int]:
+    """The bracketed source numbers `answer` refers to, in order of first appearance.
+
+    Raw and unvalidated — the caller decides what range is legitimate.
+    """
+    numbers: list[int] = []
+    seen: set[int] = set()
+    for match in _CITATION_REF.finditer(answer):
+        for part in match.group(1).split(","):
+            number = int(part.strip())
+            if number not in seen:
+                seen.add(number)
+                numbers.append(number)
+    return numbers
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +107,9 @@ def _refine_intent_from_qu(
     off_topic, needs_clarification) that may misclassify certain query types:
     - Identity questions ("who are you", "what is your name") may be classified
       as greeting or off_topic instead of identity_assistant.
-    - Name statements ("my name is X", "im Aarya") may be classified as greeting
-      instead of identity_user.
+    - Personal-name queries ("my name is X", "what is my name") may be
+      classified as document_content or off_topic; the regex fast-path routes
+      them to the personal-name boundary before any retrieval.
     - Capability requests ("write code", "create a file") may be classified as
       off_topic, which is correct, but we need to distinguish them from general
       knowledge questions for a more specific refusal.
@@ -126,16 +145,14 @@ def _refine_intent_from_qu(
     #
     # This handles:
     #   "who are you" → identity_assistant (not greeting/off_topic)
-    #   "my name is X" → identity_user (not greeting)
     #   "hi" → greeting (not document_content)
     #   "how many files are there" → workspace_metadata + metadata_sub=doc_count
     #   (even when QU classifies it as workspace_metadata, the regex populates
     #    the sub-intent the handler needs)
-    if regex_intent.category in (
-        _IC.IDENTITY_ASSISTANT,
-        _IC.IDENTITY_USER,
-        _IC.GREETING,
-    ):
+    if (
+        regex_intent.category
+        in (_IC.IDENTITY_ASSISTANT, _IC.IDENTITY_USER, _IC.GREETING)
+    ) or regex_intent.reason == "personal_name_boundary":
         return regex_intent
 
     # Metadata refinement: when QU classified the query as workspace_metadata or
@@ -964,6 +981,34 @@ def _answer_greeting(*, question: str) -> str:
             "Just ask a question about your documents to get started!"
         )
 
+    # Simple social acknowledgements — short and natural, never via RAG.
+    if re.match(r"^(?:ok+|okay|sure|yep|yes|alright)\s*[!.?]*$", q):
+        return "Sounds good! 👍"
+    if re.match(r"^(?:no+|nah|nope)\s*[!.?]*$", q):
+        return "Alright! Let me know if you need anything else. 👍"
+    if re.match(r"^(?:good\s+(?:boy|girl|job|work)|well\s+done|nice\s+one)\s*[!.?]*$", q):
+        return "Haha, thank you! 😄"
+    if re.match(r"^(?:nice|cool|great|awesome|perfect|sweet)\s*[!.?]*$", q):
+        return "Thank you! 😊"
+
+    # Time-of-day greetings.
+    m = re.match(r"^(good\s+(?:morning|afternoon|evening))\b", q)
+    if m:
+        return f"{m.group(1).capitalize()}! How can I help you today? ☀️"
+
+    # How-are-you greetings.
+    if re.match(r"^how(?:'?s|\s+are)\s+(?:you|things|it\s+going)", q) or \
+       re.match(r"^how\s+do\s+you\s+do\b", q):
+        return "I'm doing great, thanks for asking! How can I help you today?"
+
+    # Echo the greeting back naturally ("hi/hey/heyyy/hello/yo/howdy",
+    # including typos like "nameste" and regional "vanakam").
+    if re.match(r"^(?:hi+|hello+|hey+|yo+|howdy|greetings|namaste|nameste|vanakam)\b", q):
+        word = q.split()[0]
+        if word.startswith("nam"):
+            return "Namaste! 🙏 How can I help you today?"
+        return "Hi! How can I help you today?"
+
     # Default greeting
     return "Hello! I'm your company knowledge assistant. How can I help you today?"
 
@@ -1063,17 +1108,22 @@ async def _answer_identity(
 # ---------------------------------------------------------------------------
 
 
-def _answer_identity_assistant() -> str:
+def _answer_identity_assistant(*, question: str = "") -> str:
     """Answer a question about what/who the assistant is.
 
-    No database query, no retrieval, no LLM call.
+    No database query, no retrieval, no LLM call.  When the user's question
+    has an obvious spelling mistake (e.g. "what is youe name"), mention the
+    correction before answering — but only in that case.
     """
-    return (
-        "I'm a company knowledge assistant. I help you find information from "
-        "your workspace's approved documents. You can ask me questions about "
-        "uploaded documents, and I'll answer with citations from the relevant "
-        "sources. I can also help with workspace metadata like member counts, "
-        "document counts, and roles."
+    prefix = ""
+    if re.search(r"\b(?:youe|yur|yor|ur)\b", question.strip().lower()):
+        prefix = "I think you meant \u201cyour name.\u201d "
+    return prefix + (
+        "I'm Office Brain, your company knowledge assistant. I help you find "
+        "information from your workspace's approved documents. You can ask me "
+        "questions about uploaded documents, and I'll answer with citations "
+        "from the relevant sources. I can also help with workspace metadata "
+        "like member counts, document counts, and roles."
     )
 
 
@@ -1083,28 +1133,29 @@ async def _answer_identity_user(
     user_id: uuid.UUID,
     question: str = "",
 ) -> tuple[str, ResponseReason]:
-    """Answer a question about the user's own info, or acknowledge a statement.
+    """Answer a question about the user's own workspace info.
 
-    Handles both questions ("what is my info") and statements ("my name is X").
+    Handles questions like "what is my info".  Personal-name statements
+    ("my name is X") are routed to the personal-name boundary before this
+    handler, so nothing here ever accepts, extracts, or stores a user name.
     Returns (answer, refusal_reason).
     """
     from app.db.models import Member
 
     q_lower = question.lower().strip()
 
-    # Detect if this is a statement ("my name is X") vs a question.
+    # Personal-name statement reaching this handler (defensive; the boundary
+    # intercept in classify_intent_regex should have caught it first).  Any
+    # user-name intent is answered with the single fixed boundary message —
+    # no name is stored, extracted, learned, or echoed back.
     is_statement = bool(
-        re.match(r"^(?:my\s+name\s+is|i\s+am|i'm|call\s+me)\b", q_lower)
+        re.match(r"^(?:my\s+name\s+is|my\s+name's|i\s+am|i'?m|iam|call\s+me)\b", q_lower)
     )
 
     if is_statement:
-        # Acknowledge the statement — we can't store it, but we should not
-        # pretend we didn't hear it.
         return (
-            "Thanks for letting me know! I don't store personal information "
-            "like names, but I can help you find information from your "
-            "workspace's approved documents. What would you like to know?",
-            None,
+            refusal_message(ResponseReason.PERSONAL_NAME),
+            ResponseReason.PERSONAL_NAME,
         )
 
     # It's a question about user info.
@@ -1483,9 +1534,13 @@ async def _stream_chat(
     # documents and must never be handled as general knowledge.  When QU call
     # tends to classify these as off_topic / general_conversation, route them
     # to document-content retrieval instead.
-    if _is_person_info_request(question) and intent.category in (
-        IntentCategory.OUT_OF_SCOPE,
-        IntentCategory.GENERAL_CONVERSATION,
+    if (
+        _is_person_info_request(question)
+        and intent.reason != "personal_name_boundary"
+        and intent.category in (
+            IntentCategory.OUT_OF_SCOPE,
+            IntentCategory.GENERAL_CONVERSATION,
+        )
     ):
         intent = Intent(
             category=IntentCategory.DOCUMENT_CONTENT,
@@ -1533,11 +1588,20 @@ async def _stream_chat(
         )
 
     elif intent.category == IntentCategory.GENERAL_CONVERSATION:
-        answer = _answer_general_conversation(question=effective_query)
-        logger.info(
-            "intent=general_conversation workspace={ws} retrieval_called=False",
-            ws=workspace_id,
-        )
+        if intent.reason == "personal_name_boundary":
+            answer = refusal_message(ResponseReason.PERSONAL_NAME)
+            refusal_reason = ResponseReason.PERSONAL_NAME
+            logger.info(
+                "intent=general_conversation reason=personal_name_boundary "
+                "workspace={ws} retrieval_called=False",
+                ws=workspace_id,
+            )
+        else:
+            answer = _answer_general_conversation(question=effective_query)
+            logger.info(
+                "intent=general_conversation workspace={ws} retrieval_called=False",
+                ws=workspace_id,
+            )
 
     elif intent.category == IntentCategory.OUT_OF_SCOPE:
         # Distinguish capability requests (write code, create files, design)
@@ -1555,7 +1619,7 @@ async def _stream_chat(
         )
 
     elif intent.category == IntentCategory.IDENTITY_ASSISTANT:
-        answer = _answer_identity_assistant()
+        answer = _answer_identity_assistant(question=question)
         logger.info(
             "intent=identity_assistant workspace={ws} retrieval_called=False",
             ws=workspace_id,
@@ -1862,7 +1926,6 @@ async def _stream_chat(
     # If the answer contains no bracketed citations at all, we cannot determine
     # what was referenced — keep the full retrieved set rather than dropping
     # everything.
-    from app.rag.pipeline import cited_numbers
     cited_nums = cited_numbers(full_text)
     if cited_nums:
         cited_set = set(cited_nums)
@@ -1912,7 +1975,9 @@ async def _stream_chat(
     response_class=StreamingResponse,
     summary="SSE streaming chat — what the frontend calls",
 )
+@limiter.limit(CHAT_RATE_LIMIT)
 async def chat_stream(
+    request: Request,  # noqa: ARG001 — required by slowapi's decorator
     principal: CurrentPrincipal,
     payload: ChatStreamRequest,
     llm: Annotated[LLMProvider, Depends(get_generic_llm)],
@@ -1954,7 +2019,9 @@ async def chat_stream(
     response_model=GroundedChatResponse,
     summary="Ask a question grounded in the workspace's approved documents (sync JSON)",
 )
+@limiter.limit(CHAT_RATE_LIMIT)
 async def grounded_chat(
+    request: Request,  # noqa: ARG001 — required by slowapi's decorator
     principal: CurrentPrincipal,
     payload: GroundedChatRequest,
     llm: Annotated[LLMProvider, Depends(get_generic_llm)],
@@ -2048,9 +2115,13 @@ async def grounded_chat(
     # documents and must never be handled as general knowledge.  When QU tends
     # to classify these as off_topic / general_conversation, route them to
     # document-content retrieval instead.
-    if _is_person_info_request(question) and intent.category in (
-        IntentCategory.OUT_OF_SCOPE,
-        IntentCategory.GENERAL_CONVERSATION,
+    if (
+        _is_person_info_request(question)
+        and intent.reason != "personal_name_boundary"
+        and intent.category in (
+            IntentCategory.OUT_OF_SCOPE,
+            IntentCategory.GENERAL_CONVERSATION,
+        )
     ):
         intent = Intent(
             category=IntentCategory.DOCUMENT_CONTENT,
@@ -2076,10 +2147,17 @@ async def grounded_chat(
         )
 
     if intent.category == IntentCategory.GENERAL_CONVERSATION:
-        answer = _answer_general_conversation(question=effective_query)
-        logger.info(
-            "intent=general_conversation workspace={ws} retrieval_called=False", ws=workspace_id,
-        )
+        if intent.reason == "personal_name_boundary":
+            answer = refusal_message(ResponseReason.PERSONAL_NAME)
+            logger.info(
+                "intent=general_conversation reason=personal_name_boundary "
+                "workspace={ws} retrieval_called=False", ws=workspace_id,
+            )
+        else:
+            answer = _answer_general_conversation(question=effective_query)
+            logger.info(
+                "intent=general_conversation workspace={ws} retrieval_called=False", ws=workspace_id,
+            )
         return GroundedChatResponse(
             answer=answer, grounded=True, insufficient_evidence=False, sources=[],
         )
@@ -2101,7 +2179,7 @@ async def grounded_chat(
         )
 
     if intent.category == IntentCategory.IDENTITY_ASSISTANT:
-        answer = _answer_identity_assistant()
+        answer = _answer_identity_assistant(question=question)
         logger.info(
             "intent=identity_assistant workspace={ws} retrieval_called=False", ws=workspace_id,
         )
@@ -2325,7 +2403,6 @@ async def grounded_chat(
     # If the answer contains no bracketed citations at all, we cannot determine
     # what was referenced — fall back to the full retrieved set rather than
     # dropping everything.
-    from app.rag.pipeline import cited_numbers
     cited_nums = cited_numbers(answer_text)
     if cited_nums:
         cited_set = set(cited_nums)

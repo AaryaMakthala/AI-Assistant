@@ -8,7 +8,6 @@ import {
   Loader2,
   Play,
 } from "lucide-react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import Link from "next/link";
@@ -20,38 +19,15 @@ import {
 } from "@/lib/api";
 import { getSupabaseClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { mapSupabaseAuthError } from "@/lib/supabase/auth-errors";
-import { BrandWordmark } from "@/components/brand-wordmark";
+import { AuthLayout } from "@/components/auth-layout";
 import { Toast } from "@/components/toast";
 import { cn } from "@/lib/utils";
-import "./login.css";
+import "@/components/auth-layout.css";
 
 type Mode = "signin" | "signup";
 
-/**
- * Decorative blob renders, individually positioned by their `login-blob-*`
- * classes in login.css. One entry today — to bring more blobs back, add
- * entries here (src, intrinsic width/height, a `login-blob-*` position class)
- * and a matching position class in login.css; the mapping below renders them
- * in order, layered above the background photo and below the nav/glass card.
- */
-const BLOBS = [
-  {
-    id: "gcircle",
-    src: "/blobs/stone.png",
-    width: 677,
-    height: 369,
-    className: "login-blob login-blob-gcircle",
-  },
-] as const;
-
-/** Kept in step with the reset-password form so one flow cannot accept what the other rejects. */
 const MIN_PASSWORD_LENGTH = 8;
 
-/**
- * Where to land after signing in. `proxy.ts` puts the originally requested path in `next`,
- * and it is re-validated here as a same-origin absolute path: the redirect is driven by a
- * query parameter, so an unchecked value is an open redirect.
- */
 function postSignInTarget(): string {
   const next = new URLSearchParams(window.location.search).get("next");
   if (!next || !next.startsWith("/") || next.startsWith("//")) return "/";
@@ -75,36 +51,32 @@ export default function LoginPage() {
   const [isBusy, setIsBusy] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | undefined>();
 
-  // Zero-workspace state: user authenticated but has no organizations.
   const [needsOrg, setNeedsOrg] = useState(false);
   const [newOrgName, setNewOrgName] = useState("");
   const [orgSessionToken, setOrgSessionToken] = useState<string | undefined>();
   const [isCreatingOrg, setIsCreatingOrg] = useState(false);
   const [orgError, setOrgError] = useState<string | undefined>();
 
-  // Password visibility
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
-  // Demo state
   const [isEnteringDemo, setIsEnteringDemo] = useState(false);
   const [demoError, setDemoError] = useState<string | undefined>();
 
-  // Org creation state (after zero-workspace check)
   const [orgSuccess, setOrgSuccess] = useState(false);
 
   if (!isSupabaseConfigured() || !supabase) {
     return (
-      <LoginShell
+      <AuthLayout
         title="Sign in to Office Brain"
         subtitle="Ask questions across your organization's approved knowledge — every answer grounded in your documents, with citations."
       >
-        <p role="alert" className="login-alert login-alert-error">
+        <p role="alert" className="auth-alert auth-alert-error">
           Sign-in is unavailable: this deployment has no Supabase credentials.
           Set <code className="font-mono">NEXT_PUBLIC_SUPABASE_URL</code> and{" "}
           <code className="font-mono">NEXT_PUBLIC_SUPABASE_ANON_KEY</code>.
         </p>
-      </LoginShell>
+      </AuthLayout>
     );
   }
 
@@ -162,16 +134,11 @@ export default function LoginPage() {
 
     try {
       if (mode === "signin") {
-        // Check if the email is registered before attempting sign-in.
-        // Supabase returns the same generic "Invalid login credentials" for both
-        // wrong email and wrong password, so we need to distinguish them.
         let emailExists = true;
         try {
           const result = await checkEmail(email);
           emailExists = result.exists;
         } catch {
-          // If the check fails (network, backend down), proceed with sign-in
-          // anyway — the normal error handling will catch any issues.
           emailExists = true;
         }
 
@@ -199,7 +166,6 @@ export default function LoginPage() {
           return;
         }
 
-        // Check whether the user has at least one organization/workspace.
         try {
           const token = signInData.session?.access_token;
           if (token) {
@@ -304,14 +270,14 @@ export default function LoginPage() {
   // Zero-workspace state: user is authenticated but has no organizations.
   if (needsOrg) {
     return (
-      <LoginShell
+      <AuthLayout
         title="Create your organization"
         subtitle="You're signed in, but this account isn't part of a workspace yet."
       >
         <div className="space-y-5">
           {orgSuccess ? (
             <>
-              <div className="login-alert login-alert-success">
+              <div className="auth-alert auth-alert-success">
                 <p role="status">
                   Organization created. You can now continue to the
                   application.
@@ -320,14 +286,14 @@ export default function LoginPage() {
               <button
                 type="button"
                 onClick={() => router.replace(postSignInTarget())}
-                className="login-btn login-btn-primary"
+                className="auth-btn auth-btn-primary"
               >
                 Continue to application
               </button>
             </>
           ) : (
             <>
-              <div className="login-alert login-alert-warning">
+              <div className="auth-alert auth-alert-warning">
                 <p role="alert">
                   No organization is associated with this account.
                 </p>
@@ -336,8 +302,8 @@ export default function LoginPage() {
                   continue.
                 </p>
               </div>
-              <form onSubmit={handleCreateOrg} className="login-form">
-                <div className="login-fields">
+              <form onSubmit={handleCreateOrg} className="auth-form">
+                <div className="auth-fields">
                   <Field
                     label="Organization name"
                     type="text"
@@ -348,15 +314,15 @@ export default function LoginPage() {
                   />
                 </div>
                 {orgError && (
-                  <div className="login-alert login-alert-error">
+                  <div className="auth-alert auth-alert-error">
                     <p role="alert">{orgError}</p>
                   </div>
                 )}
-                <div className="login-actions">
+                <div className="auth-actions">
                   <button
                     type="submit"
                     disabled={isCreatingOrg || !newOrgName.trim()}
-                    className="login-btn login-btn-primary"
+                    className="auth-btn auth-btn-primary"
                   >
                     {isCreatingOrg ? (
                       <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -376,7 +342,7 @@ export default function LoginPage() {
                     setOrgError(undefined);
                     setOrgSuccess(false);
                   }}
-                  className="login-link font-medium"
+                  className="auth-link font-medium"
                 >
                   Back to sign in
                 </button>
@@ -384,12 +350,12 @@ export default function LoginPage() {
             </>
           )}
         </div>
-      </LoginShell>
+      </AuthLayout>
     );
   }
 
   return (
-    <LoginShell
+    <AuthLayout
       title={
         mode === "signin"
           ? "Sign in to Office Brain"
@@ -402,9 +368,12 @@ export default function LoginPage() {
       }
       onDemo={handleDemo}
       demoBusy={isEnteringDemo}
+      cardWide={mode === "signup"}
     >
-      <form onSubmit={submit} className="login-form">
-        <div className="login-fields">
+      <form onSubmit={submit} className="auth-form">
+        <div
+          className={cn("auth-fields", mode === "signup" && "auth-fields-grid")}
+        >
           {mode === "signup" && (
             <Field
               label="Full name"
@@ -441,15 +410,11 @@ export default function LoginPage() {
             <div className="flex justify-end">
               <Link
                 href="/forgot-password"
-                className="login-link hover:underline"
+                className="auth-link hover:underline"
               >
                 Forgot password?
               </Link>
             </div>
-          )}
-
-          {mode === "signup" && password.length > 0 && (
-            <PasswordStrengthIndicator password={password} />
           )}
 
           {mode === "signup" && (
@@ -465,19 +430,27 @@ export default function LoginPage() {
           )}
 
           {mode === "signup" && (
-            <Field
-              label="Organization name"
-              type="text"
-              value={orgName}
-              onChange={setOrgName}
-              autoComplete="organization"
-              hint="Names your new workspace. Leave blank to use your name."
-            />
+            <div className="auth-field-span-2">
+              <Field
+                label="Organization name"
+                type="text"
+                value={orgName}
+                onChange={setOrgName}
+                autoComplete="organization"
+                hint="Names your new workspace. Leave blank to use your name."
+              />
+            </div>
+          )}
+
+          {mode === "signup" && password.length > 0 && (
+            <div className="auth-field-span-2">
+              <PasswordStrengthIndicator password={password} />
+            </div>
           )}
         </div>
 
         {error && (
-          <div className="login-alert login-alert-error">
+          <div className="auth-alert auth-alert-error">
             <p role="alert">{error}</p>
             {isUnverified && (
               <button
@@ -495,17 +468,17 @@ export default function LoginPage() {
         {resendSuccess && (
           <p
             role="status"
-            className="login-alert login-alert-success"
+            className="auth-alert auth-alert-success"
           >
             Verification email sent. Please check your inbox.
           </p>
         )}
 
-        <div className="login-actions">
+        <div className="auth-actions">
           <button
             type="submit"
             disabled={isBusy}
-            className="login-btn login-btn-primary"
+            className="auth-btn auth-btn-primary"
           >
             {isBusy ? (
               <>
@@ -524,7 +497,7 @@ export default function LoginPage() {
             type="button"
             onClick={handleDemo}
             disabled={isEnteringDemo}
-            className="login-btn login-btn-secondary"
+            className="auth-btn auth-btn-secondary"
           >
             {isEnteringDemo ? (
               <>
@@ -540,7 +513,7 @@ export default function LoginPage() {
           </button>
 
           {demoError && (
-            <p className="login-demo-error">{demoError}</p>
+            <p className="auth-demo-error">{demoError}</p>
           )}
 
           <p className="text-center text-xs" style={{ color: "#F2F5EF" }}>
@@ -552,7 +525,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={toggleMode}
-              className="login-link font-medium"
+              className="auth-link font-medium"
             >
               {mode === "signin"
                 ? "Don't have an account? Sign up"
@@ -565,118 +538,7 @@ export default function LoginPage() {
         message={toastMessage ?? ""}
         onDismiss={() => setToastMessage(undefined)}
       />
-    </LoginShell>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Shell — background layer, top nav, and content placement. Shared by the
-// main sign-in/sign-up view, the zero-workspace state, and the unconfigured
-// notice so they all sit on the same glass treatment.
-// ---------------------------------------------------------------------------
-
-function LoginShell({
-  title,
-  subtitle,
-  onDemo,
-  demoBusy,
-  children,
-}: {
-  title?: string;
-  subtitle?: string;
-  onDemo?: () => void;
-  demoBusy?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="login-page">
-      {/* Full-bleed background: one next/image layer of the real photo
-       * (public/login-bg.png), object-fit: cover — fills the entire viewport
-       * edge-to-edge with zero letterboxing, seams, or masks. The photo's
-       * own calm dark zone on the left is what the headline sits on; cover's
-       * minor edge-crop (≈4% of width at desktop) never reaches it. */}
-      <Image
-        src="/login-bg.png"
-        alt=""
-        aria-hidden
-        fill
-        priority
-        sizes="100vw"
-        draggable={false}
-        style={{ objectFit: "cover" }}
-        className="login-bg"
-      />
-
-      {/* The blob render(s) from public/blobs/, individually positioned and
-       * layered on top of the background (z-index 1) — still behind the nav
-       * and glass card (z-index 2), which blur whatever blob edge sits close
-       * enough to the panel boundary. */}
-      <div className="login-blobs" aria-hidden="true">
-        {/* unoptimized so the DOM <img> srcs are the literal /blobs/*.png
-         * paths (decorative PNGs, already lean — no re-encode needed). */}
-        {BLOBS.map((blob) => (
-          <Image
-            key={blob.id}
-            src={blob.src}
-            alt=""
-            width={blob.width}
-            height={blob.height}
-            unoptimized
-            priority
-            className={blob.className}
-          />
-        ))}
-      </div>
-
-      {/* Nav floats on the raw background, above the centered glass card. */}
-      <header className="login-nav">
-        <BrandWordmark
-          withMark
-          className="login-brand"
-          textClassName="font-sans text-[11px] font-semibold uppercase text-[#9CB88F] tracking-[0.08em]"
-        />
-        {onDemo && (
-          <button
-            type="button"
-            onClick={onDemo}
-            disabled={demoBusy}
-            className="login-nav-demo"
-          >
-            {demoBusy ? "Starting demo..." : "Try the demo →"}
-          </button>
-        )}
-      </header>
-
-      {/* Two-column area: headline + subhead sit directly on the background's
-       * calm zone, pushed off the hard left edge into center-left; the wide,
-       * compact glass card holds the form at center-right. */}
-      <main className="login-main">
-        {(title || subtitle) && (
-          <div className="login-hero">
-            {title && (
-              <h1 className="login-headline">
-                {title.includes("Office Brain") ? (
-                  <>
-                    Sign in to <span style={{ color: "#B8E6A0", textShadow: "0 2px 12px rgba(0, 0, 0, 0.35)" }}>Office Brain</span>
-                  </>
-                ) : (
-                  title
-                )}
-              </h1>
-            )}
-            {subtitle && <p className="login-subtext">{subtitle}</p>}
-          </div>
-        )}
-        <div className="login-glass">{children}</div>
-      </main>
-
-      {/* Small secondary brand mark, bottom-left. */}
-      <div className="login-corner-mark" aria-hidden="true">
-        <span className="login-corner-mark-box">
-          <Building2 className="size-4" />
-        </span>
-      </div>
-    </div>
+    </AuthLayout>
   );
 }
 
@@ -702,17 +564,17 @@ function Field({
   hint?: string;
 }) {
   return (
-    <div className="login-field-group">
-      <label className="login-label">{label}</label>
+    <div className="auth-field-group">
+      <label className="auth-label">{label}</label>
       <input
         type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         autoComplete={autoComplete}
         required={required}
-        className="login-input"
+        className="auth-input"
       />
-      {hint && <p className="login-hint">{hint}</p>}
+      {hint && <p className="auth-hint">{hint}</p>}
     </div>
   );
 }
@@ -735,20 +597,20 @@ function PasswordField({
   setShowPassword: (show: boolean) => void;
 }) {
   return (
-    <div className="login-field-group">
-      <label className="login-label">{label}</label>
-      <div className="login-password-wrap">
+    <div className="auth-field-group">
+      <label className="auth-label">{label}</label>
+      <div className="auth-password-wrap">
         <input
           type={showPassword ? "text" : "password"}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           autoComplete={autoComplete}
           required={required}
-          className="login-input"
+          className="auth-input"
         />
         <button
           type="button"
-          className="login-password-toggle"
+          className="auth-password-toggle"
           onClick={() => setShowPassword(!showPassword)}
           tabIndex={-1}
           aria-label={showPassword ? "Hide password" : "Show password"}
@@ -823,4 +685,4 @@ function PasswordStrengthIndicator({ password }: { password: string }) {
       </p>
     </div>
   );
-}
+}

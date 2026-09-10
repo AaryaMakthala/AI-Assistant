@@ -1,4 +1,4 @@
-# Secrets — never commit. See CLAUDE.md 4.1
+# Secrets — never commit
 .env
 .env.*
 !.env.example

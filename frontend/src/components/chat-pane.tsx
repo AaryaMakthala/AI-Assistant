@@ -22,9 +22,9 @@ import { cn } from "@/lib/utils";
 const STICK_THRESHOLD = 120;
 
 const SUGGESTIONS = [
-  "What does our travel policy say about international flights?",
-  "How many documents were uploaded this month?",
-  "Summarize the refund policy and how many refunds we processed.",
+  "What's our policy on parental and bereavement leave?",
+  "Who's on the Engineering leadership team and how do I reach them?",
+  "What are the expense limits for client entertainment and international travel?",
 ];
 
 export function ChatPane({

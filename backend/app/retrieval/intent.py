@@ -227,6 +227,8 @@ _GREETING_PATTERN = re.compile(
     r"thank(?:s|\s+you)|thanks\s+a\s+lot|cheers|"
     r"bye+|goodbye|see\s+you|take\s+care|good\s+night|"
     r"ok+|okay|sure|yes|no+|nah|yep|nope|"
+    r"cool|nice|great|awesome|perfect|sweet|"
+    r"good\s+(?:boy|girl|job|work)|well\s+done|nice\s+one|"
     r"help|/help|/start|"
     r"hola|bonjour|salut|guten\s+(?:tag|morgen)|namaste|salaam|shalom|ciao)\s*$",
     re.IGNORECASE,
@@ -276,6 +278,84 @@ _IDENTITY_PATTERN = re.compile(
 # Must be checked BEFORE the greeting pattern to avoid "hi" matching as greeting.
 _GREETING_NAME_PATTERN = re.compile(
     r"^(?:hi+|hey+|hello+)\s+.*?\bmy\s+name\b",
+    re.IGNORECASE,
+)
+
+# Personal-name boundary — user-name queries (statements and questions) are
+# intercepted deterministically and answered with ONE fixed safe message: the
+# assistant never stores, learns, extracts, or personalizes with user names.
+# These patterns carry no capture group for the name itself — classification is
+# boolean only, so there is nothing here that could persist or leak a name.
+_PERSONAL_NAME_STOPWORDS: frozenset[str] = frozenset({
+    "good", "fine", "ok", "okay", "here", "back", "done", "sure", "nope",
+    "nah", "yes", "no", "sorry", "tired", "hungry", "happy", "sad", "not",
+    "later", "tomorrow", "anytime", "if", "when", "ready", "new", "out",
+    "please", "now",
+})
+
+# "im aarya", "i'm aarya", "iam aarya", "my name is aarya", "my name's aarya",
+# "call me aarya", "please call me aarya", "can you call me aarya",
+# "you can call me aarya" — plus greeting-prefixed variants ("hi my name is
+# aarya").  Full anchored so the stated token must be the final word and must
+# not be a stopword, keeping casual continuations ("im good", "call me later")
+# out of this lane.  The token is checked but never returned.
+_PERSONAL_NAME_STATEMENT_PATTERN = re.compile(
+    r"^\s*(?:(?:hi+|hey+|hello+)\s+)?"
+    r"(?:"
+    r"i\s+am|"
+    r"i'?m|"
+    r"iam|"
+    r"my\s+name(?:'?s|\s+is)|"
+    r"(?:(?:you|u|please|can|could|will|would)\s*)*call\s+me"
+    r")"
+    r"\s+([a-z0-9][\w'.-]{0,30})\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
+
+# "what(/'s) is my name", "what is my name say", "tell me my name",
+# "do you know my name", "use your own memory and say my name", bare "my name".
+# Start-anchored so only clear personal-name questions match ("my name" is also
+# end-anchored so "my name is aarya" is left to the statement pattern).
+_PERSONAL_NAME_QUESTION_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"(?:what(?:'?s|\s+is)\s+my\s+name\b)"
+    r"|(?:tell\s+me\s+my\s+name\b)"
+    r"|(?:do\s+you\s+know\s+my\s+name\b)"
+    r"|(?:do\s+you\s+remember\s+my\s+name\b)"
+    r"|(?:use\s+your\s+own\s+memory\s+and\s+say\s+my\s+name\b)"
+    r"|(?:my\s+name\s*[!.?]*\s*$)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_personal_name_query(query: str) -> bool:
+    """Detect clear personal-name intent WITHOUT extracting or storing a name.
+
+    Recognizes statements ("im X", "my name is X", "please call me X") and
+    questions ("what is my name", "tell me my name", bare "my name"), plus
+    common typo/formatting variants ("iam X", "what's my name").  Guards
+    against non-name continuations ("im good", "call me later").
+
+    Returns only a boolean.  The stated name is never captured or returned —
+    the routing signal is "this is a personal-name query", nothing more.
+    """
+    q = query.strip()
+    if not q:
+        return False
+    if _PERSONAL_NAME_QUESTION_PATTERN.search(q):
+        return True
+    m = _PERSONAL_NAME_STATEMENT_PATTERN.search(q)
+    if not m:
+        return False
+    token = m.group(1).strip(" .!?,;:'\"").strip()
+    return bool(token) and token.lower() not in _PERSONAL_NAME_STOPWORDS
+
+# Identity: user asks the assistant its own name.  Typo-tolerant ("what is
+# youe name", "whats ur name"); anchored so only the name question matches.
+_BOT_NAME_PATTERN = re.compile(
+    r"what(?:'?s|\s+is)\s+"
+    r"(?:your|youe|yours|yur|yor|ur|yuor|u)\s+(?:name|naem)s?\s*[?!.]*\s*$",
     re.IGNORECASE,
 )
 
@@ -551,6 +631,8 @@ _GREETING_EXPANSIONS: dict[str, str] = {
     "guten tag": "hello",
     "guten morgen": "good morning",
     "namaste": "hello",
+    "nameste": "hello",
+    "vanakam": "hello",
     "salaam": "hello",
     "shalom": "hello",
     "ciao": "hello",
@@ -726,14 +808,22 @@ def classify_intent_regex(query: str) -> Intent:
 
     q_normalized = normalize_for_classification(q)
 
-    # --- 0a. Greeting + name statement ("hi my name is X") — before greeting ---
-    # Must be checked BEFORE the greeting pattern because "hi my name is aarya"
-    # starts with "hi" which would match as a greeting.
-    if _GREETING_NAME_PATTERN.search(q) or _GREETING_NAME_PATTERN.search(q_normalized):
+    # --- 0a. Personal-name boundary — checked BEFORE the greeting lane ---
+    # ANY clear user-name query (statement or question, greeting-prefixed or
+    # not) is intercepted here and answered with the fixed boundary message.
+    # It never reaches retrieval, no-evidence, or the LLM response path, and no
+    # name is ever extracted or stored.  The greeting-name pattern is folded in
+    # so "hi my name is aarya" can't fall through to a plain greeting.
+    if (
+        is_personal_name_query(q)
+        or is_personal_name_query(q_normalized)
+        or _GREETING_NAME_PATTERN.search(q)
+        or _GREETING_NAME_PATTERN.search(q_normalized)
+    ):
         return Intent(
-            category=IntentCategory.IDENTITY_USER,
+            category=IntentCategory.GENERAL_CONVERSATION,
             skip_rewrite=True,
-            reason="greeting_name_statement",
+            reason="personal_name_boundary",
         )
 
     # --- 0. Greeting (highest priority — obvious single words/phrases) ---
@@ -796,6 +886,14 @@ def classify_intent_regex(query: str) -> Intent:
             reason="identity_bot_fast_path",
         )
 
+    # --- 1b2. Bot name question ("what is your name"), typo-tolerant ---
+    if _BOT_NAME_PATTERN.search(q) or _BOT_NAME_PATTERN.search(q_normalized):
+        return Intent(
+            category=IntentCategory.IDENTITY_ASSISTANT,
+            skip_rewrite=True,
+            reason="bot_name_question",
+        )
+
     # --- 1c. Code/programming requests (catches typos like "pyathon") ---
     if _CODE_REQUEST_PATTERN.search(q) or _CODE_REQUEST_PATTERN.search(q_normalized):
         return Intent(
@@ -813,11 +911,11 @@ def classify_intent_regex(query: str) -> Intent:
                 reason="general_conversation",
             )
 
-    # NOTE: Identity queries deliberately NOT in the fast-path.
-    # "who are you" (IDENTITY_ASSISTANT) and "my name is X" (IDENTITY_USER)
-    # need different handling that only the LLM router can provide.
-    # The regex _IDENTITY_PATTERN still exists for backward compat in tests
-    # but is not used in the fast-path — all identity queries go to the LLM.
+    # NOTE: identity self-questions ("what is my name") and identity
+    # questions the regex cannot resolve cheaply are intentionally not in
+    # the fast-path — they need evidence or the LLM router.  The regex
+    # _IDENTITY_PATTERN still exists for backward compat in tests but is
+    # not used in the fast-path.
 
     # --- 2. Workspace permission (before app_help to avoid overlap) ---
     if ((_WORKSPACE_PERMISSION_PATTERN.search(q) or _WORKSPACE_PERMISSION_PATTERN.search(q_normalized))
@@ -1378,5 +1476,6 @@ __all__ = [
     "classify_intent",
     "classify_intent_regex",
     "classify_query_shape",
+    "is_personal_name_query",
     "normalize_for_classification",
 ]

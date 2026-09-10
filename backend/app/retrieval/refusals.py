@@ -38,6 +38,9 @@ class ResponseReason(str, Enum):
     UNSUPPORTED_INFORMATION = "unsupported_information"
     #: User message is a prompt-injection attempt.
     INJECTION_ATTEMPT = "injection_attempt"
+    #: User asks about their own name identity.  No name is stored, so the
+    #: response is a single fixed boundary message before any retrieval.
+    PERSONAL_NAME = "personal_name"
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +94,10 @@ _RESPONSES: dict[ResponseReason, str] = {
     ResponseReason.INJECTION_ATTEMPT: (
         "I can't act on that request. I answer questions using your workspace's "
         "approved documents, and I don't follow instructions embedded in messages."
+    ),
+    ResponseReason.PERSONAL_NAME: (
+        "I don't store personal names. Ask me anything about your workspace, "
+        "documents, policies, members, or company information."
     ),
 }
 

@@ -127,6 +127,88 @@ Contact
 Policy effective: 1 January 2024
 """
 
+_REFUND_POLICY = """\
+Acme Innovations — Refund Policy and Processing
+
+1. Overview
+This policy establishes the standards and procedures for processing customer refunds
+at Acme Innovations. It applies to all product and service transactions processed by
+the company, including direct sales, subscription services, and partner-channel
+transactions. The goal is to ensure refunds are handled consistently, transparently,
+and in compliance with applicable consumer protection regulations.
+
+Scope: This policy covers all full-time and contract employees involved in sales,
+finance, customer success, and operations. It does not apply to employee expense
+reimbursements (see 04_Expense_Travel_Policy.docx) or internal purchase orders.
+
+2. Eligibility Criteria
+A refund may be requested under the following conditions:
+- The product or service was returned within 30 calendar days of the original purchase date.
+- The product is in its original condition, with all packaging, tags, and accessories intact.
+- The service was not materially consumed or used beyond an initial evaluation period.
+- A valid proof of purchase (receipt, order confirmation, or invoice) is provided.
+
+Exceptions — The following are not eligible for refund:
+- Custom-configured or personalized products.
+- Digital downloads or software licenses that have been activated.
+- Services rendered under a signed Statement of Work (SOW) that has been partially or fully executed.
+- Products damaged by the customer through misuse, neglect, or unauthorized modification.
+
+3. Refund Process
+The refund request process follows these steps:
+Step 1 — Request Submission: The customer contacts Customer Success or submits a refund
+  request through the online portal. The request must include the order number, reason
+  for refund, and supporting documentation.
+Step 2 — Eligibility Review: The Customer Success team reviews the request against the
+  eligibility criteria in Section 2. Requests are processed within 2 business days.
+Step 3 — Approval: Refunds under $500 are approved by the Customer Success Manager.
+  Refunds between $500 and $5,000 require Director-level approval. Refunds exceeding
+  $5,000 require VP of Finance approval (see Section 6).
+Step 4 — Processing: Once approved, the Finance team initiates the refund to the original
+  payment method. Processing times vary by payment type (see Section 4).
+Step 5 — Confirmation: The customer receives an email confirmation with the refund
+  reference number and expected processing timeline.
+
+4. Processing Timelines
+After approval, refunds are processed according to the following timelines:
+- Credit/debit card: 5–10 business days
+- Bank transfer (ACH/wire): 3–5 business days
+- PayPal or digital wallet: 1–3 business days
+- Store credit: Applied immediately upon approval
+Note: Actual posting times depend on the customer's financial institution. Acme
+Innovations is not responsible for delays caused by third-party payment processors.
+
+5. Refunds Processed Summary
+The following table summarizes refund activity by quarter:
+- Q1 2026: 42 refunds processed, total $12,450, average processing time 6.2 business days
+- Q2 2026: 38 refunds processed, total $9,870, average processing time 5.8 business days
+- Q3 2026: 55 refunds processed, total $18,230, average processing time 7.1 business days
+- Q4 2026: Data pending
+These figures are placeholders and will be replaced with actual data from the Finance
+reporting system.
+
+6. Approval Authority
+Refund approval authority is determined by the refund amount:
+- Up to $500: Customer Success Manager (self-authorized)
+- $501–$5,000: Director of Customer Success
+- $5,001–$25,000: VP of Finance
+- Above $25,000: CFO + Legal review required
+All refunds above $1,000 must be logged in the Finance Refund Tracker with the approval
+chain documented. Quarterly audits review refund patterns for anomalies or policy abuse.
+
+7. Related Policies
+This policy should be read in conjunction with:
+- 04_Expense_Travel_Policy.docx — governs internal expense reimbursements and
+  travel-related refunds.
+- 03_IT_Security_Policy.docx — governs data handling requirements when processing
+  refund-related customer information.
+For questions about this policy, contact the Finance team at finance@acme.example.com
+or the Customer Success team at cs@acme.example.com.
+
+Policy effective: 1 January 2026
+Last reviewed: 15 June 2026
+"""
+
 _EXPENSE_POLICY = """\
 Acme Innovations — Travel & Expense Policy
 
@@ -364,6 +446,7 @@ async def seed_demo_workspace() -> uuid.UUID | None:
         ("Annual Leave Policy", "leave_policy.pdf", _LEAVE_POLICY),
         ("New Employee Onboarding Guide", "onboarding_guide.pdf", _ONBOARDING_GUIDE),
         ("Travel & Expense Policy", "expense_policy.pdf", _EXPENSE_POLICY),
+        ("Refund Policy and Processing", "refund_policy.pdf", _REFUND_POLICY),
     ]
 
     for doc_name, filename, content in sample_docs:

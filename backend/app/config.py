@@ -282,7 +282,7 @@ class Settings(BaseSettings):
 
     #: Whether the demo entry endpoint is enabled. Disable in production
     #: deployments that should not offer anonymous guest access.
-    demo_enabled: bool = True
+    demo_enabled: bool = False
     #: Name of the pre-seeded demo workspace.
     demo_workspace_name: str = "Office Brain Demo"
     #: Optional: point the demo flow at an existing workspace instead of provisioning a new one.

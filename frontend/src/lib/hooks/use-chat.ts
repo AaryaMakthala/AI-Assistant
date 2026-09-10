@@ -22,7 +22,6 @@ import {
   ApiError,
   listMessages,
   sendMessage,
-  type AgentRoute,
   type ChatStreamEvent,
   type Citation,
   type Source,
@@ -41,13 +40,6 @@ export interface Turn {
   /** Everything retrieved for this turn — the superset the citations index into. */
   sources: Source[];
   citations: Citation[];
-  /** Which agents the supervisor consulted. Empty until the `routing` frame arrives. */
-  routes: AgentRoute[];
-  routeReason: string;
-  /** The agent trace, newest last. Drives the routing indicator while streaming. */
-  steps: string[];
-  /** The validated SELECT behind a business-data answer. Empty when no SQL ran. */
-  sqlQuery: string;
   usage?: TokenUsage;
   provider?: string;
   model?: string;
@@ -75,10 +67,6 @@ function emptyAssistantTurn(): Turn {
     status: "streaming",
     sources: [],
     citations: [],
-    routes: [],
-    routeReason: "",
-    steps: [],
-    sqlQuery: "",
   };
 }
 
@@ -159,10 +147,6 @@ export function useChat({
           status: "complete",
           sources: [],
           citations: [],
-          routes: [],
-          routeReason: "",
-          steps: [],
-          sqlQuery: "",
         },
         emptyAssistantTurn(),
       ]);
@@ -225,21 +209,6 @@ export function useChat({
             }
             break;
 
-          case "routing":
-            updateStreamingTurn((turn) => ({
-              ...turn,
-              routes: event.routes,
-              routeReason: event.reason,
-            }));
-            break;
-
-          case "step":
-            updateStreamingTurn((turn) => ({
-              ...turn,
-              steps: [...turn.steps, event.text],
-            }));
-            break;
-
           case "sources":
             updateStreamingTurn((turn) => ({ ...turn, sources: event.sources }));
             break;
@@ -259,8 +228,6 @@ export function useChat({
             updateStreamingTurn((turn) => ({
               ...turn,
               status: "complete",
-              routes: event.routes.length ? event.routes : turn.routes,
-              sqlQuery: event.sql_query,
               usage: event.usage,
               provider: event.provider,
               model: event.model,
@@ -354,10 +321,6 @@ export function useChat({
                 status: "complete" as const,
                 sources: renumbered,
                 citations: renumbered,
-                routes: message.routes,
-                routeReason: "",
-                steps: [],
-                sqlQuery: message.sql_query,
                 incomplete: message.incomplete,
               };
             }),

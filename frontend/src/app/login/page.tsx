@@ -65,6 +65,11 @@ export default function LoginPage() {
 
   const [orgSuccess, setOrgSuccess] = useState(false);
 
+  /** Controls the login → workspace transition. After /demo/enter succeeds
+   * the auth page fades out (CSS transition) before navigating, giving the
+   * user a brief, polished visual handoff instead of an abrupt swap. */
+  const [isExiting, setIsExiting] = useState(false);
+
   if (!isSupabaseConfigured() || !supabase) {
     return (
       <AuthLayout
@@ -242,10 +247,13 @@ export default function LoginPage() {
         setDemoError("Could not start demo session. Please try again.");
         return;
       }
+      // Fade the login page out before navigating to the workspace.
+      // Reduced-motion users get an 80 ms fallback (see auth-layout.css).
+      setIsExiting(true);
+      await new Promise<void>((resolve) => setTimeout(resolve, 420));
       router.replace(demo.redirect_url);
     } catch {
       setDemoError("Could not reach the demo server. Please try again.");
-    } finally {
       setIsEnteringDemo(false);
     }
   };
@@ -356,6 +364,7 @@ export default function LoginPage() {
 
   return (
     <AuthLayout
+      className={isExiting ? "auth-page-exit" : undefined}
       title={
         mode === "signin"
           ? "Sign in to Office Brain"

@@ -21,6 +21,20 @@ import type { Citation } from "@/lib/api";
 import type { Turn } from "@/lib/hooks/use-chat";
 import { cn } from "@/lib/utils";
 
+/** Map a backend pipeline stage to user-friendly display text. */
+function stageLabel(stage: string): string {
+  switch (stage) {
+    case "thinking":
+      return "Thinking…";
+    case "searching":
+      return "Searching your documents…";
+    case "generating":
+      return "Generating an answer…";
+    default:
+      return "Thinking…";
+  }
+}
+
 export function MessageBubble({
   turn,
   activeChunkId,
@@ -88,6 +102,17 @@ export function MessageBubble({
                     aria-hidden
                   />
                 )}
+              </div>
+            )}
+
+            {/* Pipeline status — shown while waiting for the first token. */}
+            {isStreaming && !hasContent && turn.stage && (
+              <div className="flex items-center gap-2 text-sm text-muted">
+                <span className="relative flex size-2 shrink-0">
+                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-accent opacity-50" />
+                  <span className="relative inline-flex size-2 rounded-full bg-accent" />
+                </span>
+                <span>{stageLabel(turn.stage)}</span>
               </div>
             )}
 

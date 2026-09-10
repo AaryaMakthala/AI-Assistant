@@ -86,14 +86,14 @@ export function ChatPane({
         sizes="100vw"
         draggable={false}
         style={{ objectFit: "cover" }}
-        className="z-0"
+        className="chat-bg-image z-0"
       />
       {/* pointer-events-none: the scrim is decorative only and must never
        * sit above interactive content (the composer's textarea/send button
        * are static descendants of this panel and would otherwise paint and
        * hit-test beneath it — which made the input unclickable). */}
       <div
-        className="pointer-events-none absolute inset-0 z-[1] bg-[rgba(9,15,12,0.35)]"
+        className="chat-bg-scrim pointer-events-none absolute inset-0 z-[1] bg-[rgba(9,15,12,0.35)]"
         aria-hidden
       />
       <div
@@ -106,7 +106,7 @@ export function ChatPane({
         }}
         className="chat-scroll relative z-10 min-h-0 flex-1 overflow-y-auto"
       >
-        <div className="mx-auto w-full max-w-[780px] px-4 py-8">
+        <div className="chat-scroll-container mx-auto w-full max-w-[780px] px-4 py-8">
           {isLoadingHistory && (
             <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
               <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -144,12 +144,14 @@ export function ChatPane({
         </div>
       </div>
 
-      <Composer
-        onSend={handleSend}
-        onStop={onStop}
-        isStreaming={isStreaming}
-        disabled={disabled}
-      />
+      <div className="chat-composer-wrap">
+        <Composer
+          onSend={handleSend}
+          onStop={onStop}
+          isStreaming={isStreaming}
+          disabled={disabled}
+        />
+      </div>
     </div>
   );
 }

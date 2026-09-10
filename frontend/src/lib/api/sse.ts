@@ -19,6 +19,7 @@ const KNOWN_EVENTS = new Set([
   "citations",
   "done",
   "error",
+  "status",
 ]);
 
 function parseFrame(frame: string): ChatStreamEvent | null {

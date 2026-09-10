@@ -138,13 +138,20 @@ export interface ErrorEvent {
   partial: boolean;
 }
 
+/** Lightweight progress indicator emitted at major pipeline stages. */
+export interface StatusEvent {
+  type: "status";
+  stage: string;
+}
+
 export type ChatStreamEvent =
   | SessionEvent
   | SourcesEvent
   | TokenEvent
   | CitationsEvent
   | DoneEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | StatusEvent;
 
 /** The authenticated caller, as the server understands them. Mirrors `MeResponse`. */
 export interface MeResponse {

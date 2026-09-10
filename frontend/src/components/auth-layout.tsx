@@ -76,7 +76,7 @@ export function AuthLayout({
       />
 
       {/* SVG noise filter for dithering blob gradients — hidden, referenced by CSS. */}
-      <svg className="sr-only" aria-hidden="true">
+      <svg className="sr-only pointer-events-none" aria-hidden="true">
         <filter id="blob-noise">
           <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch" />
           <feColorMatrix type="saturate" values="0" />

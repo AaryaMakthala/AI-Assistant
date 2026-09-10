@@ -49,6 +49,10 @@ export interface Turn {
   error?: string;
   /** True when the turn stopped early and the text is partial. */
   incomplete?: boolean;
+  /** Backend pipeline stage while waiting for tokens.  Mapped from SSE status
+   *  events into user-friendly labels by the UI.  Cleared as soon as answer
+   *  text arrives so the status indicator disappears. */
+  stage?: string;
 }
 
 let turnCounter = 0;
@@ -67,6 +71,7 @@ function emptyAssistantTurn(): Turn {
     status: "streaming",
     sources: [],
     citations: [],
+    stage: "thinking",
   };
 }
 
@@ -217,6 +222,7 @@ export function useChat({
             updateStreamingTurn((turn) => ({
               ...turn,
               content: turn.content + event.text,
+              stage: undefined,
             }));
             break;
 
@@ -232,6 +238,7 @@ export function useChat({
               provider: event.provider,
               model: event.model,
               grounded: event.grounded,
+              stage: undefined,
             }));
             callbacksRef.current.onTurnComplete?.();
             break;
@@ -242,6 +249,14 @@ export function useChat({
               status: "failed",
               error: event.detail,
               incomplete: event.partial,
+              stage: undefined,
+            }));
+            break;
+
+          case "status":
+            updateStreamingTurn((turn) => ({
+              ...turn,
+              stage: event.stage,
             }));
             break;
         }

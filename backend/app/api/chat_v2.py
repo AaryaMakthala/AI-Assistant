@@ -1499,6 +1499,12 @@ async def _stream_chat(
     search_query_for_retrieval = qu_result.search_query
     qu_confidence = qu_result.confidence
 
+    # --- Progress status ---
+    # Query understanding is complete; the next major phase is search/retrieval
+    # or a direct answer.  Emit a lightweight status so the frontend can show
+    # "Searching your documents…" or similar while the backend works.
+    yield await _sse_event("status", {"stage": "searching"})
+
     # 1b. Prompt-injection attempts are refused immediately — never routed,
     # never retrieved, never sent to the LLM.
     if _is_injection_attempt(question):
@@ -1509,6 +1515,7 @@ async def _stream_chat(
                     session_id=session_id, role="user", content=question,
                 )
             )
+        yield await _sse_event("status", {"stage": "generating"})
         yield await _sse_event("sources", {"sources": []})
         yield await _sse_event("token", {"text": injection_text})
         yield await _sse_event("citations", {"citations": []})
@@ -1557,6 +1564,7 @@ async def _stream_chat(
                 )
             )
         clarification_text = refusal_message(ResponseReason.NEEDS_CLARIFICATION)
+        yield await _sse_event("status", {"stage": "generating"})
         yield await _sse_event("sources", {"sources": []})
         yield await _sse_event("token", {"text": clarification_text})
         yield await _sse_event("citations", {"citations": []})
@@ -1726,6 +1734,7 @@ async def _stream_chat(
                 )
             )
         # Emit the direct answer — no LLM, no retrieval.
+        yield await _sse_event("status", {"stage": "generating"})
         yield await _sse_event("sources", {"sources": []})
         yield await _sse_event("token", {"text": answer})
         yield await _sse_event("citations", {"citations": []})
@@ -1824,6 +1833,7 @@ async def _stream_chat(
             reason=refusal_reason.value,
         )
         # Emit empty sources, the refusal text as a token, and done.
+        yield await _sse_event("status", {"stage": "generating"})
         yield await _sse_event("sources", {"sources": []})
         yield await _sse_event("token", {"text": refusal})
         yield await _sse_event("citations", {"citations": []})
@@ -1864,6 +1874,7 @@ async def _stream_chat(
     yield await _sse_event("sources", {"sources": sources_list})
 
     # 6. Stream LLM tokens.
+    yield await _sse_event("status", {"stage": "generating"})
     messages = build_messages(question=effective_query, chunks=result.chunks)
     completion = Completion()
     full_text = ""

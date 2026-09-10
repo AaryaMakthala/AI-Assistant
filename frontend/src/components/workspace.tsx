@@ -8,7 +8,7 @@
  * the data flow readable.
  */
 
-import { Building2, LogOut, PanelRightOpen, ChevronLeft, ChevronRight } from "lucide-react";
+import { Building2, LogOut, PanelRightOpen, ChevronLeft, ChevronRight, Menu, SquarePen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/button";
 import { BrandWordmark } from "@/components/brand-wordmark";
@@ -142,12 +142,31 @@ export function Workspace() {
     setIsPanelOpen(true);
   };
 
+  // Mobile drawer state — sidebar opens as a slide-in overlay on mobile.
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
+
+  const newChatAndCloseDrawer = () => {
+    chat.reset();
+    setActiveChunkId(undefined);
+    setIsPanelOpen(false);
+    setShowUpload(false);
+    setIsMobileDrawerOpen(false);
+  };
+
+  const selectSessionAndCloseDrawer = (id: string) => {
+    setActiveChunkId(undefined);
+    setIsPanelOpen(false);
+    setShowUpload(false);
+    void chat.loadSession(id);
+    setIsMobileDrawerOpen(false);
+  };
+
   return (
     <div className="flex h-dvh w-full overflow-hidden">
-      {/* Sidebar — width transitions smoothly when collapsed. */}
+      {/* --- Desktop sidebar (inline column, hidden on mobile) --------------- */}
       <div
         className={cn(
-          "relative flex h-full shrink-0 flex-col border-r border-border bg-[#0F1A15] transition-[width] duration-200 ease-in-out",
+          "sidebar-desktop relative flex h-full shrink-0 flex-col border-r border-border bg-[#0F1A15] transition-[width] duration-200 ease-in-out",
           isSidebarCollapsed ? "w-0 overflow-hidden" : "w-64",
         )}
       >
@@ -196,16 +215,17 @@ export function Workspace() {
             onDeleteWorkspace={() => {
               void signOut();
             }}
+            onSignOut={() => void signOut()}
           />
         )}
       </div>
 
-      {/* Collapse handle — sits on the divider between sidebar and main. */}
+      {/* --- Desktop collapse handle --------------------------------------- */}
       <button
         type="button"
         onClick={() => setSidebarCollapsed(!isSidebarCollapsed)}
         className={cn(
-          "group relative z-30 flex h-full w-5 shrink-0 items-center justify-center",
+          "sidebar-desktop group relative z-30 flex h-full w-5 shrink-0 items-center justify-center",
           "border-r border-border bg-[#0F1A15] transition-colors hover:bg-[#162319]",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
         )}
@@ -219,9 +239,69 @@ export function Workspace() {
         )}
       </button>
 
-      {/* Main area — fills remaining width. */}
+      {/* --- Mobile drawer overlay ----------------------------------------- */}
+      <div
+        className={cn(
+          "mobile-drawer-backdrop fixed inset-0 z-40 bg-black/50 transition-opacity duration-200",
+          isMobileDrawerOpen
+            ? "opacity-100 pointer-events-auto"
+            : "opacity-0 pointer-events-none",
+        )}
+        aria-hidden={!isMobileDrawerOpen}
+        onClick={() => setIsMobileDrawerOpen(false)}
+      />
+      <div
+        className={cn(
+          "mobile-drawer-sidebar fixed inset-y-0 left-0 z-50 w-72 overflow-hidden",
+          "bg-[#0F1A15] shadow-2xl transition-transform duration-200 ease-in-out",
+          isMobileDrawerOpen ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <Sidebar
+          sessions={sessions.sessions}
+          activeSessionId={chat.sessionId}
+          documents={documents.documents}
+          uploads={documents.uploads}
+          deletingDocumentIds={documents.deletingIds}
+          approvingDocumentIds={documents.approvingIds}
+          rejectingDocumentIds={documents.rejectingIds}
+          isDisabled={!isAuthenticated}
+          canManageOrg={canManageOrg}
+          currentUserId={me?.user_id}
+          token={token}
+          workspaceId={workspaceId}
+          onNewChat={newChatAndCloseDrawer}
+          onSelectSession={selectSessionAndCloseDrawer}
+          onDeleteSession={(id) => {
+            if (id === chat.sessionId) chat.reset();
+            void sessions.remove(id);
+          }}
+          onOpenUpload={() => {
+            setShowUpload(true);
+            filePickerRef.current?.();
+          }}
+          onDismissUpload={documents.dismissUpload}
+          documentsViewActive={showUpload}
+          onSelectChats={() => setShowUpload(false)}
+          onSelectDocuments={() => setShowUpload(true)}
+          onDeleteDocument={(id) => documents.remove(id)}
+          onReprocessDocument={(id) => void documents.reprocess(id)}
+          onApproveDocument={(id) => void documents.approve(id)}
+          onRejectDocument={(id) => void documents.reject(id)}
+          onDeleteWorkspace={() => {
+            void signOut();
+          }}
+          onSignOut={() => {
+            void signOut();
+            setIsMobileDrawerOpen(false);
+          }}
+        />
+      </div>
+
+      {/* --- Main area (fills remaining width) ----------------------------- */}
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-1.5">
+        {/* Desktop header — hidden on mobile via CSS class */}
+        <header className="desktop-header flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-1.5">
           <div className="flex min-w-0 items-baseline gap-2">
             <BrandWordmark />
             {me?.workspace_name && (
@@ -251,6 +331,30 @@ export function Workspace() {
               </Button>
             )}
           </div>
+        </header>
+
+        {/* Mobile top bar — shown only on mobile via CSS class */}
+        <header className="mobile-topbar flex items-center justify-between border-b border-border bg-[#0F1A15] px-3 py-2">
+          <button
+            type="button"
+            onClick={() => setIsMobileDrawerOpen(true)}
+            aria-label="Open menu"
+            className="flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+          >
+            <Menu className="size-5" aria-hidden />
+          </button>
+          <BrandWordmark
+            className="flex items-center gap-1.5"
+            textClassName="text-sm"
+          />
+          <button
+            type="button"
+            onClick={newChatAndCloseDrawer}
+            aria-label="New chat"
+            className="flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+          >
+            <SquarePen className="size-5" aria-hidden />
+          </button>
         </header>
 
         {!isAuthenticated && !isLoading && <AuthNotice />}

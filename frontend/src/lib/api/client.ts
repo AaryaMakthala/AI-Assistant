@@ -22,9 +22,40 @@ import type {
   WorkspaceListResponse,
 } from "./types";
 
-const BASE_URL = (
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"
-).replace(/\/$/, "");
+/**
+ * Resolve the backend base URL. On a real phone, `localhost` resolves to the
+ * device's own loopback — which has no backend. When the configured URL still
+ * points at localhost, swap in the page's current hostname (the dev machine's
+ * LAN IP) so the browser reaches the right server.
+ *
+ * In production deployments where NEXT_PUBLIC_API_URL is set to a real domain
+ * or IP, this detection never fires.
+ */
+function resolveBaseUrl(): string {
+  const raw = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000")
+    .replace(/\/$/, "");
+
+  try {
+    const url = new URL(raw);
+    if (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "::1"
+    ) {
+      // Only rewrite in the browser — SSR has no `location`.
+      if (typeof window !== "undefined" && window.location.hostname !== url.hostname) {
+        url.hostname = window.location.hostname;
+        return url.toString();
+      }
+    }
+  } catch {
+    // Malformed URL — fall through to the raw value.
+  }
+
+  return raw;
+}
+
+const BASE_URL = resolveBaseUrl();
 
 /** An error carrying the backend's request_id, which server logs are keyed by. */
 export class ApiError extends Error {

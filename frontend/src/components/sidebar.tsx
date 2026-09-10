@@ -7,7 +7,7 @@
  * neither collapses to a few rows on a short screen.
  */
 
-import { FolderOpen, MessageSquare, Plus, Trash2 } from "lucide-react";
+import { FolderOpen, LogOut, MessageSquare, Plus, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { Button } from "./button";
@@ -42,6 +42,7 @@ export function Sidebar({
   onApproveDocument,
   onRejectDocument,
   onDeleteWorkspace,
+  onSignOut,
   documentsViewActive,
   onSelectChats,
   onSelectDocuments,
@@ -75,6 +76,8 @@ export function Sidebar({
   onApproveDocument: (id: string) => void;
   onRejectDocument: (id: string) => void;
   onDeleteWorkspace?: () => void;
+  /** Sign out the current user. Shown at the bottom of the drawer. */
+  onSignOut?: () => void;
   /** Whether the main content area is currently showing the documents view.
    *  Drives which of Chats/Documents renders as active, so the tab follows the
    *  view instead of the other way around. */
@@ -214,6 +217,25 @@ export function Sidebar({
         <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
           <MembersPanel token={token} workspaceId={workspaceId} onDeleteWorkspace={onDeleteWorkspace} />
         </nav>
+      )}
+
+      {/* Sign-out at the bottom — mirrors Claude/ChatGPT's pattern of
+       * tucking account actions into the side drawer rather than the header. */}
+      {onSignOut && (
+        <div className="mt-auto border-t border-border px-3 py-3">
+          <button
+            type="button"
+            onClick={onSignOut}
+            className={cn(
+              "flex w-full items-center gap-2 rounded-md px-2 py-2 text-xs",
+              "text-muted transition-colors hover:text-foreground hover:bg-[rgba(255,255,255,0.06)]",
+              "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            )}
+          >
+            <LogOut className="size-3.5 shrink-0" aria-hidden />
+            Sign out
+          </button>
+        </div>
       )}
     </aside>
   );

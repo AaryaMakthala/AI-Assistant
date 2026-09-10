@@ -168,3 +168,102 @@ body {
 .animate-fade-in {
   animation: fade-in 0.4s ease-out;
 }
+
+/* --- Mobile (max-width: 768px) --------------------------------------------- */
+/* Hides desktop sidebar + collapse handle, shows mobile top bar, and applies
+ * phone-specific overrides for the chat layout, message cards, and composer.
+ * The drawer sidebar/backdrop are controlled via JS state in workspace.tsx. */
+@media (max-width: 768px) {
+  /* Hide desktop chrome, show mobile chrome */
+  .sidebar-desktop {
+    display: none !important;
+  }
+  .desktop-header {
+    display: none !important;
+  }
+  .mobile-topbar {
+    display: flex !important;
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: #0F1A15;
+  }
+
+  /* Drawer backdrop and sidebar are controlled via JS state in workspace.tsx
+   * using pointer-events-auto / pointer-events-none classes. */
+
+  /* --- Chat background: hide heavy photo, use solid fill ------------------ */
+  .chat-bg-image {
+    display: none;
+  }
+  .chat-bg-scrim {
+    background: var(--background) !important;
+  }
+
+  /* --- Message list ------------------------------------------------------- */
+  .chat-scroll-container {
+    padding-top: 1rem !important;
+    padding-bottom: 0.5rem !important;
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+  }
+
+  .glass-message {
+    padding: 12px !important;
+    border-radius: 12px;
+  }
+
+  /* Remove stray blue selection highlight */
+  .glass-message::selection,
+  .glass-message *::selection {
+    background: rgba(30, 90, 58, 0.4);
+  }
+
+  /* --- Composer: fixed bottom, pill shape, safe-area padding --------------- */
+  .chat-composer-wrap {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    background: var(--background);
+    padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+  }
+
+  .glass-composer {
+    border-radius: 9999px !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    background: rgba(20, 40, 30, 0.7) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    backdrop-filter: blur(20px) !important;
+    min-height: 48px !important;
+  }
+
+  /* Larger touch targets for send / stop buttons */
+  .glass-composer button[aria-label="Send message"],
+  .glass-composer button[aria-label="Stop generating"] {
+    width: 40px !important;
+    height: 40px !important;
+  }
+
+  /* Compact disclaimer text above composer */
+  .chat-composer-wrap p {
+    font-size: 0.625rem !important;
+    padding: 0 4px !important;
+    margin-bottom: 4px !important;
+  }
+}
+
+/* Desktop: hide mobile-only elements */
+@media (min-width: 769px) {
+  .mobile-topbar {
+    display: none !important;
+  }
+
+  .mobile-drawer-backdrop,
+  .mobile-drawer-sidebar {
+    display: none !important;
+  }
+}

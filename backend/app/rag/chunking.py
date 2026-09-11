@@ -9,11 +9,13 @@ and sends the reader somewhere the claim isn't.
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from typing import TYPE_CHECKING
 
 from app.config import get_settings
 from app.rag.extraction import ExtractedPage
+
+if TYPE_CHECKING:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,8 @@ class Chunk:
 
 
 def _splitter() -> RecursiveCharacterTextSplitter:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
     settings = get_settings()
     return RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size,

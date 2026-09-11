@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Auto-apply pending Alembic migrations on startup so a missed
     # ``alembic upgrade head`` can never silently break an endpoint.
-    if settings.environment != "test":
+    if settings.environment != "test" and not settings.is_production:
         try:
             import subprocess
             import sys

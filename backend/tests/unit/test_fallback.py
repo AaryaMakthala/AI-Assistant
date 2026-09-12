@@ -44,10 +44,11 @@ def _sse(content: str) -> str:
 class _MockResponse:
     """Simulates an httpx streaming response used as ``async with client.stream()``."""
 
-    def __init__(self, status_code: int, lines: list[str] | None = None, body: bytes = b"error") -> None:
+    def __init__(self, status_code: int, lines: list[str] | None = None, body: bytes = b"error", headers: dict[str, str] | None = None) -> None:
         self.status_code = status_code
         self._lines = lines or []
         self._body = body
+        self.headers = headers or {}
 
     async def aread(self) -> bytes:
         return self._body
@@ -128,7 +129,7 @@ async def test_groq_503_openrouter_success() -> None:
         async for token in chain.stream(messages, completion=completion):
             tokens.append(token)
 
-    assert call_log == ["groq", "openrouter"], f"Expected [groq, openrouter], got {call_log}"
+    assert call_log == ["groq", "groq", "openrouter"], f"Expected groq(retry) then openrouter, got {call_log}"
     assert "gemini" not in call_log, "Gemini should NOT be called"
     assert "".join(tokens) == "Kanban is a visual workflow method."
     assert completion.text == "Kanban is a visual workflow method."
@@ -179,7 +180,9 @@ async def test_groq_503_openrouter_503_gemini_success() -> None:
         async for token in chain.stream(messages, completion=completion):
             tokens.append(token)
 
-    assert call_log == ["groq", "openrouter", "gemini"], f"Expected sequential order, got {call_log}"
+    # Each 503 is retried once inside the provider before the chain fails over:
+    # groq(503→503) then openrouter(503→503) then gemini success.
+    assert call_log == ["groq", "groq", "openrouter", "openrouter", "gemini"], f"Expected sequential order, got {call_log}"
     assert "".join(tokens) == "Gemini says: Kanban is a workflow."
     assert completion.text == "Gemini says: Kanban is a workflow."
     assert completion.provider == "gemini"
@@ -225,7 +228,8 @@ async def test_all_providers_fail_no_key_leakage() -> None:
             async for _token in chain.stream(messages, completion=completion):
                 pass
 
-    assert call_log == ["groq", "openrouter", "gemini"], f"Expected all three attempted, got {call_log}"
+    # Each 503 is retried once inside the provider; the chain then moves on.
+    assert call_log == ["groq", "groq", "openrouter", "openrouter", "gemini", "gemini"], f"Expected all three attempted with retries, got {call_log}"
     error_text = str(exc_info.value)
     assert "503" in error_text or "failed" in error_text.lower()
     # No API key leakage
@@ -428,7 +432,8 @@ async def test_pre_stream_failure_allows_failover() -> None:
         async for token in chain.stream(messages, completion=completion):
             tokens.append(token)
 
-    assert call_log == ["groq", "openrouter"], f"Expected [groq, openrouter], got {call_log}"
+    # 503 is retried once before failover; OpenRouter then serves the request.
+    assert call_log == ["groq", "groq", "openrouter"], f"Expected [groq(retry), openrouter], got {call_log}"
     assert "".join(tokens) == "OpenRouter says: Kanban is a workflow."
     assert completion.provider == "openrouter"
 
@@ -439,7 +444,7 @@ async def test_pre_stream_failure_allows_failover() -> None:
 
 @pytest.mark.asyncio
 async def test_non_retryable_error_no_failover() -> None:
-    """Groq returns 401 (non-retryable) -> OpenRouter is NOT attempted."""
+    """Groq returns 400 (malformed request, non-retryable) -> OpenRouter is NOT attempted."""
     groq = _make_provider("groq", "qwen/qwen3.6-27b", base_url="https://api.groq.com/openai/v1")
     openrouter = _make_provider("openrouter", "google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1")
 
@@ -450,7 +455,7 @@ async def test_non_retryable_error_no_failover() -> None:
     def _mock_stream(method: str, url: str, **kwargs: Any) -> _MockResponse:  # noqa: ARG001
         if "api.groq.com" in url:
             call_log.append("groq")
-            return _MockResponse(401, body=b"invalid api key")
+            return _MockResponse(400, body=b"malformed payload")
         elif "openrouter" in url:
             call_log.append("openrouter")
             return _MockResponse(200)
@@ -465,6 +470,7 @@ async def test_non_retryable_error_no_failover() -> None:
             async for _token in chain.stream(messages, completion=completion):
                 pass
 
-    # Only Groq called — 401 is non-retryable, no failover.
+    # Only Groq called — 400 is non-retryable (a malformed request would be
+    # rejected by every provider), so no failover.
     assert call_log == ["groq"], f"Expected only Groq, got {call_log}"
     assert exc_info.value.retryable is False

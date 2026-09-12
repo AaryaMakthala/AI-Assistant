@@ -16,6 +16,11 @@ from slowapi.util import get_remote_address
 #: Uploads are heavy: each one costs disk, a worker slot, and a model pass.
 UPLOAD_RATE_LIMIT = "20/minute"
 CHAT_RATE_LIMIT = "60/minute"
+#: Demo entry provisions a Supabase Auth user + workspace membership per call;
+#: each one leaves an orphaned user if the frontend bails at sign-in, so it is
+#: kept far below the chat rate.  The demo endpoint is unauthenticated (any IP
+#: can be a visitor), so the IP bucket is what protects us.
+DEMO_RATE_LIMIT = "10/minute"
 
 
 def rate_limit_key(request: Request) -> str:
@@ -42,6 +47,7 @@ def register_rate_limiting(app: FastAPI) -> None:
 
 __all__ = [
     "CHAT_RATE_LIMIT",
+    "DEMO_RATE_LIMIT",
     "UPLOAD_RATE_LIMIT",
     "limiter",
     "rate_limit_key",

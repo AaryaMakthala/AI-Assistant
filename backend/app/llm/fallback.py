@@ -23,6 +23,7 @@ they hold one model or a failover chain.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import AsyncIterator
 
@@ -30,6 +31,7 @@ from loguru import logger
 
 from app.config import get_settings
 from app.llm.base import Completion, LLMError, Message, thinking_disable_payload
+from app.llm.base import TokenUsage
 
 
 class _ProviderConfig:
@@ -42,6 +44,216 @@ class _ProviderConfig:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
+
+
+# ---------------------------------------------------------------------------
+# Provider cooldown — a catastrophic failure (404 route gone, 402 out of credit)
+# blankets that provider for a while so later requests skip it instead of
+# burning the failover chain on a provider that is still down.
+# ---------------------------------------------------------------------------
+
+_provider_cooldowns: dict[str, float] = {}
+_cooldown_lock = threading.Lock()
+_PROVIDER_COOLDOWN_SECONDS = 60.0
+
+
+def _cooldown_remaining(name: str) -> float:
+    with _cooldown_lock:
+        until = _provider_cooldowns.get(name, 0.0)
+    return max(0.0, until - time.monotonic())
+
+
+def _mark_cooldown(name: str) -> None:
+    with _cooldown_lock:
+        _provider_cooldowns[name] = time.monotonic() + _PROVIDER_COOLDOWN_SECONDS
+
+
+def _attach_http_error_metadata(exc: LLMError, status_code: int, headers) -> None:
+    """Attach status/retry-after so the chain can log and pace around them."""
+    exc.status_code = status_code  # type: ignore[attr-defined]
+    if status_code == 429:
+        retry_after_header = headers.get("retry-after")
+        try:
+            exc.retry_after = (  # type: ignore[attr-defined]
+                float(retry_after_header) if retry_after_header else 2.0
+            )
+        except (ValueError, TypeError):
+            exc.retry_after = 2.0  # type: ignore[attr-defined]
+
+
+def _capped_max_tokens(max_tokens: int | None) -> int:
+    """Apply LLM_MAX_OUTPUT_TOKENS_CAP after a caller's override.
+
+    A caller may request 16384 output tokens that a 16k-context provider then
+    rejects with HTTP 400; the cap keeps the request inside the available
+    window while letting oversized requests still succeed at a smaller size.
+    """
+    settings = get_settings()
+    requested = max_tokens or settings.llm_max_output_tokens
+    if settings.llm_max_output_tokens_cap is None:
+        return requested
+    return min(requested, settings.llm_max_output_tokens_cap)
+
+
+async def _stream_provider_once(
+    provider: _ProviderConfig,
+    messages: list[Message],
+    completion: Completion,
+    timeout: float,
+    *,
+    max_tokens: int | None = None,
+    disable_thinking: bool = False,
+) -> AsyncIterator[str]:
+    """Stream from one provider, hardened: retry-once, cooldowns, token cap.
+
+    Retry policy inside this helper (each retry uses one extra attempt, so at
+    most two POSTs per provider are ever sent):
+    - HTTP 400: immediate, non-retryable — our payload is malformed and every
+      provider would reject it the same way.
+    - HTTP 429 and any 5xx: retried once (backed off), then raised so the chain
+      can fail over.
+    - Timeout/connection errors before any token is emitted: retried once.
+    - HTTP 402 (out of credit) / 404 (route gone): the provider is put into
+      cooldown and failover proceeds; later requests skip it entirely.
+    - Other provider-specific 4xx (401/403/413...): fail over immediately, no
+      in-place retry.
+    - If a token has already been yielded, nothing is retried — we cannot
+      un-send content to the client.
+    """
+    import httpx
+
+    payload = {
+        "model": provider.model,
+        "messages": [{"role": m.role, "content": m.content} for m in messages],
+        "temperature": get_settings().llm_temperature,
+        "max_tokens": _capped_max_tokens(max_tokens),
+        "stream": True,
+    }
+    payload.update(thinking_disable_payload(provider.name, disable=disable_thinking))
+    headers = {
+        "Authorization": f"Bearer {provider.api_key}",
+        "Content-Type": "application/json",
+    }
+    endpoint = f"{provider.base_url.rstrip('/')}/chat/completions"
+
+    completion.provider = provider.name
+    completion.model = provider.model
+
+    error_body_limit = 500
+    thinking_keys = ("reasoning", "reasoning_effort", "chat_template_kwargs")
+    streaming_started = False
+
+    for attempt in (1, 2):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream(
+                    "POST", endpoint, json=payload, headers=headers
+                ) as response:
+                    status = response.status_code
+
+                    if status == 400 and disable_thinking and attempt == 1:
+                        # The provider may not accept our thinking-disable key.
+                        # Retry the same provider once without it rather than
+                        # failing over — a thinking response we strip is better
+                        # than no response at all.
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        logger.warning(
+                            "Provider {provider} rejected thinking-disable payload "
+                            "(HTTP 400: {body}); retrying without it",
+                            provider=provider.name,
+                            body=body[:error_body_limit],
+                        )
+                        for key in thinking_keys:
+                            payload.pop(key, None)
+                        continue
+
+                    if status >= 400:
+                        body = (await response.aread()).decode("utf-8", "replace")
+                        retryable = status != 400
+                        exc = LLMError(
+                            f"Provider returned HTTP {status}: {body[:error_body_limit]}",
+                            provider=provider.name,
+                            retryable=retryable,
+                        )
+                        _attach_http_error_metadata(exc, status, response.headers)
+                        if status in (402, 404):
+                            # Account out of credit / route gone: blanket-cool
+                            # this provider so the chain stops wasting failover
+                            # round-trips on it.
+                            _mark_cooldown(provider.name)
+                            raise exc
+                        if status == 429 and attempt == 1:
+                            backoff = min(getattr(exc, "retry_after", 2.0), 5.0)
+                            logger.info(
+                                "Provider {provider} rate_limited retry_after={backoff:.1f}s",
+                                provider=provider.name,
+                                backoff=backoff,
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
+                        if status >= 500 and attempt == 1:
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise exc
+
+                    async for line in response.aiter_lines():
+                        token = _parse_stream_line(line, completion)
+                        if token is not None:
+                            streaming_started = True
+                            yield token
+                    # Completed the stream cleanly.
+                    return
+            except LLMError:
+                raise
+            except Exception as exc:
+                if isinstance(
+                    exc, (httpx.HTTPError, OSError)
+                ) and not streaming_started and attempt == 1:
+                    await asyncio.sleep(1.0)
+                    continue
+                raise LLMError(
+                    f"Provider request failed: {exc}",
+                    provider=provider.name,
+                    retryable=True,
+                ) from exc
+
+    # Both attempts failed on transient errors; the chain decides the failover.
+    raise LLMError(
+        f"Provider {provider.name} failed after retries",
+        provider=provider.name,
+        retryable=True,
+    )
+
+
+def _parse_stream_line(line: str, completion: Completion) -> str | None:
+    """Handle one SSE ``data:`` line, returning the delta text if any."""
+    import json
+
+    if not line.startswith("data:"):
+        return None
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        chunk = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+
+    choices = chunk.get("choices") or []
+    if choices:
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content")
+        if content:
+            completion.text += content
+            return content
+
+    usage = chunk.get("usage")
+    if isinstance(usage, dict):
+        completion.usage = TokenUsage(
+            prompt_tokens=usage.get("prompt_tokens") or 0,
+            completion_tokens=usage.get("completion_tokens") or 0,
+        )
+    return None
 
 
 class FallbackChainProvider:
@@ -126,6 +338,23 @@ class FallbackChainProvider:
                     provider=provider.name,
                 )
                 break
+
+            # Skip providers in cooldown (402/404 earlier): they are known-down
+            # and retrying them would only burn the failover budget.
+            cooldown = _cooldown_remaining(provider.name)
+            if cooldown > 0:
+                logger.info(
+                    "LLM skipping provider={provider} in cooldown ({cooldown:.0f}s)",
+                    provider=provider.name,
+                    cooldown=cooldown,
+                )
+                if last_error is None:
+                    last_error = LLMError(
+                        f"Provider {provider.name} is in cooldown",
+                        provider=provider.name,
+                        retryable=True,
+                    )
+                continue
 
             logger.info(
                 "LLM attempting provider={provider} (attempt {attempt}/{total})",
@@ -214,104 +443,16 @@ class FallbackChainProvider:
         max_tokens: int | None = None,
         disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
-        """Stream from a single provider, enforcing a per-provider timeout."""
-        import httpx
-
-        import json
-
-        payload = {
-            "model": provider.model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "temperature": get_settings().llm_temperature,
-            "max_tokens": max_tokens or get_settings().llm_max_output_tokens,
-            "stream": True,
-        }
-        payload.update(thinking_disable_payload(provider.name, disable=disable_thinking))
-        headers = {
-            "Authorization": f"Bearer {provider.api_key}",
-            "Content-Type": "application/json",
-        }
-        endpoint = f"{provider.base_url.rstrip('/')}/chat/completions"
-
-        completion.provider = provider.name
-        completion.model = provider.model
-
-        error_body_limit = 500
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "POST", endpoint, json=payload, headers=headers
-                ) as response:
-                    if response.status_code == 400 and disable_thinking:
-                        # The provider may not accept our thinking-disable key.
-                        # Retry the same provider once without it rather than
-                        # failing over — a thinking response we strip is better
-                        # than no response at all.
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        logger.warning(
-                            "Provider {provider} rejected thinking-disable payload "
-                            "(HTTP 400: {body}); retrying without it",
-                            provider=provider.name,
-                            body=body[:error_body_limit],
-                        )
-                        payload.pop("reasoning", None)
-                        payload.pop("reasoning_effort", None)
-                        payload.pop("chat_template_kwargs", None)
-                        async with client.stream(
-                            "POST", endpoint, json=payload, headers=headers
-                        ) as response2:
-                            if response2.status_code >= 400:
-                                body2 = (await response2.aread()).decode("utf-8", "replace")
-                                raise LLMError(
-                                    f"Provider returned HTTP {response2.status_code}: "
-                                    f"{body2[:error_body_limit]}",
-                                    provider=provider.name,
-                                    retryable=response2.status_code >= 500,
-                                )
-                            async for line in response2.aiter_lines():
-                                token = self._parse_line(line, completion)
-                                if token is not None:
-                                    yield token
-                            return
-                    if response.status_code >= 400:
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        # Failover policy: the chain exists so a single provider's
-                        # trouble never takes the assistant down. 429 and 5xx are
-                        # provider-side; any other 4xx (401/403 auth or permission,
-                        # 404 route, 413 payload size, ...) is provider-specific state
-                        # that the next provider may not share, so it fails over. The
-                        # one exception is 400: our own payload is malformed and would
-                        # be rejected by every provider, so retrying just fails twice
-                        # as slowly — surface it instead.
-                        retryable = response.status_code != 400
-                        exc = LLMError(
-                            f"Provider returned HTTP {response.status_code}: "
-                            f"{body[:error_body_limit]}",
-                            provider=provider.name,
-                            retryable=retryable,
-                        )
-                        # Attach metadata for the 429 retry logic in the fallback chain.
-                        exc.status_code = response.status_code  # type: ignore[attr-defined]
-                        if response.status_code == 429:
-                            retry_after_header = response.headers.get("retry-after")
-                            try:
-                                exc.retry_after = float(retry_after_header) if retry_after_header else 2.0  # type: ignore[attr-defined]
-                            except (ValueError, TypeError):
-                                exc.retry_after = 2.0  # type: ignore[attr-defined]
-                        raise exc
-                    async for line in response.aiter_lines():
-                        token = self._parse_line(line, completion)
-                        if token is not None:
-                            yield token
-        except LLMError:
-            raise
-        except Exception as exc:
-            raise LLMError(
-                f"Provider request failed: {exc}",
-                provider=provider.name,
-                retryable=True,
-            ) from exc
+        """Stream from one provider. Hardening lives in ``_stream_provider_once``."""
+        async for token in _stream_provider_once(
+            provider,
+            messages,
+            completion,
+            timeout,
+            max_tokens=max_tokens,
+            disable_thinking=disable_thinking,
+        ):
+            yield token
 
     @staticmethod
     def _parse_line(line: str, completion: Completion) -> str | None:
@@ -456,6 +597,22 @@ class RotatingProvider:
                 )
                 break
 
+            cooldown = _cooldown_remaining(provider.name)
+            if cooldown > 0:
+                logger.info(
+                    "LLM rotating pool skipping provider={provider} in cooldown "
+                    "({cooldown:.0f}s)",
+                    provider=provider.name,
+                    cooldown=cooldown,
+                )
+                if last_error is None:
+                    last_error = LLMError(
+                        f"Provider {provider.name} is in cooldown",
+                        provider=provider.name,
+                        retryable=True,
+                    )
+                continue
+
             logger.info(
                 "LLM rotating pool attempting provider={provider} (attempt {attempt}/{total})",
                 provider=provider.name,
@@ -534,94 +691,16 @@ class RotatingProvider:
         max_tokens: int | None = None,
         disable_thinking: bool = False,
     ) -> AsyncIterator[str]:
-        """Stream from a single provider, enforcing a per-provider timeout."""
-        import httpx
-        import json as _json
-
-        payload = {
-            "model": provider.model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "temperature": get_settings().llm_temperature,
-            "max_tokens": max_tokens or get_settings().llm_max_output_tokens,
-            "stream": True,
-        }
-        payload.update(thinking_disable_payload(provider.name, disable=disable_thinking))
-        headers = {
-            "Authorization": f"Bearer {provider.api_key}",
-            "Content-Type": "application/json",
-        }
-        endpoint = f"{provider.base_url.rstrip('/')}/chat/completions"
-
-        completion.provider = provider.name
-        completion.model = provider.model
-
-        error_body_limit = 500
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "POST", endpoint, json=payload, headers=headers
-                ) as response:
-                    if response.status_code == 400 and disable_thinking:
-                        # The provider may not accept our thinking-disable key.
-                        # Retry the same provider once without it rather than
-                        # failing over — a thinking response we strip is better
-                        # than no response at all.
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        logger.warning(
-                            "Provider {provider} rejected thinking-disable payload "
-                            "(HTTP 400: {body}); retrying without it",
-                            provider=provider.name,
-                            body=body[:error_body_limit],
-                        )
-                        payload.pop("reasoning", None)
-                        payload.pop("reasoning_effort", None)
-                        payload.pop("chat_template_kwargs", None)
-                        async with client.stream(
-                            "POST", endpoint, json=payload, headers=headers
-                        ) as response2:
-                            if response2.status_code >= 400:
-                                body2 = (await response2.aread()).decode("utf-8", "replace")
-                                raise LLMError(
-                                    f"Provider returned HTTP {response2.status_code}: "
-                                    f"{body2[:error_body_limit]}",
-                                    provider=provider.name,
-                                    retryable=response2.status_code >= 500,
-                                )
-                            async for line in response2.aiter_lines():
-                                token = self._parse_line(line, completion)
-                                if token is not None:
-                                    yield token
-                            return
-                    if response.status_code >= 400:
-                        body = (await response.aread()).decode("utf-8", "replace")
-                        retryable = response.status_code != 400
-                        exc = LLMError(
-                            f"Provider returned HTTP {response.status_code}: "
-                            f"{body[:error_body_limit]}",
-                            provider=provider.name,
-                            retryable=retryable,
-                        )
-                        exc.status_code = response.status_code  # type: ignore[attr-defined]
-                        if response.status_code == 429:
-                            retry_after_header = response.headers.get("retry-after")
-                            try:
-                                exc.retry_after = float(retry_after_header) if retry_after_header else 2.0  # type: ignore[attr-defined]
-                            except (ValueError, TypeError):
-                                exc.retry_after = 2.0  # type: ignore[attr-defined]
-                        raise exc
-                    async for line in response.aiter_lines():
-                        token = self._parse_line(line, completion)
-                        if token is not None:
-                            yield token
-        except LLMError:
-            raise
-        except Exception as exc:
-            raise LLMError(
-                f"Provider request failed: {exc}",
-                provider=provider.name,
-                retryable=True,
-            ) from exc
+        """Stream from one provider. Hardening lives in ``_stream_provider_once``."""
+        async for token in _stream_provider_once(
+            provider,
+            messages,
+            completion,
+            timeout,
+            max_tokens=max_tokens,
+            disable_thinking=disable_thinking,
+        ):
+            yield token
 
     @staticmethod
     def _parse_line(line: str, completion: Completion) -> str | None:

@@ -28,8 +28,11 @@ pipeline itself is plain synchronous code and trivially testable.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from loguru import logger
 
 from app.config import get_settings
 from app.rag.chunking import chunk_pages
@@ -100,11 +103,13 @@ def prepare_document(
         raise IngestionError("Document produced no indexable text.")
 
     settings = get_settings()
+    _embed_started = time.perf_counter()
     embedded = embed_passages_resilient(
         [chunk.content for chunk in chunks],
         batch_size=settings.embedding_batch_size,
         max_attempts=settings.embedding_max_attempts,
     )
+    embed_ms = (time.perf_counter() - _embed_started) * 1000.0
 
     prepared: list[PreparedChunk] = []
     for chunk, vector in zip(chunks, embedded.vectors, strict=True):
@@ -134,6 +139,19 @@ def prepare_document(
         raise IngestionError("No chunk in this document could be embedded.")
 
     page_count = len({page.page for page in pages if page.page is not None}) or None
+    logger.info(
+        "ingest_document file={file} mime={mime} pages={pages} words={words} "
+        "chunks_total={total} chunks_embedded={embedded} chunks_skipped={skipped} "
+        "embed_ms={embed_ms:.1f}",
+        file=filename,
+        mime=mime_type,
+        pages=page_count or 0,
+        words=word_count,
+        total=len(chunks),
+        embedded=len(prepared),
+        skipped=len(chunks) - len(prepared),
+        embed_ms=embed_ms,
+    )
     return PreparedDocument(chunks=prepared, word_count=word_count, page_count=page_count)
 
 

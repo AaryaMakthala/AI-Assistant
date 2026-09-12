@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -89,6 +90,50 @@ def cited_numbers(answer: str) -> list[int]:
                 seen.add(number)
                 numbers.append(number)
     return numbers
+
+
+def _log_chat_diag(
+    *,
+    workspace_id,
+    intent: str,
+    reason: str = "",
+    grounded: bool = True,
+    provider: str = "",
+    candidates: int = 0,
+    final: int = 0,
+    tokens: int = 0,
+    retrieval_called: bool = False,
+    diag: dict[str, float] | None = None,
+) -> None:
+    """Emit a single structured per-request diagnostic line.
+
+    Called once per chat request at every terminal exit of the streaming
+    endpoint so operators can split a given request's cost and latency by
+    stage without correlating several ad-hoc logs.  Stage durations are
+    milliseconds; keys that a fast path never touched default to 0.0.
+    """
+    d = diag or {}
+    request_started = d.get("request_started", time.perf_counter())
+    total_ms = (time.perf_counter() - request_started) * 1000.0
+    logger.info(
+        "chat_request intent={intent} reason={reason} retrieval_called={rc} "
+        "grounded={grounded} provider={provider} candidates={candidates} "
+        "final={final} tokens={tokens} "
+        "qu_ms={qu_ms:.2f} retrieval_ms={retrieval_ms:.2f} total_ms={total_ms:.2f} "
+        "workspace={ws}",
+        intent=intent,
+        reason=reason,
+        rc=retrieval_called,
+        grounded=grounded,
+        provider=provider,
+        candidates=candidates,
+        final=final,
+        tokens=tokens,
+        qu_ms=d.get("qu_ms", 0.0),
+        retrieval_ms=d.get("retrieval_ms", 0.0),
+        total_ms=total_ms,
+        ws=workspace_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1472,41 +1517,14 @@ async def _stream_chat(
     needs_clarification = False
     refusal_reason: ResponseReason | None = None
     history_turns: list[ChatTurn] = []
-
-    # Load history for context.
-    history_turns = await _load_recent_history(
-        workspace_id=workspace_id,
-        user_id=principal.user_id,
-        session_id=session_id,
-    )
-    history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
-
-    # Query Understanding stage — single LLM call, every message.
-    qu_result = await understand_query(
-        query=question,
-        workspace_id=workspace_id,
-        history=history_dicts,
-    )
-    
-    # Build intent from QU result, but refine with regex for specific cases
-    # that QU's 5-category model may misclassify (identity questions, name
-    # statements) — these are deterministic and should never need an LLM.
-    intent = _refine_intent_from_qu(
-        qu_result=qu_result,
-        original_query=question,
-    )
-    effective_query = qu_result.corrected_query
-    search_query_for_retrieval = qu_result.search_query
-    qu_confidence = qu_result.confidence
-
-    # --- Progress status ---
-    # Query understanding is complete; the next major phase is search/retrieval
-    # or a direct answer.  Emit a lightweight status so the frontend can show
-    # "Searching your documents…" or similar while the backend works.
-    yield await _sse_event("status", {"stage": "searching"})
+    #: Per-request stage timings, consumed by _log_chat_diag at the terminal
+    #: exits below.  Keys are set as each phase completes; fast paths leave
+    #: them unset and the helper defaults them to 0.0.
+    diag: dict[str, float] = {"request_started": time.perf_counter()}
 
     # 1b. Prompt-injection attempts are refused immediately — never routed,
-    # never retrieved, never sent to the LLM.
+    # never retrieved, never sent to the LLM.  Checked BEFORE any QU call so a
+    # payload aimed at the understanding stage never reaches a model.
     if _is_injection_attempt(question):
         injection_text = refusal_message(ResponseReason.INJECTION_ATTEMPT)
         async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
@@ -1534,7 +1552,91 @@ async def _stream_chat(
             "intent=injection_attempt workspace={ws} retrieval_called=False",
             ws=workspace_id,
         )
+        _log_chat_diag(
+            workspace_id=workspace_id,
+            intent="injection_attempt",
+            reason="injection_attempt",
+            grounded=True,
+            provider="",
+            candidates=0,
+            final=0,
+            tokens=0,
+            retrieval_called=False,
+            diag=diag,
+        )
         return
+
+    # Load history for context.
+    history_turns = await _load_recent_history(
+        workspace_id=workspace_id,
+        user_id=principal.user_id,
+        session_id=session_id,
+    )
+    history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
+
+    # 1a'. Deterministic zero-cost fast path.  These intents are resolved by
+    # regex alone and their answers never need retrieval: running the QU LLM
+    # call on them wastes latency and token budget, and a rewrite can only eat
+    # a constraint a regex match already respected.  Person-info questions are
+    # deliberately excluded (they must go through the evidence path), and the
+    # generic GENERAL_CONVERSATION lane is excluded — its regex is too eager
+    # ("can you help me with X" would skip retrieval on a vacation-policy
+    # question).  The personal_name_boundary sub-lane is included: it is a
+    # fixed refusal and needs no LLM.
+    from app.retrieval.intent import classify_intent_regex as _classify_regex
+
+    regex_intent = _classify_regex(question)
+    fast_intent = (
+        regex_intent.category
+        in (
+            IntentCategory.GREETING,
+            IntentCategory.APP_HELP,
+            IntentCategory.OUT_OF_SCOPE,
+            IntentCategory.IDENTITY_ASSISTANT,
+            IntentCategory.IDENTITY_USER,
+        )
+        or (
+            regex_intent.category == IntentCategory.GENERAL_CONVERSATION
+            and regex_intent.reason == "personal_name_boundary"
+        )
+    )
+    if fast_intent and not _is_person_info_request(question):
+        intent = regex_intent
+        effective_query = question
+        diag["qu_ms"] = 0.0
+        logger.info(
+            "intent={category} reason={reason} workspace={ws} QU_skipped=True",
+            category=intent.category.value,
+            reason=intent.reason,
+            ws=workspace_id,
+        )
+    else:
+        # Query Understanding stage — single LLM call for everything else.
+        _qu_started = time.perf_counter()
+        qu_result = await understand_query(
+            query=question,
+            workspace_id=workspace_id,
+            history=history_dicts,
+        )
+        diag["qu_ms"] = (time.perf_counter() - _qu_started) * 1000.0
+
+        # Build intent from QU result, but refine with regex for specific cases
+        # that QU's 5-category model may misclassify (identity questions, name
+        # statements) — these are deterministic and should never need an LLM.
+        intent = _refine_intent_from_qu(
+            qu_result=qu_result,
+            original_query=question,
+        )
+        effective_query = qu_result.corrected_query
+        search_query_for_retrieval = qu_result.search_query
+        qu_confidence = qu_result.confidence
+
+        # --- Progress status ---
+        # Query understanding is complete; the next major phase is search or a
+        # direct answer.  Emit a status so the frontend can show "Searching
+        # your documents…" (the regex fast path above goes straight to its
+        # answer and skips this).
+        yield await _sse_event("status", {"stage": "searching"})
 
     # Person-info questions must go through the evidence path (RAG) — they are
     # plausibly answered from org charts / team directories in approved
@@ -1582,6 +1684,18 @@ async def _stream_chat(
         logger.info(
             "intent=ambiguous reason=needs_clarification workspace={ws}",
             ws=workspace_id,
+        )
+        _log_chat_diag(
+            workspace_id=workspace_id,
+            intent=intent.category.value,
+            reason="needs_clarification",
+            grounded=True,
+            provider="",
+            candidates=0,
+            final=0,
+            tokens=0,
+            retrieval_called=False,
+            diag=diag,
         )
         return
 
@@ -1763,6 +1877,18 @@ async def _stream_chat(
                 "sql_query": "",
             },
         )
+        _log_chat_diag(
+            workspace_id=workspace_id,
+            intent=intent.category.value,
+            reason=refusal_reason.value if refusal_reason else "direct_answer",
+            grounded=True,
+            provider="",
+            candidates=0,
+            final=0,
+            tokens=0,
+            retrieval_called=False,
+            diag=diag,
+        )
         return
 
     # --- Document content path (RAG) ---
@@ -1806,6 +1932,7 @@ async def _stream_chat(
     )
 
     async with tenant_session(workspace_id=workspace_id, user_id=principal.user_id) as db:
+        _retrieval_started = time.perf_counter()
         result = await retrieve(
             db, query=effective_query, workspace_id=workspace_id,
             query_shape=query_shape,
@@ -1813,6 +1940,7 @@ async def _stream_chat(
             search_query=search_query_for_retrieval,
             qu_confidence=qu_confidence,
         )
+        diag["retrieval_ms"] = (time.perf_counter() - _retrieval_started) * 1000.0
 
     if not result.grounded:
         # Person-info questions that found no evidence get the unsupported-
@@ -1831,6 +1959,18 @@ async def _stream_chat(
             score=result.top_score,
             n=len(result.chunks),
             reason=refusal_reason.value,
+        )
+        _log_chat_diag(
+            workspace_id=workspace_id,
+            intent=intent.category.value,
+            reason=refusal_reason.value,
+            grounded=False,
+            provider="",
+            candidates=len(result.chunks),
+            final=0,
+            tokens=0,
+            retrieval_called=True,
+            diag=diag,
         )
         # Emit empty sources, the refusal text as a token, and done.
         yield await _sse_event("status", {"stage": "generating"})
@@ -1878,6 +2018,7 @@ async def _stream_chat(
     messages = build_messages(question=effective_query, chunks=result.chunks)
     completion = Completion()
     full_text = ""
+    _gen_started = time.perf_counter()
     try:
         # Suppress model-injected think/reasoning blocks as they stream, so the
         # client never sees the raw tags or reasoning text (Qwen3 on Groq,
@@ -1888,12 +2029,26 @@ async def _stream_chat(
         ):
             full_text += token
             yield await _sse_event("token", {"text": token})
+        diag["gen_ms"] = (time.perf_counter() - _gen_started) * 1000.0
     except LLMError as exc:
+        diag["gen_ms"] = (time.perf_counter() - _gen_started) * 1000.0
         logger.error(
             "Generation failed for user {user} in workspace {ws}: {error}",
             user=principal.user_id,
             ws=workspace_id,
             error=exc,
+        )
+        _log_chat_diag(
+            workspace_id=workspace_id,
+            intent=intent.category.value,
+            reason="llm_error",
+            grounded=result.grounded,
+            provider=completion.provider or llm.name,
+            candidates=len(result.chunks),
+            final=0,
+            tokens=completion.usage.prompt_tokens,
+            retrieval_called=True,
+            diag=diag,
         )
         yield await _sse_event(
             "error",
@@ -1917,6 +2072,18 @@ async def _stream_chat(
             grounded=result.grounded,
             n=len(result.chunks),
             provider=completion.provider or llm.name,
+        )
+        _log_chat_diag(
+            workspace_id=workspace_id,
+            intent=intent.category.value,
+            reason="empty_answer",
+            grounded=True,
+            provider=completion.provider or llm.name,
+            candidates=len(result.chunks),
+            final=0,
+            tokens=completion.usage.completion_tokens,
+            retrieval_called=True,
+            diag=diag,
         )
         yield await _sse_event(
             "error",
@@ -1978,6 +2145,18 @@ async def _stream_chat(
         ws=workspace_id,
         n=len(sources_list),
         tokens=completion.usage.completion_tokens,
+    )
+    _log_chat_diag(
+        workspace_id=workspace_id,
+        intent=intent.category.value,
+        reason="",
+        grounded=True,
+        provider=_display_provider_name(completion.provider or llm.name),
+        candidates=len(sources_list),
+        final=len(final_sources),
+        tokens=completion.usage.completion_tokens,
+        retrieval_called=True,
+        diag=diag,
     )
 
 

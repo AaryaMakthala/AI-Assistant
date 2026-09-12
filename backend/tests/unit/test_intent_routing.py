@@ -976,8 +976,9 @@ class TestRobustIntentClassification:
         assert classify_intent_regex("hello").category == IntentCategory.GREETING
         assert classify_intent_regex("hey").category == IntentCategory.GREETING
 
-        # Identity — NOT in fast-path (needs LLM for sub-typing)
-        assert classify_intent_regex("what is my name").reason == "regex_fallback_to_llm"
+        # Identity — user-name queries hit the personal-name boundary fast-path;
+        # self-identity questions echo the user's identity context (LLM-needed).
+        assert classify_intent_regex("what is my name").reason == "personal_name_boundary"
         assert classify_intent_regex("who am I").reason == "regex_fallback_to_llm"
 
         # Metadata

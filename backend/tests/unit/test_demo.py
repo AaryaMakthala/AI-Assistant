@@ -22,6 +22,28 @@ from fastapi import HTTPException
 import httpx
 import pytest
 
+from app.security.rate_limit import limiter
+
+
+class _FakeRequest:
+    """Minimal stand-in for slowapi's Request check.
+
+    With the limiter disabled the wrapper never touches the request object, it only
+    forwards it to ``demo_enter(request=...)``, so an empty placeholder suffices.
+    """
+
+
+@pytest.fixture(autouse=True)
+def _demo_rate_limit_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """demo_enter is rate-limited in production (CLAUDE.md 4.7).
+
+    These unit tests call the handler function directly and pass a dummy
+    placeholder for slowapi's ``request`` parameter, so the limiter is disabled
+    for them.  End-to-end demo coverage runs through the TestClient elsewhere,
+    where slowapi injects a real Request.
+    """
+    monkeypatch.setattr(limiter, "enabled", False)
+
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -245,7 +267,7 @@ class TestDemoEnter:
         settings = _mock_settings(demo_enabled=False)
         with patch("app.api.demo.get_settings", return_value=settings):
             with pytest.raises(HTTPException) as exc_info:
-                await demo_enter()
+                await demo_enter(request=_FakeRequest())
             assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -272,7 +294,7 @@ class TestDemoEnter:
             patch("app.api.demo.get_seeded_workspace_id", return_value=None),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await demo_enter()
+                await demo_enter(request=_FakeRequest())
             assert exc_info.value.status_code == 503
 
     @pytest.mark.asyncio
@@ -322,7 +344,7 @@ class TestDemoEnter:
             mock_client.put.return_value = mock_response
             mock_client_cls.return_value = mock_client
 
-            result = await demo_enter()
+            result = await demo_enter(request=_FakeRequest())
 
         assert result.workspace_id == demo_ws_id
         assert result.email.startswith("guest_")
@@ -382,7 +404,7 @@ class TestDemoEnter:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            result = await demo_enter()
+            result = await demo_enter(request=_FakeRequest())
 
         # Verify the response shape
         assert isinstance(result, DemoEnterResponse)
@@ -478,7 +500,7 @@ class TestDemoEnter:
             mock_client_cls.return_value = mock_client
 
             with pytest.raises(HTTPException) as exc_info:
-                await demo_enter()
+                await demo_enter(request=_FakeRequest())
 
             assert exc_info.value.status_code == 503
 
@@ -567,7 +589,7 @@ class TestDemoEnter:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            result = await demo_enter()
+            result = await demo_enter(request=_FakeRequest())
 
         # 1. /demo/enter returns the correct workspace ID.
         assert result.workspace_id == demo_ws_id

@@ -82,9 +82,9 @@ def test_secrets_are_not_exposed_in_repr(valid_env: None) -> None:
 def test_section13_defaults(valid_env: None) -> None:
     settings = get_settings()
 
-    assert settings.embedding_model == "BAAI/bge-small-en-v1.5"
-    assert settings.embedding_dim == 384
-    assert settings.reranker_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert settings.embedding_provider == "gemini"
+    assert settings.embedding_model == "gemini-embedding-001"
+    assert settings.embedding_dim == 768
     assert settings.retrieval_candidate_count == 15
     assert settings.retrieval_final_count == 8
     assert settings.retrieval_relevance_threshold == 0.3

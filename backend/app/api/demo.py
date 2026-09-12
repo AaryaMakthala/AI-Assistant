@@ -13,7 +13,7 @@ import secrets
 import uuid
 
 import httpx
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import delete, select
@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.db.models import Member, Workspace
 from app.db.session import get_session_factory
 from app.demo.seed import get_seeded_workspace_id
+from app.security.rate_limit import DEMO_RATE_LIMIT, limiter
 
 router = APIRouter(tags=["demo"])
 
@@ -41,7 +42,8 @@ class DemoEnterResponse(BaseModel):
     response_model=DemoEnterResponse,
     summary="Enter the demo as a guest member",
 )
-async def demo_enter() -> DemoEnterResponse:
+@limiter.limit(DEMO_RATE_LIMIT)
+async def demo_enter(request: Request) -> DemoEnterResponse:
     """Create an ephemeral guest user and return auth credentials for the demo workspace.
 
     1. Look up the demo workspace (must be seeded beforehand).
@@ -55,6 +57,9 @@ async def demo_enter() -> DemoEnterResponse:
 
     The guest user's email is ``guest_<uuid>@demo.local`` — no real email
     is required.  The password is random per session and never stored.
+
+    Rate limited: each call costs a Supabase Auth user + a workspace
+    membership, so unlimited visitors would accumulate orphaned Auth users.
     """
     settings = get_settings()
 

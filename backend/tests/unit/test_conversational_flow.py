@@ -5,10 +5,9 @@ Tests verify the actual chat endpoint behavior for follow-up scenarios,
 ensuring the rewritten query is the canonical query used everywhere
 downstream: metadata routing, document targeting, retrieval, and LLM.
 
-Rewriting now lives in the LLM router: a RouteResult with needs_rewrite=True
-and query=<rewritten> becomes Intent.rewritten_query inside classify_intent.
-These tests drive that router seam and verify chat_v2 consumes
-intent.rewritten_query consistently.
+Rewriting now lives in the Query Understanding stage: a QueryUnderstanding
+with a corrected/search query becomes the query used downstream.  These
+tests drive that seam and verify grounded_chat consumes it consistently.
 
 Test matrix:
 A — Simple follow-up (pronoun resolution)
@@ -22,11 +21,9 @@ G — Rewrite provider failure (graceful degradation)
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,7 +32,6 @@ import app.api.chat_v2 as chat_module
 from app.api.dependencies import get_generic_llm
 from app.llm.base import Completion, LLMError, Message, TokenUsage
 from app.retrieval.intent import normalize_for_classification
-from app.retrieval.llm_router import RouteResult
 from app.retrieval.pipeline import RetrievedChunk, RetrievalResult
 from app.security.auth import Principal, get_principal
 
@@ -68,30 +64,40 @@ def _chunk(
     )
 
 
-def _make_rewrite_router(source: str, rewritten: str) -> Any:
-    """Build a route_with_llm stand-in that rewrites one specific follow-up.
+def _make_qu(source: str, corrected: str, *, intent: str = "document_content") -> Any:
+    """Build a chat_v2.understand_query stand-in that rewrites one follow-up.
 
-    The first call with ``source`` returns a needs_rewrite RouteResult
-    carrying ``rewritten`` — which classify_intent turns into
-    ``Intent.rewritten_query``, the seam chat_v2 now consumes.  Any other
-    query (including the rewritten one during re-classification) is plain
-    DOCUMENT_CONTENT.
+    The first call with ``source`` returns a QueryUnderstanding carrying the
+    rewritten query — the seam grounded_chat now consumes.  Any other query is
+    plain DOCUMENT_CONTENT.
     """
+    from app.retrieval.intent import IntentCategory
+    from app.retrieval.query_understanding import QueryUnderstanding
 
-    async def _router(
-        *, query: str, history: list | None = None, **kw: Any
-    ) -> RouteResult:
+    _QU_MAP = {
+        "document_content": IntentCategory.DOCUMENT_CONTENT,
+        "workspace_metadata": IntentCategory.WORKSPACE_METADATA,
+        "needs_clarification": IntentCategory.AMBIGUOUS,
+    }
+
+    async def _qu(*, query: str, workspace_id: uuid.UUID, history: list) -> QueryUnderstanding:
         if normalize_for_classification(query) == normalize_for_classification(source):
-            return RouteResult(
-                route="DOCUMENT_CONTENT",
-                needs_rewrite=True,
-                query=rewritten,
+            return QueryUnderstanding(
+                corrected_query=corrected,
+                search_query=corrected,
+                intent=_QU_MAP[intent],
                 confidence=0.95,
                 reasoning="test",
             )
-        return RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+        return QueryUnderstanding(
+            corrected_query=query,
+            search_query=query,
+            intent=IntentCategory.DOCUMENT_CONTENT,
+            confidence=0.9,
+            reasoning="test",
+        )
 
-    return _router
+    return _qu
 
 
 class _StubLLM:
@@ -155,51 +161,6 @@ class _FakeSession:
         pass
 
 
-class _FakeRewriteProvider:
-    """Fake LLM provider for the rewrite step."""
-
-    def __init__(self, response_text: str) -> None:
-        self._response = response_text
-        self.name = "test-rewrite"
-        self.model = "test-model"
-
-    async def stream(
-        self, messages: list[Any], *, completion: Any
-    ) -> AsyncIterator[str]:
-        completion.text = self._response
-        completion.provider = self.name
-        completion.model = self.model
-        yield self._response
-
-
-class _FailingRewriteProvider:
-    """Fake LLM provider that always raises."""
-
-    def __init__(self, error: Exception) -> None:
-        self._error = error
-        self.name = "test-rewrite"
-        self.model = "test-model"
-
-    async def stream(
-        self, messages: list[Any], *, completion: Any  # noqa: ARG002
-    ) -> AsyncIterator[str]:
-        raise self._error
-        yield  # make it a generator  # noqa: RET503
-
-
-def _make_rewrite_response(
-    rewritten: str,
-    *,
-    needs_clarification: bool = False,
-    confidence: float = 0.9,
-) -> str:
-    return json.dumps({
-        "rewritten_query": rewritten,
-        "needs_clarification": needs_clarification,
-        "confidence": confidence,
-    })
-
-
 # ---------------------------------------------------------------------------
 # Client fixture
 # ---------------------------------------------------------------------------
@@ -238,29 +199,24 @@ def client(
 
     monkeypatch.setattr(chat_module, "tenant_session", _make_tenant_session)
 
-    # Mock the LLM router to avoid real API calls for intent classification.
-    # Returns DOCUMENT_CONTENT by default (most conversational queries are doc queries).
-    from app.retrieval.llm_router import RouteResult as _RouteResult
+    # Mock the Query Understanding stage to avoid real API calls for intent
+    # classification.  Default is a *degraded* classification (DOCUMENT_CONTENT,
+    # confidence 0.0) — grounded_chat then trusts a confident regex
+    # classification, which is the deterministic path the passing tests rely on.
+    # Tests that need specific rewrites override understand_query themselves.
+    from app.retrieval.intent import IntentCategory as _IC
+    from app.retrieval.query_understanding import QueryUnderstanding as _QU
 
-    async def _mock_route(*, query: str, history: list | None = None, **kw: Any) -> _RouteResult:
-        from app.retrieval.intent import normalize_for_classification
-        import re as _re
-        q = normalize_for_classification(query)
-        if _re.search(r"(?:about|discuss|cover|mention|regarding)\b", q):
-            return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
-        if _re.search(r"(?:how\s+many|number\s+of)\s+(?:uploaded\s+)?(?:my\s+|the\s+|this\s+)?(?:own\s+)?(?:members?|documents?|files?|uploaded)", q):
-            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
-        if _re.search(r"(?:list|show)\s+(?:are\s+the\s+)?(?:me\s+)?(?:all\s+)?(?:my\s+|the\s+|this\s+)?(?:uploaded\s+)?(?:members?|documents?|files?)\b", q):
-            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
-        if _re.search(r"^what\s+(?:are|is)\s+(?:the\s+|my\s+)?(?:uploaded\s+)?(?:documents?|files?)\s*$", q):
-            return _RouteResult(route="METADATA", confidence=0.9, reasoning="test")
-        if _re.search(r"^how\s+many\s+are\s+(?:invited|pending|active|confirmed|removed)\s*$", q):
-            return _RouteResult(route="METADATA", confidence=0.85, reasoning="test")
-        if _re.search(r"^who\s+(?:is|are)\s+(?:invited|pending|active)\s*$", q):
-            return _RouteResult(route="METADATA", confidence=0.85, reasoning="test")
-        return _RouteResult(route="DOCUMENT_CONTENT", confidence=0.9, reasoning="test")
+    async def _mock_qu(*, query: str, workspace_id: uuid.UUID, history: list) -> _QU:
+        return _QU(
+            corrected_query=query,
+            search_query=query,
+            intent=_IC.DOCUMENT_CONTENT,
+            confidence=0.0,
+            reasoning="test",
+        )
 
-    monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _mock_route)
+    monkeypatch.setattr(chat_module, "understand_query", _mock_qu)
 
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client, principal
@@ -308,13 +264,13 @@ class TestASimpleFollowUp:
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        # Router attaches the rewritten follow-up to the Intent.
+        # Query Understanding rewrites the bare follow-up into a Kanban-scoped
+        # question; grounded_chat uses that rewritten query for retrieval and
+        # for the answer-generation prompt.
         monkeypatch.setattr(
-            "app.retrieval.llm_router.route_with_llm",
-            _make_rewrite_router(
-                "What about its benefits?",
-                "What are the benefits of Kanban?",
-            ),
+            chat_module,
+            "understand_query",
+            _make_qu("What about its benefits?", "What are the benefits of Kanban?"),
         )
 
         stub = _StubLLM(text="Kanban benefits include improved visibility.")
@@ -379,10 +335,12 @@ class TestDocumentFollowUp:
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
-        # Router rewrites the bare follow-up into a DevOps-scoped question.
+        # Query Understanding rewrites the bare follow-up into a DevOps-scoped
+        # question.
         monkeypatch.setattr(
-            "app.retrieval.llm_router.route_with_llm",
-            _make_rewrite_router(
+            chat_module,
+            "understand_query",
+            _make_qu(
                 "What questions about it mention Kanban?",
                 "What questions about Kanban are present in the DevOps document?",
             ),
@@ -489,13 +447,15 @@ class TestMonthFollowUp:
     ) -> None:
         test_client, _ = client
 
-        # Router attaches a rewritten doc-count query; re-classifying the
-        # rewritten text hits the metadata regex fast-path (no router call).
+        # Query Understanding attaches a rewritten doc-count query; the corrected
+        # metadata question routes to the metadata fast-path (no retrieval).
         monkeypatch.setattr(
-            "app.retrieval.llm_router.route_with_llm",
-            _make_rewrite_router(
+            chat_module,
+            "understand_query",
+            _make_qu(
                 "What about last month?",
                 "How many documents were uploaded last month?",
+                intent="workspace_metadata",
             ),
         )
 
@@ -553,19 +513,23 @@ class TestAmbiguousFollowUp:
     ) -> None:
         test_client, _ = client
 
-        # Ambiguity now surfaces from the router: a NEEDS_CLARIFICATION
-        # RouteResult maps to Intent.needs_clarification, and chat_v2 replies
-        # with a clarification request (no retrieval, no LLM).
-        async def _ambiguous_router(
-            *, query: str, history: list | None = None, **kw: Any
-        ) -> RouteResult:
-            return RouteResult(
-                route="NEEDS_CLARIFICATION",
+        # Ambiguity now surfaces from the Query Understanding stage: a
+        # needs_clarification classification maps to Intent.AMBIGUOUS, and
+        # grounded_chat replies with a clarification request (no retrieval,
+        # no LLM).
+        from app.retrieval.intent import IntentCategory as _IC
+        from app.retrieval.query_understanding import QueryUnderstanding as _QU
+
+        async def _ambiguous_qu(*, query: str, workspace_id: uuid.UUID, history: list) -> _QU:
+            return _QU(
+                corrected_query=query,
+                search_query=query,
+                intent=_IC.AMBIGUOUS,
                 confidence=0.9,
                 reasoning="test",
             )
 
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _ambiguous_router)
+        monkeypatch.setattr(chat_module, "understand_query", _ambiguous_qu)
 
         # Verify retrieval is NOT called.
         retrieval_called: list[str] = []
@@ -614,13 +578,15 @@ class TestFollowUpAfterRefusal:
     ) -> None:
         test_client, _ = client
 
-        # Router rewrites the clarification into a member-count query; the
-        # rewritten text re-classifies via the metadata regex fast-path.
+        # Query Understanding rewrites the clarification into a member-count
+        # question; the corrected text re-classifies via the metadata fast-path.
         monkeypatch.setattr(
-            "app.retrieval.llm_router.route_with_llm",
-            _make_rewrite_router(
+            chat_module,
+            "understand_query",
+            _make_qu(
                 "I mean the workspace.",
                 "How many members are in this workspace?",
+                intent="workspace_metadata",
             ),
         )
 
@@ -663,12 +629,12 @@ class TestFollowUpAfterRefusal:
 # ===========================================================================
 
 class TestRewriteProviderFailure:
-    """Force the router (which now carries rewriting) to fail.  Use a query
+    """Force the Query Understanding rewrite stage to degrade.  Use a query
     with an obvious follow-up pronoun.
 
     Expected: original query is preserved, request continues,
     no internal error exposed, no false not_relevant decision solely
-    because the router degraded.
+    because the rewrite degraded.
     """
 
     def test_g_rewrite_failure_graceful(
@@ -676,22 +642,23 @@ class TestRewriteProviderFailure:
     ) -> None:
         test_client, _ = client
 
-        # Rewriting now lives inside the LLM router.  Simulate the router
-        # failing outright: a degraded RouteResult makes classify_intent fall
-        # back to regex (Stage 2), which leaves this follow-up as plain
-        # DOCUMENT_CONTENT with no rewritten query — the original question
-        # must flow through unchanged, with no error and no false refusal.
-        async def _degraded_router(
-            *, query: str, history: list | None = None, **kw: Any
-        ) -> RouteResult:
-            return RouteResult(
-                route="NEEDS_CLARIFICATION",
+        # Rewriting now lives inside Query Understanding.  Simulate the stage
+        # degrading (parse failure) so grounded_chat keeps the original
+        # question and flows through unchanged, with no error and no false
+        # refusal.
+        from app.retrieval.intent import IntentCategory as _IC
+        from app.retrieval.query_understanding import QueryUnderstanding as _QU
+
+        async def _degraded_qu(*, query: str, workspace_id: uuid.UUID, history: list) -> _QU:
+            return _QU(
+                corrected_query=query,
+                search_query=query,
+                intent=_IC.DOCUMENT_CONTENT,
                 confidence=0.0,
-                reasoning="llm_error: provider unreachable",
-                status="degraded",
+                reasoning="parse_failure",
             )
 
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _degraded_router)
+        monkeypatch.setattr(chat_module, "understand_query", _degraded_qu)
 
         # Track what query reaches retrieval — should be the ORIGINAL query.
         captured_queries: list[str] = []

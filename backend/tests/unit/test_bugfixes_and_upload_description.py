@@ -430,18 +430,14 @@ class TestLLMMetadataSubClassifier:
 
         mock_provider = _FakeProvider('{"sub_intent": "doc_list", "confidence": 0.9}')
 
-        with patch("app.config.get_settings") as mock_settings:
-            mock_settings.return_value.gemini_api_key = "test"
-            mock_settings.return_value.groq_api_key = "test"
-            mock_settings.return_value.openrouter_api_key = None
-            with patch("app.llm.fallback.FallbackChainProvider", return_value=mock_provider):
-                result = await _llm_classify_metadata_subintent(
-                    "what are those documents",
-                    history=[
-                        {"role": "user", "content": "how many documents"},
-                        {"role": "assistant", "content": "You have 6 documents."},
-                    ],
-                )
+        with patch("app.api.dependencies.get_llm_provider", return_value=mock_provider):
+            result = await _llm_classify_metadata_subintent(
+                "what are those documents",
+                history=[
+                    {"role": "user", "content": "how many documents"},
+                    {"role": "assistant", "content": "You have 6 documents."},
+                ],
+            )
         assert result == MetadataSubIntent.DOC_LIST
 
     @pytest.mark.asyncio
@@ -471,18 +467,14 @@ class TestLLMMetadataSubClassifier:
 
         mock_provider = _FakeProvider('{"sub_intent": "doc_list", "confidence": 0.85}')
 
-        with patch("app.config.get_settings") as mock_settings:
-            mock_settings.return_value.gemini_api_key = "test"
-            mock_settings.return_value.groq_api_key = "test"
-            mock_settings.return_value.openrouter_api_key = None
-            with patch("app.llm.fallback.FallbackChainProvider", return_value=mock_provider):
-                result = await _llm_classify_metadata_subintent(
-                    "what are they",
-                    history=[
-                        {"role": "user", "content": "how many documents there"},
-                        {"role": "assistant", "content": "You have 6 uploaded documents."},
-                    ],
-                )
+        with patch("app.api.dependencies.get_llm_provider", return_value=mock_provider):
+            result = await _llm_classify_metadata_subintent(
+                "what are they",
+                history=[
+                    {"role": "user", "content": "how many documents there"},
+                    {"role": "assistant", "content": "You have 6 uploaded documents."},
+                ],
+            )
         assert result == MetadataSubIntent.DOC_LIST
 
     @pytest.mark.asyncio
@@ -498,12 +490,8 @@ class TestLLMMetadataSubClassifier:
 
         mock_provider = _FailingProvider()
 
-        with patch("app.config.get_settings") as mock_settings:
-            mock_settings.return_value.gemini_api_key = "test"
-            mock_settings.return_value.groq_api_key = "test"
-            mock_settings.return_value.openrouter_api_key = None
-            with patch("app.llm.fallback.FallbackChainProvider", return_value=mock_provider):
-                result = await _llm_classify_metadata_subintent("what are they")
+        with patch("app.api.dependencies.get_llm_provider", return_value=mock_provider):
+            result = await _llm_classify_metadata_subintent("what are they")
         assert result is None
 
 
@@ -593,16 +581,12 @@ class TestRelevanceGateDescriptions:
 
         mock_provider = _CapturingProvider('{"relevant": true, "confidence": 0.8, "reason": "description_match"}')
 
-        with patch("app.config.get_settings") as mock_settings:
-            mock_settings.return_value.gemini_api_key = "test"
-            mock_settings.return_value.groq_api_key = "test"
-            mock_settings.return_value.openrouter_api_key = None
-            with patch("app.llm.fallback.FallbackChainProvider", return_value=mock_provider):
-                decision = await check_relevance(
-                    session=mock_session,
-                    question="what is the vacation policy",
-                    workspace_id=uuid.uuid4(),
-                )
+        with patch("app.api.dependencies.get_llm_provider", return_value=mock_provider):
+            decision = await check_relevance(
+                session=mock_session,
+                question="what is the vacation policy",
+                workspace_id=uuid.uuid4(),
+            )
 
         assert decision.relevant is True
         # Verify the description text is present in what was sent to the LLM.
@@ -658,16 +642,12 @@ class TestRelevanceGateDescriptions:
 
         mock_provider = _CapturingProvider('{"relevant": true, "confidence": 0.7, "reason": "filename_match"}')
 
-        with patch("app.config.get_settings") as mock_settings:
-            mock_settings.return_value.gemini_api_key = "test"
-            mock_settings.return_value.groq_api_key = "test"
-            mock_settings.return_value.openrouter_api_key = None
-            with patch("app.llm.fallback.FallbackChainProvider", return_value=mock_provider):
-                decision = await check_relevance(
-                    session=mock_session,
-                    question="what is the policy",
-                    workspace_id=uuid.uuid4(),
-                )
+        with patch("app.api.dependencies.get_llm_provider", return_value=mock_provider):
+            decision = await check_relevance(
+                session=mock_session,
+                question="what is the policy",
+                workspace_id=uuid.uuid4(),
+            )
 
         assert decision.relevant is True
         # The filename should still be present even without a description.

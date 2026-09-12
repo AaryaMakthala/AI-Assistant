@@ -52,10 +52,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-# BAAI/bge-small-en-v1.5. Pinned: changing this invalidates every stored vector and
-# requires a full re-embed of the index, never a mix (CLAUDE.md sections 2 and 13).
-# MUST match EMBEDDING_DIMENSION in app/config.py; Phase 1C should assert the match.
-EMBEDDING_DIM = 384
+# gemini-embedding-001 (Gemini API, Matryoshka output pinned to 768). Pinned:
+# changing this invalidates every stored vector and requires a full re-embed of
+# the index, never a mix (CLAUDE.md sections 2 and 13). MUST match
+# EMBEDDING_DIMENSION in app/config.py; ingestion asserts it.
+EMBEDDING_DIM = 768
 
 #: Workspace-level roles (CLAUDE.md section 4). Two roles only — deliberately no ADMIN.
 WORKSPACE_MEMBER_ROLES = ("OWNER", "MEMBER")

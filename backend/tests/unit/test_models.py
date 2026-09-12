@@ -2,7 +2,7 @@
 
 These tests inspect the ORM metadata directly and never touch a database: no engine, no
 create_all, no migrations. They pin the parts of the target schema that later phases and
-Phase 1C's migration depend on — tenant paths, cascades, the 384-dimension vector column,
+Phase 1C's migration depend on — tenant paths, cascades, the 768-dimension vector column,
 the generated tsvector column, and the constraint set.
 """
 
@@ -374,11 +374,12 @@ def test_file_size_is_non_negative() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_embedding_column_is_384_dimension_pgvector() -> None:
+def test_embedding_column_is_768_dimension_pgvector() -> None:
     embedding = _table("document_chunks").c["embedding"]
     assert isinstance(embedding.type, Vector)
     # pgvector 0.3.x stores the dimension on `dim`, not `dimensions`.
-    assert embedding.type.dim == EMBEDDING_DIM == 384
+    # 768 = hosted Gemini text-embedding-004 (migration 0017 re-sizes the column).
+    assert embedding.type.dim == EMBEDDING_DIM == 768
 
 
 def test_only_one_embedding_column_and_it_matches_config_dimension() -> None:

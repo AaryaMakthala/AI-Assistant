@@ -541,49 +541,50 @@ class TestQueryShapes:
 # ===========================================================================
 
 class TestOverviewGrounding:
-    def test_real_kanban_scores_ground(self):
-        """Real Kanban scores (all negative logits) should ground."""
-        scores = [-2.4534, -3.8034, -4.2362, -5.9403, -6.1114, -9.5952]
+    def test_real_similarity_scores_ground(self):
+        """A realistic cosine-similarity overview result set should ground
+        (top clears overview_min_score, top-k mean clears overview_aggregate_min)."""
+        scores = [0.5774, 0.5519, 0.5231, 0.4902, 0.4411, 0.4023]
         assert is_overview_grounded(scores) is True
 
     def test_positive_cluster_grounds(self):
         """Tight positive cluster should ground."""
         assert is_overview_grounded([0.25, 0.22, 0.18, 0.15, 0.10]) is True
 
-    def test_one_positive_outlier_still_grounds(self):
-        """One strong positive score among negatives: top=0.5 clears min,
-        top-3 mean=-2.17 clears aggregate -> grounds (correct behavior).
+    def test_one_strong_outlier_still_grounds(self):
+        """One strong positive score among weak ones: top=0.6 clears min,
+        top-3 mean=0.27 clears aggregate -> grounds (correct behavior).
         """
-        assert is_overview_grounded([0.5, -3.0, -4.0, -5.0, -6.0]) is True
+        assert is_overview_grounded([0.6, 0.12, 0.10, 0.08]) is True
 
-    def test_three_one_positive_outlier_grounds(self):
-        """Three chunks with one positive outlier: top=0.8 clears min,
-        top-2 mean=-2.1 clears aggregate -> grounds.
+    def test_three_one_strong_outlier_grounds(self):
+        """Three chunks with one strong outlier: top=0.62 clears min,
+        top-2 mean=0.36 clears aggregate -> grounds.
         """
-        assert is_overview_grounded([0.8, -5.0, -6.0]) is True
+        assert is_overview_grounded([0.62, 0.10, 0.08]) is True
 
-    def test_tight_negative_cluster_grounds(self):
-        """Consistently negative but tightly clustered top should ground."""
-        assert is_overview_grounded([-2.0, -2.2, -2.5, -8.0, -9.0]) is True
+    def test_tight_on_topic_cluster_grounds(self):
+        """Consistently on-topic but tightly clustered top should ground."""
+        assert is_overview_grounded([0.45, 0.44, 0.43, 0.40, 0.38]) is True
 
     def test_all_identical_grounds(self):
         """All identical scores = consistent relevance."""
-        assert is_overview_grounded([-3.0, -3.0, -3.0, -3.0]) is True
+        assert is_overview_grounded([0.3, 0.3, 0.3, 0.3]) is True
 
     def test_single_chunk_does_not_ground(self):
         """Overview needs multiple chunks."""
-        assert is_overview_grounded([-2.0]) is False
+        assert is_overview_grounded([0.5]) is False
 
     def test_empty_does_not_ground(self):
         assert is_overview_grounded([]) is False
 
     def test_two_close_chunks_ground(self):
         """Two chunks with close scores = consistent."""
-        assert is_overview_grounded([-2.0, -2.1]) is True
+        assert is_overview_grounded([0.3, 0.29]) is True
 
     def test_two_far_chunks_do_not_ground(self):
         """Two chunks with very different scores: mean fails aggregate."""
-        assert is_overview_grounded([-1.0, -18.0]) is False
+        assert is_overview_grounded([0.3, 0.0]) is False
 
 
 # ===========================================================================
@@ -679,17 +680,19 @@ class TestAmbiguous:
         stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
-        # Ambiguity now surfaces from the router (which also carries rewriting):
-        # a NEEDS_CLARIFICATION RouteResult maps to Intent.needs_clarification,
-        # and chat_v2 replies with a clarification request.
-        async def _ambiguous_router(*, query: str, history: list | None = None, **kw):
-            from app.retrieval.llm_router import RouteResult
-            return RouteResult(
-                route="NEEDS_CLARIFICATION",
+        # Ambiguity now surfaces from the Query Understanding stage: a
+        # needs_clarification classification maps to Intent.AMBIGUOUS, and
+        # grounded_chat replies with a clarification request without retrieval.
+        from app.retrieval.query_understanding import QueryUnderstanding
+        async def _ambiguous_qu(*, query: str, workspace_id: uuid.UUID, history: list):
+            return QueryUnderstanding(
+                corrected_query=query,
+                search_query=query,
+                intent=IntentCategory.AMBIGUOUS,
                 confidence=0.9,
                 reasoning="test",
             )
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _ambiguous_router)
+        monkeypatch.setattr(chat_module, "understand_query", _ambiguous_qu)
 
         response = test_client.post(
             "/chat/grounded",
@@ -714,17 +717,19 @@ class TestAmbiguous:
         stub = StubLLM()
         test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
 
-        # Ambiguity now surfaces from the router (which also carries rewriting):
-        # a NEEDS_CLARIFICATION RouteResult maps to Intent.needs_clarification,
-        # and chat_v2 replies with a clarification request.
-        async def _ambiguous_router(*, query: str, history: list | None = None, **kw):
-            from app.retrieval.llm_router import RouteResult
-            return RouteResult(
-                route="NEEDS_CLARIFICATION",
+        # Ambiguity now surfaces from the Query Understanding stage: a
+        # needs_clarification classification maps to Intent.AMBIGUOUS, and
+        # grounded_chat replies with a clarification request without retrieval.
+        from app.retrieval.query_understanding import QueryUnderstanding
+        async def _ambiguous_qu(*, query: str, workspace_id: uuid.UUID, history: list):
+            return QueryUnderstanding(
+                corrected_query=query,
+                search_query=query,
+                intent=IntentCategory.AMBIGUOUS,
                 confidence=0.9,
                 reasoning="test",
             )
-        monkeypatch.setattr("app.retrieval.llm_router.route_with_llm", _ambiguous_router)
+        monkeypatch.setattr(chat_module, "understand_query", _ambiguous_qu)
 
         response = test_client.post(
             "/chat/grounded",

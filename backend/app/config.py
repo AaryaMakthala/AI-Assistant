@@ -175,14 +175,27 @@ class Settings(BaseSettings):
     #: Guards against a zip bomb: an OOXML part that expands beyond this is refused.
     max_extracted_bytes: int = 200 * 1024 * 1024
 
+    # --- Embedding provider (hosted, no local torch) ---
+
+    #: Which hosted embedding backend to use. Only "gemini" is implemented; the
+    #: setting exists so the provider chain can grow without touching callers.
+    embedding_provider: str = "gemini"
+    #: Hosted embedding model via the Gemini API (taskType-based, asymmetric
+    #: conventions handled by RETRIEVAL_QUERY / RETRIEVAL_DOCUMENT, not a prefix).
     #: Pinned. Changing this invalidates every stored vector and requires a full
     #: re-embed — never a mix (CLAUDE.md 14, risk register).
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_model: str = "gemini-embedding-001"
+    #: API key for the embedding provider. Defaults to GEMINI_API_KEY when unset.
+    embedding_api_key: SecretStr | None = Field(default=None, min_length=1)
+    #: Base URL for the Gemini native (non-OpenAI) embedding endpoints.
+    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    #: Time budget for one embedding HTTP call. Embedding is a single POST per
+    #: batch, so this bounds a stalled provider the same way LLM timeouts do.
+    embedding_timeout_seconds: float = 30.0
     #: The env var is EMBEDDING_DIMENSION per CLAUDE.md 13; the Python attribute stays
-    #: `embedding_dim` because existing consumers (app/rag/embeddings.py) read it by
-    #: that name and are out of this phase's scope to rename.
+    #: `embedding_dim` because existing consumers read it by that name.
     embedding_dim: int = Field(
-        default=384, ge=1, validation_alias="EMBEDDING_DIMENSION"
+        default=768, ge=1, validation_alias="EMBEDDING_DIMENSION"
     )
 
     chunk_size: int = 1000
@@ -215,34 +228,37 @@ class Settings(BaseSettings):
 
     # --- Retrieval tuning (CLAUDE.md 8, 13) ---
 
-    #: Hybrid-retrieval candidates merged by RRF and fed to the reranker (pre-rerank
-    #: cap, ~15). Must be >= retrieval_final_count; enforced by a model validator below.
+    #: Hybrid-retrieval candidates merged by RRF and fed to the final ranking
+    #: (pre-final cap, ~15). Must be >= retrieval_final_count; enforced by a model
+    #: validator below.
     retrieval_candidate_count: int = Field(default=15, ge=1)
-    #: Chunks actually passed to the LLM after reranking (post-rerank cap, 5–8).
+    #: Chunks actually passed to the LLM after final ranking (post-rank cap, 5–8).
     retrieval_final_count: int = Field(default=8, ge=1)
-    #: Layer-1 grounding threshold (CLAUDE.md 8.3): if the top reranked chunk scores
-    #: below this, the LLM is never called and the question is refused honestly.
-    #: Cross-encoder scores are raw logits (range ~[-12, +12]), NOT probabilities.
-    #: Calibrated: relevant fact-lookup scores typically -0.5 to -5; clearly
-    #: irrelevant is ~-8.  Threshold set at -5.0 to catch marginal matches while
-    #: rejecting genuinely ungrounded retrievals.
-    retrieval_relevance_threshold: float = Field(default=-5.0)
-
-    # --- Phase B-2: Absolute grounding thresholds (cross-encoder logits) ---
-
-    #: Absolute minimum rerank score for an overview query's top chunk.
-    #: Cross-encoder scores are raw logits (range ~[-12, +12]), NOT probabilities.
-    #: Calibrated: Kanban overview top=-3.80, clearly irrelevant is ~-8.
-    #: This is independent of retrieval_relevance_threshold (which governs fact-lookup).
-    overview_min_score: float = Field(
-        default=-4.0,
-        description="Absolute minimum rerank score for overview grounding",
+    #: Layer-1 grounding threshold (CLAUDE.md 8.3): if the top chunk's cosine
+    #: similarity (`max(0.0, 1.0 - cosine_distance)`) is below this, the LLM is
+    #: never called and the question is refused honestly. Cosine similarity is a
+    #: probability-scale value in [0, 1]. Calibrated: relevant fact-lookup chunks
+    #: typically score 0.45–0.75; clearly irrelevant is ~0.05–0.15.
+    retrieval_relevance_threshold: float = Field(
+        default=0.30, ge=0.0, le=1.0,
+        description="Layer-1 grounding threshold (cosine similarity, 0-1)",
     )
-    #: Absolute minimum mean score across top chunks for overview aggregate grounding.
-    #: Calibrated: Kanban overview top-3 mean ~-7.16, clearly irrelevant mean ~-8.7.
+
+    # --- Phase B-2: Absolute grounding thresholds (cosine similarity) ---
+
+    #: Absolute minimum cosine similarity for an overview query's top chunk.
+    #: Overviews ("tell me about X") have diffuse relevance, so the floor is
+    #: slightly below the fact-lookup threshold.
+    overview_min_score: float = Field(
+        default=0.25, ge=0.0, le=1.0,
+        description="Absolute minimum cosine similarity for overview grounding",
+    )
+    #: Absolute minimum mean similarity across top chunks for overview aggregate
+    #: grounding. Overview relevance is spread across chunks, so the aggregate
+    #: floor sits below the single-chunk floor.
     overview_aggregate_min: float = Field(
-        default=-7.5,
-        description="Absolute minimum mean of top overview scores",
+        default=0.20, ge=0.0, le=1.0,
+        description="Absolute minimum mean of top overview cosine similarities",
     )
     #: Confidence threshold above which document targeting is considered high-confidence
     #: and grounds with a relaxed score floor.  Range [0.0, 1.0].
@@ -250,27 +266,22 @@ class Settings(BaseSettings):
         default=0.90, ge=0.0, le=1.0,
         description="Confidence threshold for high-confidence doc-target grounding",
     )
-    #: Absolute minimum rerank score when high-confidence document targeting applies.
-    #: More relaxed than overview_min_score because the doc target is strong evidence.
-    #: Calibrated: Aarya resume top_score=-0.477 passes; clearly irrelevant ~-8 does not.
+    #: Absolute minimum cosine similarity when high-confidence document targeting
+    #: applies. More relaxed than overview_min_score because the doc target is
+    #: strong evidence. A targeted doc match at 0.20+ cosine similarity grounds.
     doc_target_relaxed_score: float = Field(
-        default=-3.0,
-        description="Absolute min score when high-confidence doc-target relaxes grounding",
+        default=0.20, ge=0.0, le=1.0,
+        description="Absolute min cosine sim when high-confidence doc-target relaxes grounding",
     )
     #: Permissive floor for filename-matched queries.  When filename matching finds
     #: a document and chunks from it are in the final set, we ground with a
-    #: relaxed threshold — the filename IS evidence.  Set low but not impossibly
-    #: low: truly irrelevant content from the matched document should still fail.
+    #: relaxed threshold — the filename IS evidence. Any nonzero cosine similarity
+    #: from the matched document is treated as evidence; truly unrelated chunks
+    #: still fail by scoring ~0.
     filename_match_relaxed_score: float = Field(
-        default=-12.0,
+        default=0.0, ge=0.0, le=1.0,
         description="Permissive floor when filename match + target chunks present",
     )
-
-    # --- Reranker (CLAUDE.md 2) ---
-
-    #: Local cross-encoder, run via sentence-transformers. Pinned like the embedding
-    #: model: changing it changes the score scale the grounding threshold was tuned on.
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # --- Uploads (CLAUDE.md 6) ---
 
@@ -294,6 +305,15 @@ class Settings(BaseSettings):
 
     llm_temperature: float = 0.2
     llm_max_output_tokens: int = 4096
+    #: Ceiling on the `max_tokens` field sent to any provider. Some providers
+    #: reject a requested budget above the model's actual output limit (observed:
+    #: 16384 requested vs ~15961 available -> HTTP 400). The requested budget is
+    #: min()'d against this before the request leaves the app. Default 8000 is a
+    #: deliberately conservative out-of-the-box value: safely below a 16k model's
+    #: ~15961 ceiling (with room for a context-heavy prompt) and above the default
+    #: 4096 answer budget, so normal RAG answers are never clamped while an
+    #: oversized override (e.g. 16384) is prevented from 400ing.
+    llm_max_output_tokens_cap: int = Field(default=8000, ge=1)
     #: Max tokens for the Query Understanding call.  QU returns a compact JSON
     #: object (corrected_query, search_query, intent, confidence, reasoning).
     #: QU requests thinking to be disabled at the API level; when a provider
@@ -518,29 +538,6 @@ def _format_validation_error(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def _warn_on_suspicious_thresholds(settings: Settings) -> None:
-    """Warn loudly when a grounding threshold is on the wrong scale (CLAUDE.md 8.3).
-
-    Cross-encoder rerank scores are raw logits (typically negative for this
-    model; relevant matches land around -0.5 to -5, irrelevant around -8).  A
-    *positive* configured threshold almost always means a probability-scale
-    value (e.g. 0.3) was pasted into an env var that expects a logit — the
-    exact drift that made every grounded answer refuse.  This is a warning,
-    not an error: a positive logit is technically valid, so startup proceeds,
-    but the operator should double-check the .env value.
-    """
-    if settings.retrieval_relevance_threshold > 0:
-        print(
-            "WARNING: RETRIEVAL_RELEVANCE_THRESHOLD="
-            f"{settings.retrieval_relevance_threshold} is positive. Cross-encoder "
-            "scores are raw logits (calibrated range roughly [-12, +12], relevant "
-            "matches ~-0.5 to -5). A positive value usually means a "
-            "probability-scale number (0.0-1.0) was configured by mistake and "
-            "will refuse every grounded answer. Check .env.",
-            file=sys.stderr,
-        )
-
-
 @lru_cache
 def get_settings() -> Settings:
     """Load settings, exiting with a readable message rather than a raw traceback."""
@@ -549,5 +546,4 @@ def get_settings() -> Settings:
     except ValidationError as exc:
         print(_format_validation_error(exc), file=sys.stderr)  # noqa: T201
         raise SystemExit(1) from exc
-    _warn_on_suspicious_thresholds(settings)
     return settings

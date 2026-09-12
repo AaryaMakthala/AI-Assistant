@@ -192,14 +192,30 @@ class TestDocumentNameAwareRouting:
     def test_vague_question_asked_for_clarification(
         self, monkeypatch: pytest.MonkeyPatch, client: tuple[TestClient, Principal]
     ) -> None:
-        """'what theu sau about' (very vague) → either NEEDS_CLARIFICATION or
-        DOCUMENT_CONTENT with retrieval.  Must NOT return a flat 'no relevant
-        information' refusal."""
+        """'what theu sau about' (very vague) → NEEDS_CLARIFICATION.
+
+        A healthy Query Understanding stage classifies this as
+        needs_clarification; grounded_chat must answer with a clarification
+        request instead of a flat 'no relevant information' refusal.
+        """
         test_client, _ = client
 
-        # Let retrieval run and return empty (no relevant chunks)
+        from app.retrieval.intent import IntentCategory as _IC
+        from app.retrieval.query_understanding import QueryUnderstanding
+
+        async def _qu(*args: Any, **kwargs: Any) -> QueryUnderstanding:  # noqa: ARG001
+            return QueryUnderstanding(
+                corrected_query="what theu sau about",
+                search_query="what theu sau about",
+                intent=_IC.AMBIGUOUS,
+                confidence=0.9,
+                reasoning="test",
+            )
+
+        monkeypatch.setattr(chat_module, "understand_query", _qu)
+
         async def _retrieve(*args: Any, **kw: Any) -> RetrievalResult:
-            return RetrievalResult(chunks=[], grounded=False, top_score=0.0)
+            raise AssertionError("retrieval must NOT run for a clarification")
 
         monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
@@ -211,14 +227,10 @@ class TestDocumentNameAwareRouting:
         )
         assert response.status_code == 200
         body = response.json()
-        # Must NOT be a flat "no relevant information" refusal.
-        # Either it's grounded (some answer) or it asks for clarification.
-        answer_lower = body["answer"].lower()
-        # The answer should mention documents or ask for clarification,
-        # not just say "no relevant information".
-        assert not (
-            "couldn't find" in answer_lower and "relevant information" in answer_lower
-        ), f"Got flat refusal: {body['answer']}"
+        # Clarification, not a flat "no relevant information" refusal.
+        assert "clarif" in body["answer"].lower(), body["answer"]
+        assert body["sources"] == []
+        assert stub.calls == []
 
 
 # ---------------------------------------------------------------------------

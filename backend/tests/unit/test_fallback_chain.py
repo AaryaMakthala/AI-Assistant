@@ -70,16 +70,28 @@ async def test_groq_429_falls_back_to_openrouter():
 
     call_log = []
 
-    async def _mock_stream(self, provider_cfg, messages, completion, timeout):
+    async def _mock_stream(
+        self,
+        provider_cfg,
+        messages,
+        completion,
+        timeout,
+        *,
+        max_tokens=None,
+        disable_thinking=False,
+    ):
         call_log.append(provider_cfg.name)
         if provider_cfg.name == "groq":
-            # Simulate 429
+            # Simulate 429; the chain backs off briefly then fails over.
             from app.llm.fallback import LLMError
-            raise LLMError(
+            exc = LLMError(
                 "Provider returned HTTP 429: rate_limit_exceeded",
                 provider="groq",
                 retryable=True,
             )
+            exc.status_code = 429
+            exc.retry_after = 0.0
+            raise exc
             yield  # pragma: no cover
         else:
             # OpenRouter succeeds
@@ -100,9 +112,9 @@ async def test_groq_429_falls_back_to_openrouter():
         async for token in provider.stream(messages, completion=completion):
             tokens.append(token)
 
-    # Groq was attempted first
+    # Groq was attempted first (its 429 backs off briefly), then OpenRouter
+    # served the request.
     assert call_log[0] == "groq"
-    # OpenRouter was tried as fallback
     assert call_log[1] == "openrouter"
     # Only two providers attempted (no Gemini)
     assert len(call_log) == 2

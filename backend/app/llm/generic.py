@@ -58,6 +58,19 @@ class GenericProvider:
         self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self._settings = settings
 
+    def _capped_max_tokens(self, max_tokens: int | None) -> int:
+        """Apply LLM_MAX_OUTPUT_TOKENS_CAP after a caller's override.
+
+        A caller may request 16384 output tokens that a 16k-context provider then
+        rejects with HTTP 400; the cap keeps the request inside the available
+        window while letting oversized requests still succeed at a smaller size.
+        """
+        requested = max_tokens or self._settings.llm_max_output_tokens
+        cap = self._settings.llm_max_output_tokens_cap
+        if cap is None:
+            return requested
+        return min(requested, cap)
+
     async def stream(
         self,
         messages: list[Message],
@@ -73,7 +86,7 @@ class GenericProvider:
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": self._settings.llm_temperature,
-            "max_tokens": max_tokens or self._settings.llm_max_output_tokens,
+            "max_tokens": self._capped_max_tokens(max_tokens),
             "stream": True,
         }
         payload.update(thinking_disable_payload(self.name, disable=disable_thinking))

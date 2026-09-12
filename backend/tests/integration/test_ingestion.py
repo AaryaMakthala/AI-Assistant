@@ -128,13 +128,13 @@ async def _cleanup(url: str, org_id: uuid.UUID) -> None:
 
 def test_pdf_upload_produces_queryable_chunks(ingestion_env: str, tmp_path: Path) -> None:
     from app.ingestion.pipeline import prepare_document
-    from app.rag.embeddings import get_model
+    from app.rag.embedding_provider import EmbeddingError, get_embedding_provider
     from app.security.uploads import storage_path_for
 
     try:
-        get_model()
-    except (OSError, SQLAlchemyError, RuntimeError) as exc:
-        pytest.skip(f"embedding model unavailable: {exc}")
+        get_embedding_provider()
+    except (OSError, SQLAlchemyError, RuntimeError, EmbeddingError) as exc:
+        pytest.skip(f"embedding provider unavailable: {exc}")
 
     storage_key = uuid.uuid4()
     sample = _sample_pdf(storage_path_for(storage_key))

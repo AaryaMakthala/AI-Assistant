@@ -438,7 +438,12 @@ def test_name_query_with_no_evidence_uses_unsupported_information(
     client: tuple[TestClient, Principal],
     message: str,
 ) -> None:
-    """A name request with no evidence uses the canonical unsupported reply."""
+    """A user-name request is caught by the personal-name boundary fast-path.
+
+    It is answered with the fixed boundary message — never routed to
+    retrieval, never sent to the LLM — so it can't be fabricated from
+    anything other than evidence.
+    """
     test_client, _ = client
     stub = _StubLLM()
     test_client.app.dependency_overrides[get_generic_llm] = lambda: stub
@@ -459,16 +464,16 @@ def test_name_query_with_no_evidence_uses_unsupported_information(
     async def _retrieve(  # noqa: ARG001
         session, *, query: str, workspace_id: uuid.UUID, **kwargs: Any
     ) -> RetrievalResult:
-        return RetrievalResult(chunks=[], grounded=False, top_score=None)
+        raise AssertionError("retrieval must NOT run for a personal-name query")
 
     monkeypatch.setattr(chat_module, "retrieve", _retrieve)
 
     response = test_client.post("/chat/grounded", json={"message": message})
     assert response.status_code == 200
     body = response.json()
-    assert body["grounded"] is False
+    assert body["grounded"] is True
     assert body["answer"] == chat_module.refusal_message(
-        chat_module.ResponseReason.UNSUPPORTED_INFORMATION
+        chat_module.ResponseReason.PERSONAL_NAME
     )
     assert body["sources"] == []
     assert stub.calls == []

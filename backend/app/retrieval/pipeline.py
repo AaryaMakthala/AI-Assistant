@@ -1,15 +1,14 @@
-"""Hybrid retrieval pipeline: search → fuse → rerank → ground (CLAUDE.md section 8).
+"""Hybrid retrieval pipeline: search → fuse → score → ground (CLAUDE.md section 8).
 
 Orchestrates the canonical Phase 5 pipeline over workspace-scoped chunks:
 
     query → relevance gate (LLM + heuristics)
              ├── not relevant → skip retrieval, refuse
              └── relevant / ambiguous → continue
-           → embed (bi-encoder, thread) ──────────────┐
+           → embed (hosted API, thread) ──────────────┐
            → keyword FTS  ──┐                        │
-           → semantic      ─┴─ RRF fuse (top ~15) ──► cross-encoder rerank
-                                                      → top ~5–8
-                                                      → Layer-1 grounding check
+           → semantic      ─┴─ RRF fuse (top ~15) ───┤
+           → cosine-distance fill-query (one SQL) ───┘ → top ~5–8 → Layer-1 grounding
 
 Three separate decisions in this pipeline:
 1. Query/company relevance — is this about this workspace at all? (relevance gate)
@@ -22,9 +21,13 @@ The caller supplies a session that already carries tenant claims
 opens its own transaction, so the chat phase can close the database session before the
 LLM call — a pooled connection must not be pinned for the duration of a generation.
 
-All CPU-bound model work (embedding the query, reranking candidates) runs in worker
-threads via ``asyncio.to_thread`` so the event loop stays responsive, matching the
-Phase 3 ingestion pattern.
+Chunk scoring is a single extra SQL query that fetches ``cosine_distance`` between the
+query embedding and every fused candidate, so every candidate — including keyword- and
+filename-only matches that never appeared in the semantic results — gets an exact cosine
+similarity.  This replaces the local cross-encoder reranker (removed with the torch
+stack); cosine similarity of the hosted embedder is what the HNSW index already ranks by.
+The HTTP embedding call runs in a worker thread via ``asyncio.to_thread`` so the event
+loop stays responsive, matching the Phase 3 ingestion pattern.
 """
 
 from __future__ import annotations
@@ -36,9 +39,11 @@ import uuid
 from dataclasses import dataclass
 
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db.models import DocumentChunk
 from app.rag.embeddings import embed_query
 from app.retrieval.doc_targeting import DocumentTargetingResult
 from app.retrieval.grounding import is_grounded, is_overview_grounded
@@ -51,7 +56,6 @@ from app.retrieval.hybrid import (
     semantic_search,
 )
 from app.retrieval.intent import QueryShape
-from app.retrieval.rerank import rerank_scores
 
 
 @dataclass(frozen=True)
@@ -65,9 +69,10 @@ class RetrievedChunk:
     page_number: int | None
     section_title: str | None
     chunk_index: int
-    #: Fused score before reranking (RRF, section 8.1) — for diagnostics.
+    #: Fused score before final ranking (RRF, section 8.1) — for diagnostics.
     rrf_score: float
-    #: Cross-encoder relevance score (section 8.2) — the value the grounding
+    #: Cosine similarity of the query embedding to this chunk's stored embedding
+    #: (`max(0.0, 1.0 - cosine_distance)`, range [0, 1]). The value the grounding
     #: threshold and the final ordering are based on.
     rerank_score: float
 
@@ -86,12 +91,12 @@ class RetrievalResult:
     - The LLM's answer grounding is a separate decision in the system prompt.
     """
 
-    #: Final reranked chunks, capped at RETRIEVAL_FINAL_COUNT, best first.
+    #: Final ranked chunks, capped at RETRIEVAL_FINAL_COUNT, best first.
     chunks: list[RetrievedChunk]
     #: Whether Layer-1 grounding passed (CLAUDE.md 8.3). When False, the caller
     #: must refuse without calling the LLM.
     grounded: bool
-    #: Best rerank score across the candidates; None when nothing was retrieved.
+    #: Best cosine similarity across the candidates; None when nothing was retrieved.
     top_score: float | None
     #: Why the relevance gate decided as it did (for logging/audit).
     relevance_decision: str = "pass"
@@ -101,7 +106,7 @@ class RetrievalResult:
         return self.grounded and bool(self.chunks)
 
 
-def _to_retrieved(chunk: HybridCandidate, rerank_score: float) -> RetrievedChunk:
+def _to_retrieved(chunk: HybridCandidate, cosine_similarity: float) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=chunk.chunk_id,
         document_id=chunk.document_id,
@@ -111,7 +116,7 @@ def _to_retrieved(chunk: HybridCandidate, rerank_score: float) -> RetrievedChunk
         section_title=chunk.section_title,
         chunk_index=chunk.chunk_index,
         rrf_score=chunk.rrf_score,
-        rerank_score=rerank_score,
+        rerank_score=cosine_similarity,
     )
 
 
@@ -128,7 +133,7 @@ async def retrieve(
     """Retrieve the best evidence for `query` inside one workspace.
 
     `session` must already be tenant-scoped (RLS); `workspace_id` is the pipeline's
-    own explicit filter on top of that. Returns the reranked top-K plus the Layer-1
+    own explicit filter on top of that. Returns the ranked top-K plus the Layer-1
     grounding verdict. Raises nothing on an ungrounded query — an empty/refused
     result is an ordinary outcome, not an error.
 
@@ -145,13 +150,13 @@ async def retrieve(
     ----------
     search_query:
         Retrieval-optimized query from the Query Understanding stage.
-        When provided, this is used for embedding and reranking instead of
-        the raw user text — fixing typo-related retrieval failures.
+        When provided, this is used for embedding instead of the raw user text —
+        fixing typo-related retrieval failures.
     qu_confidence:
         Confidence from the Query Understanding stage (0.0–1.0).
         Passed to the grounding functions as a secondary signal: when
-        >= 0.85 and the reranker score is plausible, grounding is allowed
-        even if the primary score is marginal.
+        >= 0.85 and the top cosine similarity is non-trivial, grounding is
+        allowed even if the primary score is marginal.
     """
     start_time = time.perf_counter()
     text = query.strip()
@@ -267,9 +272,9 @@ async def retrieve(
         )
 
     # --- Hybrid retrieval ---
-    # Embed the query in a worker thread: sentence-transformers on CPU is the
-    # slowest step before the reranker, and the event loop should not pay for it.
-    # Use normalized_text so garbled queries don't produce weak embeddings.
+    # Embed the query in a worker thread. Embedding is now an HTTP call to the
+    # hosted API, but a sync call still blocks, so the event loop should not pay
+    # for it. Use normalized_text so garbled queries don't produce weak embeddings.
     embed_started = time.perf_counter()
     query_embedding = await asyncio.to_thread(embed_query, normalized_text)
     logger.info(
@@ -292,8 +297,7 @@ async def retrieve(
     )
 
     # Fuse all candidate sources: semantic + keyword + filename.
-    # The merged pool is capped at the pre-rerank count
-    # (section 8.2: never rerank hundreds of chunks — slow and unnecessary).
+    # The merged pool is capped at the pre-final count (section 8.2).
     candidates = rrf_merge(semantic, keyword, top_n=candidate_count)
 
     # Inject filename-matched chunks if not already present.
@@ -327,24 +331,52 @@ async def retrieve(
             relevance_decision=relevance.reason,
         )
 
-    rerank_started = time.perf_counter()
-    reranked = await asyncio.to_thread(
-        rerank_scores, normalized_text, [candidate.content for candidate in candidates]
-    )
+    scoring_started = time.perf_counter()
+    # Score every fused candidate with its exact cosine similarity to the query
+    # embedding. One SQL query covers all candidates, so keyword- and filename-only
+    # matches (which never appear in the semantic result list) still get a real score.
+    distance_col = DocumentChunk.embedding.cosine_distance(query_embedding)
+    distance_rows = (
+        await session.execute(
+            select(DocumentChunk.id, distance_col).where(
+                DocumentChunk.id.in_([candidate.chunk_id for candidate in candidates]),
+            )
+        )
+    ).all()
+    # pgvector cosine_distance is a proper distance (0 identical, 2 opposite); the
+    # grounded [0, 1] similarity that the thresholds and frontend expect is 1 - distance,
+    # floored at 0 so an anti-correlated chunk can never present a negative confidence.
+    # A NULL embedding (reachable between migration 0017 and the backfill, when the
+    # column is nullable) yields a NULL distance — treat that chunk as unmeasurable
+    # (similarity 0.0) so it can never clear the grounding threshold.
+    cosine_sims = {
+        row.id: 0.0 if row[1] is None else max(0.0, 1.0 - float(row[1]))
+        for row in distance_rows
+    }
     logger.info(
-        "Reranking stage: {count} candidates in {elapsed:.2f}s",
+        "Cosine scoring stage: {count} candidates in {elapsed:.2f}s",
         count=len(candidates),
-        elapsed=time.perf_counter() - rerank_started,
-    )
-    scored = sorted(
-        zip(candidates, reranked, strict=True),
-        key=lambda pair: pair[1],
-        reverse=True,
+        elapsed=time.perf_counter() - scoring_started,
     )
 
-    final = [_to_retrieved(chunk, score) for chunk, score in scored[:final_count]]
-    top_score = scored[0][1]
-    second_score = scored[1][1] if len(scored) > 1 else None
+    # Order by (cosine similarity desc, RRF score desc) — similarity is the primary
+    # signal; the fused rank breaks ties the same way RRF intended.
+    scored = sorted(
+        candidates,
+        key=lambda candidate: (
+            cosine_sims.get(candidate.chunk_id, 0.0),
+            candidate.rrf_score,
+        ),
+        reverse=True,
+    )
+    sims_by_rank = [cosine_sims.get(candidate.chunk_id, 0.0) for candidate in scored]
+
+    final = [
+        _to_retrieved(candidate, cosine_sims.get(candidate.chunk_id, 0.0))
+        for candidate in scored[:final_count]
+    ]
+    top_score = sims_by_rank[0] if sims_by_rank else None
+    second_score = sims_by_rank[1] if len(sims_by_rank) > 1 else None
 
     # --- Phase B-2: Compute doc-target grounding parameters ---
     is_high_confidence_target = (
@@ -382,7 +414,7 @@ async def retrieve(
     # --- Grounding check ---
     # Use query-shape-aware grounding with doc-target relaxation.
 
-    all_scores = [score for _, score in scored[:final_count]]
+    all_scores = sims_by_rank[:final_count]
     if is_overview and len(all_scores) >= 2:
         # Overview: absolute-threshold aggregate grounding.
         grounded = is_overview_grounded(

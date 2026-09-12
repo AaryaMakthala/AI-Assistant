@@ -53,7 +53,7 @@ class TestOverviewGrounding:
     """Overview queries use absolute cosine-similarity score thresholds (Phase B-2).
 
     Scores are cosine similarities of the hosted embedder (range [0, 1]; ``0.30`` is
-    clearly relevant for a 768-dim Gemini embedding).  These tests verify the
+    clearly relevant for a 1024-dim voyage-4-lite embedding).  These tests verify the
     absolute-threshold grounding logic with defaults from the repo's ``.env.example``
     (``overview_min_score=0.25``, ``overview_aggregate_min=0.20``).
     """

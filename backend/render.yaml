@@ -3,7 +3,7 @@ services:
     name: knowledge-assistant-api
     runtime: python
     buildCommand: pip install -e .
-    # Embeddings are hosted (gemini-embedding-001 via GEMINI_API_KEY / EMBEDDING_API_KEY);
+    # Embeddings are hosted (voyage-4-lite via VOYAGE_API_KEY);
     # no local torch/GPU build needed, so idle memory stays inside the free tier (CLAUDE.md 14).
     preDeployCommand: python -m alembic upgrade head
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -25,6 +25,14 @@ services:
         generateValue: true
       - key: GEMINI_API_KEY
         sync: false
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: EMBEDDING_PROVIDER
+        value: voyage
+      - key: EMBEDDING_MODEL
+        value: voyage-4-lite
+      - key: EMBEDDING_DIMENSION
+        value: "1024"
       - key: GROQ_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY

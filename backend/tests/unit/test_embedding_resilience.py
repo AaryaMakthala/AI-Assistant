@@ -7,7 +7,7 @@ chunk after a failure onto the wrong index, which is a citation pointing at text
 not come from.
 
 The hosted embedding provider is stubbed rather than called: these are tests of the retry
-and fallback logic, and every call would otherwise hit the Gemini API (and fail CI without
+and fallback logic, and every call would otherwise hit the Voyage API (and fail CI without
 a key).
 """
 

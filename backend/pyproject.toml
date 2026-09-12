@@ -23,10 +23,11 @@ dependencies = [
     "pandas>=2.2",
     "openpyxl>=3.1",
     "langchain-text-splitters>=0.3",
-    # Embeddings are hosted via the Gemini API (gemini-embedding-001, 768-dim). No torch /
+    # Embeddings are hosted via the Voyage API (voyage-4-lite, 1024-dim). No torch /
     # sentence-transformers dependency: the render worker must never import them
-    # (idle RSS budget, CLAUDE.md 14).
+    # (idle RSS budget, CLAUDE.md 14). voyageai's API-only install never imports torch.
     "httpx>=0.27",
+    "voyageai>=0.4.1",
     "sentry-sdk[fastapi,loguru]>=2.20",
 ]
 

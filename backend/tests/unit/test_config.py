@@ -82,21 +82,37 @@ def test_secrets_are_not_exposed_in_repr(valid_env: None) -> None:
 def test_section13_defaults(valid_env: None) -> None:
     settings = get_settings()
 
-    assert settings.embedding_provider == "gemini"
-    assert settings.embedding_model == "gemini-embedding-001"
-    assert settings.embedding_dim == 768
+    assert settings.embedding_provider == "voyage"
+    assert settings.embedding_model == "voyage-4-lite"
+    assert settings.embedding_dim == 1024
     assert settings.retrieval_candidate_count == 15
     assert settings.retrieval_final_count == 8
     assert settings.retrieval_relevance_threshold == 0.3
     assert settings.max_upload_size_mb == 10
 
 
+def test_voyage_api_key_env_maps_to_field(
+    monkeypatch: pytest.MonkeyPatch, valid_env: None
+) -> None:
+    monkeypatch.setenv("VOYAGE_API_KEY", "va-test-key")
+
+    settings = get_settings()
+
+    assert settings.voyage_api_key is not None
+    assert settings.voyage_api_key.get_secret_value() == "va-test-key"
+
+
+def test_voyage_api_key_is_secret_in_repr(valid_env: None) -> None:
+    """The embedding API key must never surface in logs or reprs."""
+    assert "va-test-key" not in (repr(get_settings()))
+
+
 def test_embedding_dimension_env_var_maps_to_field(
     monkeypatch: pytest.MonkeyPatch, valid_env: None
 ) -> None:
-    monkeypatch.setenv("EMBEDDING_DIMENSION", "768")
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "1024")
 
-    assert get_settings().embedding_dim == 768
+    assert get_settings().embedding_dim == 1024
 
 
 def test_invalid_embedding_dimension_rejected(

@@ -177,25 +177,26 @@ class Settings(BaseSettings):
 
     # --- Embedding provider (hosted, no local torch) ---
 
-    #: Which hosted embedding backend to use. Only "gemini" is implemented; the
+    #: Which hosted embedding backend to use. Only "voyage" is implemented; the
     #: setting exists so the provider chain can grow without touching callers.
-    embedding_provider: str = "gemini"
-    #: Hosted embedding model via the Gemini API (taskType-based, asymmetric
-    #: conventions handled by RETRIEVAL_QUERY / RETRIEVAL_DOCUMENT, not a prefix).
+    embedding_provider: str = "voyage"
+    #: Hosted embedding model via the Voyage API (asymmetric conventions handled
+    #: by ``input_type`` query/document, not a prefix).
     #: Pinned. Changing this invalidates every stored vector and requires a full
     #: re-embed — never a mix (CLAUDE.md 14, risk register).
-    embedding_model: str = "gemini-embedding-001"
-    #: API key for the embedding provider. Defaults to GEMINI_API_KEY when unset.
+    embedding_model: str = "voyage-4-lite"
+    #: API key for the embedding provider. VOYAGE_API_KEY is the provider's
+    #: primary secret; this remains as a generic override for other providers.
     embedding_api_key: SecretStr | None = Field(default=None, min_length=1)
-    #: Base URL for the Gemini native (non-OpenAI) embedding endpoints.
-    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    #: API key for the Voyage embedding provider (env var VOYAGE_API_KEY).
+    voyage_api_key: SecretStr | None = Field(default=None, min_length=1)
     #: Time budget for one embedding HTTP call. Embedding is a single POST per
     #: batch, so this bounds a stalled provider the same way LLM timeouts do.
     embedding_timeout_seconds: float = 30.0
     #: The env var is EMBEDDING_DIMENSION per CLAUDE.md 13; the Python attribute stays
     #: `embedding_dim` because existing consumers read it by that name.
     embedding_dim: int = Field(
-        default=768, ge=1, validation_alias="EMBEDDING_DIMENSION"
+        default=1024, ge=1, validation_alias="EMBEDDING_DIMENSION"
     )
 
     chunk_size: int = 1000
@@ -419,11 +420,21 @@ class Settings(BaseSettings):
 
         # Primary: Groq (or explicit LLM_* override when provider is groq)
         if self.groq_api_key:
+            groq_model = (
+                self.llm_model
+                if self.llm_provider == "groq"
+                else _PROVIDER_PRESETS["groq"]["model"]
+            )
+            groq_base_url = (
+                self.llm_base_url
+                if self.llm_provider == "groq"
+                else _PROVIDER_PRESETS["groq"]["base_url"]
+            )
             chain.append({
                 "name": "groq",
                 "api_key": self.groq_api_key.get_secret_value(),
-                "model": self.llm_model if self.llm_provider == "groq" else _PROVIDER_PRESETS["groq"]["model"],
-                "base_url": self.llm_base_url if self.llm_provider == "groq" else _PROVIDER_PRESETS["groq"]["base_url"],
+                "model": groq_model,
+                "base_url": groq_base_url,
             })
 
         # Fallback: OpenRouter (if configured)

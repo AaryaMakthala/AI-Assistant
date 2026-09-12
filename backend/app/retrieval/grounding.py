@@ -16,7 +16,7 @@ World Cup") is not a special case — it is simply a question whose top score la
 below the threshold, handled exactly like any other ungrounded question.
 
 Scores are cosine similarities of the hosted embedding model (range [0, 1], where 0.30
-is 'clearly relevant' for a 768-dim Gemini embedding and 0.25 is 'on-topic enough').
+is 'clearly relevant' for a 1024-dim voyage-4-lite embedding and 0.25 is 'on-topic enough').
 These thresholds were re-calibrated when the local cross-encoder reranker was replaced
 by cosine similarity of the embedder (the same similarity the HNSW index ranks by), so
 the stored scores and the ground-truth thresholds are now on identical scales.

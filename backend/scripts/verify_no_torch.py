@@ -10,8 +10,8 @@ The verify step:
 2. AST-scans ``app/`` for imports/attribute access of the forbidden names and for
    the removed symbols (``get_model``, ``CrossEncoder``, ``get_reranker``,
    ``rerank_scores``, ``apply_torch_runtime_config``).
-3. Asserts the running embedding behind ``app.rag.embeddings`` is the hosted Gemini
-   provider with dimension 768 (the stored schema dimension).
+3. Asserts the running embedding behind ``app.rag.embeddings`` is the hosted Voyage
+   provider with dimension 1024 (the stored schema dimension).
 
 Usage (from ``backend/``):
 
@@ -127,19 +127,19 @@ def main() -> int:
     from app.db.models import EMBEDDING_DIM
 
     settings = get_settings()
-    if settings.embedding_provider != "gemini":
-        problems.append(f"EMBEDDING_PROVIDER={settings.embedding_provider} (want gemini)")
-    if settings.embedding_dim != 768:
-        problems.append(f"EMBEDDING_DIMENSION={settings.embedding_dim} (want 768)")
-    if EMBEDDING_DIM != 768:
-        problems.append(f"models.EMBEDDING_DIM={EMBEDDING_DIM} (want 768)")
+    if settings.embedding_provider != "voyage":
+        problems.append(f"EMBEDDING_PROVIDER={settings.embedding_provider} (want voyage)")
+    if settings.embedding_dim != 1024:
+        problems.append(f"EMBEDDING_DIMENSION={settings.embedding_dim} (want 1024)")
+    if EMBEDDING_DIM != 1024:
+        problems.append(f"models.EMBEDDING_DIM={EMBEDDING_DIM} (want 1024)")
 
     if problems:
         print("\n".join(problems), file=sys.stderr)
         print(f"verify_no_torch: FAILED in {sysconfig.get_platform()}", file=sys.stderr)
         return 1
 
-    print("verify_no_torch: OK — no local ML imports, hosted gemini embeddings at 768 dims")
+    print("verify_no_torch: OK — no local ML imports, hosted voyage embeddings at 1024 dims")
     return 0
 
 

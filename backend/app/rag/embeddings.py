@@ -6,9 +6,10 @@ than failing (CLAUDE.md section 7, Risk 1), so the returned dimension is asserte
 against config on every call.
 
 The bge asymmetric convention (an instruction prefix on queries) is replaced by
-the provider's ``taskType``: queries are tagged ``RETRIEVAL_QUERY`` and indexed
-passages ``RETRIEVAL_DOCUMENT``.  Callers see no difference — the two entry
-points ``embed_query`` / ``embed_passages`` map onto the two task types.
+the provider's ``input_type``: queries are tagged ``RETRIEVAL_QUERY`` (Voyage
+``input_type="query"``) and indexed passages ``RETRIEVAL_DOCUMENT``
+(``input_type="document"``).  Callers see no difference — the two entry points
+``embed_query`` / ``embed_passages`` map onto the two task types.
 """
 
 from __future__ import annotations

@@ -77,6 +77,21 @@ _SEAL_SKIP_LOG = (
 )
 
 
+def _normalize_async_database_url(url: str) -> str:
+    """Map bare PostgreSQL URLs onto the async driver SQLAlchemy's async engine needs.
+
+    ``create_async_engine`` selects its dialect from the URL scheme; bare
+    ``postgresql://``/``postgres://`` resolve to the sync psycopg2 driver, which this
+    project does not install (it uses asyncpg). URLs that already name an explicit
+    driver (e.g. ``postgresql+asyncpg://``) are left unchanged.
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url[len("postgresql://") :]
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://") :]
+    return url
+
+
 @dataclass
 class BackfillReport:
     """What one run did, for the operator."""
@@ -111,7 +126,9 @@ async def backfill_embeddings(
     *, database_url: str | None = None, batch_size: int = 32, delay_seconds: float = 0.0
 ) -> BackfillReport:
     report = BackfillReport()
-    engine = create_async_engine(database_url or str(get_settings().database_url))
+    engine = create_async_engine(
+        _normalize_async_database_url(database_url or str(get_settings().database_url))
+    )
     try:
         await _require_bypass_role(engine)
 

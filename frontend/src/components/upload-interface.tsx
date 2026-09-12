@@ -41,9 +41,21 @@ import type { DocumentSummary } from "@/lib/api";
 import { StatusBadge } from "./status-badge";
 import { Button } from "./button";
 import { DocumentDetailModal } from "./document-detail-modal";
+import { Toast } from "./toast";
 import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+
+/**
+ * Demo limitation: this deployment runs on a free tier whose backend cannot
+ * ingest documents, so uploads stay visible but unavailable. Selecting a file
+ * never opens the picker and never calls the upload endpoint — it surfaces this
+ * toast instead, the same way members-panel's invite form short-circuits
+ * (INVITE_UNAVAILABLE_MESSAGE). Flip the flag off to re-enable uploads.
+ */
+const uploadsUnavailable = true;
+const UPLOADS_UNAVAILABLE_MESSAGE =
+  "Document uploads aren't available on the free demo tier.";
 
 /** Shared glass-dark card shell for the grid — identical radius/border/blur on every tile. */
 const CARD_BASE = cn(
@@ -101,14 +113,23 @@ export function UploadInterface({
 }: UploadInterfaceProps) {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [detailDoc, setDetailDoc] = useState<DocumentSummary | null>(null);
+  const [uploadToast, setUploadToast] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // The sidebar's "Upload files" button triggers this exact input (same staging
-  // flow as the "+ Add file" tile — one picker, one list of staged cards). The
-  // effect re-runs if the opener's identity ever changes.
+  /** The file-picker opener shared by the "+ Add file" tile and the sidebar's
+   *  "Upload files" button (registered below). Uploads are unavailable on the
+   *  free demo tier, so this never opens the picker — it surfaces the free-tier
+   *  message as a toast, mirroring the invite form's demo short-circuit. */
+  const handleOpenPicker = useCallback(() => {
+    setUploadToast(UPLOADS_UNAVAILABLE_MESSAGE);
+  }, []);
+
+  // The sidebar's "Upload files" button triggers this same opener (the picker
+  // once lived here; now the gate does). The effect re-runs if the opener's
+  // identity ever changes.
   useEffect(() => {
-    return onRegisterFilePicker?.(() => inputRef.current?.click());
-  }, [onRegisterFilePicker]);
+    return onRegisterFilePicker?.(handleOpenPicker);
+  }, [onRegisterFilePicker, handleOpenPicker]);
 
   const addFiles = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -148,6 +169,12 @@ export function UploadInterface({
 
   const handleUpload = useCallback(() => {
     if (!canUpload) return;
+    // Demo gate: uploads are disabled — never send a request to the backend.
+    if (uploadsUnavailable) {
+      setUploadToast(UPLOADS_UNAVAILABLE_MESSAGE);
+      setItems([]);
+      return;
+    }
     for (const item of items) {
       onUpload(item.file, item.description.trim());
     }
@@ -260,8 +287,9 @@ export function UploadInterface({
         <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4 auto-rows-fr">
           {/* "+ Add file" tile — always first, never replaced */}
           <AddFileCard
-            onClick={() => inputRef.current?.click()}
+            onClick={handleOpenPicker}
             disabled={disabled}
+            unavailable={uploadsUnavailable}
           />
 
           {/* Staged files, next to the add card */}
@@ -316,17 +344,31 @@ export function UploadInterface({
         onDelete={handleModalDelete}
         isDeleting={detailDoc ? deletingDocumentIds?.has(detailDoc.id) : false}
       />
+
+      {uploadToast && (
+        <Toast
+          variant="info"
+          message={uploadToast}
+          onDismiss={() => setUploadToast(null)}
+        />
+      )}
     </div>
   );
 }
 
-/** The persistent "+ Add file" tile that opens the file picker. */
+/** The persistent "+ Add file" tile that opens the file picker. When uploads
+ *  are unavailable it stays clickable (to surface the toast) but reads as
+ *  intentionally inactive: a flatter hairline border, a fainter fill, muted
+ *  type, a dimmed icon and a disabled cursor — same card shape and grid slot,
+ *  no error colors. */
 function AddFileCard({
   onClick,
   disabled,
+  unavailable,
 }: {
   onClick: () => void;
   disabled?: boolean;
+  unavailable?: boolean;
 }) {
   return (
     <button
@@ -334,32 +376,44 @@ function AddFileCard({
       onClick={onClick}
       disabled={disabled}
       aria-label="Add file"
+      title={unavailable ? UPLOADS_UNAVAILABLE_MESSAGE : undefined}
       className={cn(
         "group flex min-h-[200px] flex-col items-center justify-center gap-2.5 p-3",
-        "rounded-xl border border-dashed border-[rgba(255,255,255,0.15)]",
-        "bg-[rgba(255,255,255,0.04)] backdrop-blur-md transition-colors duration-200",
-        "hover:border-[rgba(245,243,236,0.45)] hover:bg-[rgba(255,255,255,0.08)]",
+        "rounded-xl border border-dashed backdrop-blur-md transition-colors duration-200",
+        unavailable
+          ? "cursor-not-allowed border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.015)]"
+          : "border-[rgba(255,255,255,0.15)] bg-[rgba(255,255,255,0.04)] hover:border-[rgba(245,243,236,0.45)] hover:bg-[rgba(255,255,255,0.08)]",
         "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-50",
       )}
     >
       <span
         className={cn(
-          "flex size-10 items-center justify-center rounded-lg bg-surface-raised",
-          "text-muted transition-colors group-hover:bg-accent-subtle group-hover:text-accent",
+          "flex size-10 items-center justify-center rounded-lg",
+          unavailable
+            ? "bg-[rgba(255,255,255,0.04)] text-muted/50"
+            : "bg-surface-raised text-muted transition-colors group-hover:bg-accent-subtle group-hover:text-accent",
         )}
       >
         <Plus className="size-5" aria-hidden />
       </span>
       <span
         className={cn(
-          "text-sm font-semibold text-foreground transition-colors group-hover:text-foreground",
+          "text-sm font-semibold",
+          unavailable ? "text-muted" : "text-foreground",
         )}
       >
         Add file
       </span>
-      <span className="px-3 text-center text-[0.6875rem] text-muted/70">
-        {ACCEPTED_EXTENSIONS.map((ext) => ext.toUpperCase()).join(" · ")}
+      <span
+        className={cn(
+          "px-4 text-center text-[0.6875rem] leading-relaxed",
+          unavailable ? "text-muted/60" : "text-muted/70",
+        )}
+      >
+        {unavailable
+          ? "Chat and search are available for the existing workspace documents."
+          : ACCEPTED_EXTENSIONS.map((ext) => ext.toUpperCase()).join(" · ")}
       </span>
     </button>
   );

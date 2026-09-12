@@ -1,17 +1,11 @@
 "use client";
 
 /**
- * A transient error toast for actions whose failure must be seen where the
- * click happened.
- *
- * Why this exists: `useDocuments` publishes every failure through one shared
- * `error` channel, which the chat pane renders as a banner in the transcript —
- * anywhere from directly below the delete button to entirely off-screen. An
- * action like delete has a precise location (the row, the modal, the confirm)
- * and a short audience (the person who just clicked), so a prominent popup
- * that demands attention and dismisses itself is the right shape. Read the
- * callers: the chat transcript banner keeps other failure kinds (chat
- * transport, list refresh), only action failures route here.
+ * A transient toast for messages whose contents must be seen where the click
+ * happened. Default tone is `error` (action failures — red accent, triangle
+ * icon). Pass `variant="info"` for informational notices (sage-green accent,
+ * info glyph) — same card shape, typography and radius, only the accent
+ * changes.
  *
  * Rendering: centered in the viewport (fixed, translate(-50%, -50%)) above a
  * semi-transparent backdrop overlay, in the app's dark-green theme, with a
@@ -24,11 +18,23 @@
  * re-arms the timer instead of silently expiring early.
  */
 
-import { AlertTriangle, X } from "lucide-react";
+import { AlertTriangle, Info, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 const DISMISS_MS = 4500;
+
+/**
+ * Toast tone.
+ *  - `error` (default): red triangle + red hairline border — action failures.
+ *  - `info`: sage-green info glyph + sage-green hairline border — informational
+ *    notices like the demo tier's "uploads unavailable" message. Same card, same
+ *    typography, same radius — only the accent tells them apart.
+ */
+type ToastVariant = "error" | "info";
+
+const INFO_BORDER = "1px solid rgba(156, 197, 168, 0.4)";
+const ERROR_BORDER = "1px solid rgba(220, 100, 100, 0.35)";
 
 /** Entrance animation — the keyframes restate the centering transform. */
 const TOAST_KEYFRAMES = `
@@ -41,10 +47,13 @@ const TOAST_KEYFRAMES = `
 export function Toast({
   message,
   onDismiss,
+  variant = "error",
 }: {
   message: string;
   onDismiss: () => void;
+  variant?: ToastVariant;
 }) {
+  const isInfo = variant === "info";
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
@@ -87,7 +96,7 @@ export function Toast({
           background: "rgba(13, 40, 24, 0.92)",
           backdropFilter: "blur(16px)",
           WebkitBackdropFilter: "blur(16px)",
-          border: "1px solid rgba(220, 100, 100, 0.35)",
+          border: isInfo ? INFO_BORDER : ERROR_BORDER,
           borderRadius: "16px",
           padding: "20px 28px",
           boxShadow: "0 12px 40px rgba(0, 0, 0, 0.5)",
@@ -99,21 +108,21 @@ export function Toast({
           animation: "toastIn 0.2s ease-out",
         }}
       >
-        <AlertTriangle
-          className="mt-0.5 size-4 shrink-0 text-danger"
-          aria-hidden
-        />
+        {isInfo ? (
+          <Info className="mt-0.5 size-4 shrink-0 text-success" aria-hidden />
+        ) : (
+          <AlertTriangle className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+        )}
         <span className="min-w-0 flex-1 break-words">{message}</span>
         <button
           type="button"
           onClick={onDismiss}
           aria-label="Dismiss"
           className={cn(
-            "flex size-5 shrink-0 items-center justify-center rounded",
-            "transition-colors hover:bg-white/10",
-            "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            "flex size-5 shrink-0 items-center justify-center rounded transition-colors",
+            "hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+            isInfo ? "text-success" : "text-muted",
           )}
-          style={{ color: "rgba(242, 245, 239, 0.6)" }}
         >
           <X className="size-3.5" aria-hidden />
         </button>

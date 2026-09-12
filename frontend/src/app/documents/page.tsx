@@ -36,6 +36,17 @@ import { cn, formatBytes, formatRelativeTime } from "@/lib/utils";
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
 const ADMIN_ROLES = ["OWNER", "owner"];
 
+/**
+ * Demo limitation: this deployment runs on a free tier whose backend cannot
+ * ingest documents, so uploads stay visible but unavailable. The Add File and
+ * Upload buttons never call the upload endpoint — they surface this toast
+ * instead, mirroring the upload-interface.tsx gate and members-panel's
+ * INVITE_UNAVAILABLE_MESSAGE. Flip the flag off to re-enable uploads.
+ */
+const uploadsUnavailable = true;
+const UPLOADS_UNAVAILABLE_MESSAGE =
+  "Document uploads aren't available on the free demo tier.";
+
 /** A file queued for upload with its required description. */
 interface PendingFile {
   id: string;
@@ -56,6 +67,7 @@ export default function DocumentsPage() {
    *  must not land in the shared page banner (that channel stays for list/
    *  refresh failures, away from where the user clicked). */
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [uploadToast, setUploadToast] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -95,6 +107,12 @@ export default function DocumentsPage() {
 
   const handleUploadPending = useCallback(() => {
     if (!canUploadPending) return;
+    // Demo gate: uploads are disabled — never send a request to the backend.
+    if (uploadsUnavailable) {
+      setUploadToast(UPLOADS_UNAVAILABLE_MESSAGE);
+      setPendingFiles([]);
+      return;
+    }
     for (const item of pendingFiles) {
       void library.upload(item.file, item.description.trim());
     }
@@ -222,7 +240,15 @@ export default function DocumentsPage() {
           <Button
             variant="secondary"
             disabled={!isAuthenticated}
-            onClick={() => inputRef.current?.click()}
+            onClick={() => {
+              if (uploadsUnavailable) {
+                setUploadToast(UPLOADS_UNAVAILABLE_MESSAGE);
+                return;
+              }
+              inputRef.current?.click();
+            }}
+            className={uploadsUnavailable ? "cursor-not-allowed opacity-60" : undefined}
+            aria-disabled={uploadsUnavailable}
           >
             <Plus className="size-3.5" aria-hidden />
             Add File
@@ -337,6 +363,13 @@ export default function DocumentsPage() {
 
       {deleteError && (
         <Toast message={deleteError} onDismiss={() => setDeleteError(null)} />
+      )}
+      {uploadToast && (
+        <Toast
+          variant="info"
+          message={uploadToast}
+          onDismiss={() => setUploadToast(null)}
+        />
       )}
     </div>
   );

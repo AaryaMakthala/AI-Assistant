@@ -6,7 +6,7 @@
 
 Data Agent automatically profiles uploaded datasets, detects data quality issues, identifies the most likely prediction target, recommends suitable machine learning algorithms, generates visual insights, and produces AI-assisted cleaning recommendations — all from a single CSV upload.
 
-[Live Demo](https://data-analyst-agent-topaz.vercel.app) &nbsp;•&nbsp; [Report a Bug](https://github.com/AaryaMakthala/DATA-AGENT/issues) &nbsp;•&nbsp; [Request a Feature](https://github.com/AaryaMakthala/DATA-AGENT/issues)
+[Live Demo](https://office-brain.vercel.app/) &nbsp;•&nbsp; [Report a Bug](https://github.com/AaryaMakthala/DATA-AGENT/issues) &nbsp;•&nbsp; [Request a Feature](https://github.com/AaryaMakthala/DATA-AGENT/issues)
 
 <br/>
 

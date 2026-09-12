@@ -14,10 +14,22 @@ from unittest.mock import patch
 
 import pytest
 
+import app.retrieval.rerank as rerank_module
 from app.config import get_settings
 from app.retrieval.rerank import get_reranker, rerank_scores, reset_reranker
 
 pytestmark = pytest.mark.usefixtures("valid_env")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real torch package out of these stub-based tests.
+
+    ``get_reranker`` applies the one-time CPU/thread runtime config, which imports
+    torch.  These tests intentionally never touch the real package (documented at
+    the top of this module), so the config call is a no-op here.
+    """
+    monkeypatch.setattr(rerank_module, "apply_torch_runtime_config", lambda: None)
 
 
 class StubCrossEncoder:
@@ -52,7 +64,7 @@ def test_reranker_is_lazy_and_uses_configured_model() -> None:
     """The model is constructed from config, and only when first needed."""
     constructed: list[str] = []
 
-    def _build(name: str) -> StubCrossEncoder:
+    def _build(name: str, **kwargs: object) -> StubCrossEncoder:  # noqa: ANN401
         constructed.append(name)
         return StubCrossEncoder(name)
 
@@ -71,7 +83,7 @@ def test_reranker_is_lazy_and_uses_configured_model() -> None:
 def test_rerank_scores_aligns_with_input() -> None:
     model = StubCrossEncoder("x")
 
-    def _build(name: str) -> StubCrossEncoder:
+    def _build(name: str, **kwargs: object) -> StubCrossEncoder:  # noqa: ANN401
         return model
 
     with _install_fake_sentence_transformers(_build):

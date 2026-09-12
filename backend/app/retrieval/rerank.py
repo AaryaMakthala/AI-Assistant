@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from app.config import get_settings
+from app.rag._torch_runtime import apply_torch_runtime_config
 
 # Force HuggingFace Hub to load models from the local cache only.
 # On startup the default behaviour issues dozens of HEAD requests to
@@ -50,9 +52,16 @@ def get_reranker() -> CrossEncoder:
             if _reranker is None:
                 from sentence_transformers import CrossEncoder
 
+                apply_torch_runtime_config()
                 settings = get_settings()
                 logger.info("Loading reranker model {name}", name=settings.reranker_model)
-                _reranker = CrossEncoder(settings.reranker_model)
+                load_started = time.perf_counter()
+                _reranker = CrossEncoder(settings.reranker_model, device="cpu")
+                logger.info(
+                    "Reranker model {name} loaded in {elapsed:.2f}s (device=cpu)",
+                    name=settings.reranker_model,
+                    elapsed=time.perf_counter() - load_started,
+                )
     return _reranker
 
 

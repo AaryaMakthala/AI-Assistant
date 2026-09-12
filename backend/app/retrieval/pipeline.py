@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import statistics
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -42,8 +43,8 @@ from app.rag.embeddings import embed_query
 from app.retrieval.doc_targeting import DocumentTargetingResult
 from app.retrieval.grounding import is_grounded, is_overview_grounded
 from app.retrieval.hybrid import (
-    HybridCandidate,
     RRF_K,
+    HybridCandidate,
     filename_search,
     keyword_search,
     rrf_merge,
@@ -152,6 +153,7 @@ async def retrieve(
         >= 0.85 and the reranker score is plausible, grounding is allowed
         even if the primary score is marginal.
     """
+    start_time = time.perf_counter()
     text = query.strip()
     if not text:
         return RetrievalResult(chunks=[], grounded=False, top_score=None)
@@ -192,11 +194,12 @@ async def retrieve(
     if not relevance.relevant:
         logger.info(
             "Relevance gate rejected question for workspace {ws}: reason={reason} "
-            "confidence={confidence:.2f} layer={layer}",
+            "confidence={confidence:.2f} layer={layer} took={elapsed:.2f}s",
             ws=workspace_id,
             reason=relevance.reason,
             confidence=relevance.confidence,
             layer=relevance.layer,
+            elapsed=time.perf_counter() - start_time,
         )
         return RetrievalResult(
             chunks=[],
@@ -267,7 +270,11 @@ async def retrieve(
     # Embed the query in a worker thread: sentence-transformers on CPU is the
     # slowest step before the reranker, and the event loop should not pay for it.
     # Use normalized_text so garbled queries don't produce weak embeddings.
+    embed_started = time.perf_counter()
     query_embedding = await asyncio.to_thread(embed_query, normalized_text)
+    logger.info(
+        "Query embedding stage: {elapsed:.2f}s", elapsed=time.perf_counter() - embed_started
+    )
 
     semantic = await semantic_search(
         session,
@@ -310,17 +317,24 @@ async def retrieve(
     fused_count = len(candidates)
     if not candidates:
         logger.info(
-            "No retrieval candidates for workspace {ws} (relevance={reason})",
+            "No retrieval candidates for workspace {ws} (relevance={reason}) took={elapsed:.2f}s",
             ws=workspace_id,
             reason=relevance.reason,
+            elapsed=time.perf_counter() - start_time,
         )
         return RetrievalResult(
             chunks=[], grounded=False, top_score=None,
             relevance_decision=relevance.reason,
         )
 
+    rerank_started = time.perf_counter()
     reranked = await asyncio.to_thread(
         rerank_scores, normalized_text, [candidate.content for candidate in candidates]
+    )
+    logger.info(
+        "Reranking stage: {count} candidates in {elapsed:.2f}s",
+        count=len(candidates),
+        elapsed=time.perf_counter() - rerank_started,
     )
     scored = sorted(
         zip(candidates, reranked, strict=True),
@@ -413,7 +427,7 @@ async def retrieve(
         "second_score={second_score}, "
         "selected_docs={docs}, relevance={reason}, "
         "filename_match={fm}, matched_filename={mf}, "
-        "doc_target_confidence={dtc})",
+        "doc_target_confidence={dtc}, took={elapsed:.2f}s)",
         final=len(final),
         fused=fused_count,
         ws=workspace_id,
@@ -425,6 +439,7 @@ async def retrieve(
         fm=filename_match,
         mf=matched_filename,
         dtc=doc_target.confidence if doc_target else 0.0,
+        elapsed=time.perf_counter() - start_time,
     )
     return RetrievalResult(
         chunks=final,

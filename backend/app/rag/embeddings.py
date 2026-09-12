@@ -13,12 +13,14 @@ degrades retrieval, which is why the two paths are separate functions here.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from app.config import get_settings
+from app.rag._torch_runtime import apply_torch_runtime_config
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -42,9 +44,11 @@ def get_model() -> SentenceTransformer:
             if _model is None:
                 from sentence_transformers import SentenceTransformer
 
+                apply_torch_runtime_config()
                 settings = get_settings()
                 logger.info("Loading embedding model {name}", name=settings.embedding_model)
-                model = SentenceTransformer(settings.embedding_model)
+                load_started = time.perf_counter()
+                model = SentenceTransformer(settings.embedding_model, device="cpu")
                 actual = model.get_sentence_embedding_dimension()
                 if actual != settings.embedding_dim:
                     raise RuntimeError(
@@ -52,6 +56,11 @@ def get_model() -> SentenceTransformer:
                         f"vectors but the schema stores {settings.embedding_dim}. Re-embed "
                         "the whole index before changing models — never mix."
                     )
+                logger.info(
+                    "Embedding model {name} loaded in {elapsed:.2f}s (device=cpu)",
+                    name=settings.embedding_model,
+                    elapsed=time.perf_counter() - load_started,
+                )
                 _model = model
     return _model
 

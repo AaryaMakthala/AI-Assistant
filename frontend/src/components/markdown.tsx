@@ -102,7 +102,7 @@ export function Markdown({
   className?: string;
 }) {
   return (
-    <div className={cn("text-sm leading-relaxed", className)}>
+    <div className={cn("text-sm leading-relaxed max-md:text-[15px] max-md:leading-[1.6]", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
         {content}
       </ReactMarkdown>

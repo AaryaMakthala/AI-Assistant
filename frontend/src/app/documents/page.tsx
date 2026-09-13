@@ -126,18 +126,18 @@ export default function DocumentsPage() {
   const pending = library.documents.filter((row) => row.status === "PENDING");
 
   return (
-    <div className="mx-auto flex min-h-dvh w-full max-w-4xl flex-col gap-4 p-4 sm:p-6">
+    <div className="mx-auto flex min-h-dvh w-full max-w-4xl flex-col gap-4 p-4 sm:p-6 overflow-y-auto">
       <header className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <Link
             href="/"
             className={cn(
-              "inline-flex items-center gap-1 text-xs text-muted transition-colors",
-              "hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent",
-              "focus-visible:outline-none",
+              "inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-muted transition-colors",
+              "hover:text-foreground hover:bg-[rgba(255,255,255,0.06)] focus-visible:ring-2 focus-visible:ring-accent",
+              "focus-visible:outline-none min-h-[44px] min-w-[44px]",
             )}
           >
-            <ArrowLeft className="size-3" aria-hidden />
+            <ArrowLeft className="size-4" aria-hidden />
             Back to chat
           </Link>
           <h1 className="mt-1 text-lg font-semibold">All documents</h1>

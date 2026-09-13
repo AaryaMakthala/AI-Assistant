@@ -334,24 +334,24 @@ export function Workspace() {
         </header>
 
         {/* Mobile top bar — shown only on mobile via CSS class */}
-        <header className="mobile-topbar flex items-center justify-between border-b border-border bg-[#0F1A15] px-3 py-2">
+        <header className="mobile-topbar flex items-center justify-between border-b border-border bg-[#0F1A15] px-4 py-2.5">
           <button
             type="button"
             onClick={() => setIsMobileDrawerOpen(true)}
             aria-label="Open menu"
-            className="flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+            className="flex size-10 items-center justify-center rounded-lg text-muted transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
           >
             <Menu className="size-5" aria-hidden />
           </button>
           <BrandWordmark
             className="flex items-center gap-1.5"
-            textClassName="text-sm"
+            textClassName="text-[13px] font-semibold tracking-[0.12em]"
           />
           <button
             type="button"
             onClick={newChatAndCloseDrawer}
             aria-label="New chat"
-            className="flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+            className="flex size-10 items-center justify-center rounded-lg text-muted transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
           >
             <SquarePen className="size-5" aria-hidden />
           </button>

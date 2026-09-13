@@ -217,8 +217,9 @@ export function UploadInterface({
           variant="ghost"
           onClick={onBack}
           aria-label="Back to chat"
+          className="min-h-[44px] min-w-[44px] max-md:px-3 max-md:py-2"
         >
-          <ArrowLeft className="size-3" aria-hidden />
+          <ArrowLeft className="size-4" aria-hidden />
           Back to chat
         </Button>
         <div className="min-w-0">
@@ -284,7 +285,7 @@ export function UploadInterface({
 
         {/* auto-rows-fr makes every row exactly as tall as its tallest card, so
          * cards in one row share a height instead of leaving ragged gaps. */}
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4 auto-rows-fr">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4 auto-rows-fr max-md:grid-cols-1">
           {/* "+ Add file" tile — always first, never replaced */}
           <AddFileCard
             onClick={handleOpenPicker}

@@ -87,15 +87,19 @@
 }
 
 /* The composer floats as a glass box over the same continuous backdrop the
- * messages sit on — same fill family as the message cards, slightly lighter
- * (0.4), with a soft shadow so it reads as lifted off the background. */
+ * messages sit on (chat-pane draws one image layer behind this whole panel)
+ * — no solid bar, no seam. The wrapper is transparent and margins the box
+ * off the panel's bottom edge so it reads as floating. It is relative z-10:
+ * the content is static HTML and would otherwise paint beneath the panel's
+ * fixed backdrop/scrim layers (both positioned with positive z-index), which
+ * would swallow pointer events meant for the textarea and send button. */
 .glass-composer {
   background: rgba(20, 40, 30, 0.4);
   -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 16px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+  border-radius: 20px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
 }
 
 /* Focus is styled on the recipe, not a Tailwind utility: the recipe is
@@ -169,12 +173,25 @@ body {
   animation: fade-in 0.4s ease-out;
 }
 
-/* --- Mobile (max-width: 768px) --------------------------------------------- */
-/* Hides desktop sidebar + collapse handle, shows mobile top bar, and applies
- * phone-specific overrides for the chat layout, message cards, and composer.
- * The drawer sidebar/backdrop are controlled via JS state in workspace.tsx. */
-@media (max-width: 768px) {
-  /* Hide desktop chrome, show mobile chrome */
+/* --- Mobile (max-width: 767px) ---------------------------------------------- */
+/* Only overrides that CANNOT be expressed as Tailwind max-md: classes on
+ * components. All layout, typography, and spacing changes live in the
+ * component files themselves via max-md: responsive variants. */
+@media (max-width: 767px) {
+  /* =============================================
+     VIEWPORT — prevent page-level scrolling
+     ============================================= */
+  html,
+  body {
+    overflow: hidden !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    overscroll-behavior: none !important;
+  }
+
+  /* =============================================
+     HIDE DESKTOP CHROME / SHOW MOBILE CHROME
+     ============================================= */
   .sidebar-desktop {
     display: none !important;
   }
@@ -191,10 +208,9 @@ body {
     background: #0F1A15;
   }
 
-  /* Drawer backdrop and sidebar are controlled via JS state in workspace.tsx
-   * using pointer-events-auto / pointer-events-none classes. */
-
-  /* --- Chat background: hide heavy photo, use solid fill ------------------ */
+  /* =============================================
+     CHAT BACKGROUND — hide heavy photo, use solid fill
+     ============================================= */
   .chat-bg-image {
     display: none;
   }
@@ -202,57 +218,55 @@ body {
     background: var(--background) !important;
   }
 
-  /* --- Message list ------------------------------------------------------- */
-  .chat-scroll-container {
-    padding-top: 1rem !important;
-    padding-bottom: 0.5rem !important;
-    padding-left: 16px !important;
-    padding-right: 16px !important;
+  /* =============================================
+     CHAT PANE — scrollable content area
+     ============================================= */
+  .chat-scroll {
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
   }
 
-  .glass-message {
-    padding: 12px !important;
-    border-radius: 12px;
-  }
-
-  /* Remove stray blue selection highlight */
-  .glass-message::selection,
-  .glass-message *::selection {
-    background: rgba(30, 90, 58, 0.4);
-  }
-
-  /* --- Composer: fixed bottom, pill shape, safe-area padding --------------- */
+  /* =============================================
+     COMPOSER WRAPPER — fixed at bottom
+     ============================================= */
   .chat-composer-wrap {
-    position: sticky;
-    bottom: 0;
-    z-index: 20;
+    flex-shrink: 0;
     background: var(--background);
     padding-bottom: env(safe-area-inset-bottom, 0px) !important;
-    padding-left: 16px !important;
-    padding-right: 16px !important;
   }
 
-  .glass-composer {
-    border-radius: 9999px !important;
-    border: 1px solid rgba(255, 255, 255, 0.15) !important;
-    background: rgba(20, 40, 30, 0.7) !important;
-    -webkit-backdrop-filter: blur(20px) !important;
-    backdrop-filter: blur(20px) !important;
-    min-height: 48px !important;
+  /* =============================================
+     SOURCES PANEL — full-width overlay on mobile
+     ============================================= */
+  .sources-panel {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 45 !important;
+    width: 100% !important;
+    max-width: 100% !important;
   }
 
-  /* Larger touch targets for send / stop buttons */
-  .glass-composer button[aria-label="Send message"],
-  .glass-composer button[aria-label="Stop generating"] {
-    width: 40px !important;
-    height: 40px !important;
+  /* =============================================
+     CONFIRM DIALOG — responsive width
+     ============================================= */
+  dialog {
+    max-width: calc(100vw - 32px) !important;
   }
 
-  /* Compact disclaimer text above composer */
-  .chat-composer-wrap p {
-    font-size: 0.625rem !important;
-    padding: 0 4px !important;
-    margin-bottom: 4px !important;
+  /* =============================================
+     GENERAL MOBILE UTILITIES
+     ============================================= */
+  img {
+    max-width: 100%;
+  }
+
+  button,
+  a,
+  [role="button"] {
+    touch-action: manipulation;
   }
 }
 

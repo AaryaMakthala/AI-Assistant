@@ -51,18 +51,19 @@ export function MessageBubble({
        * nearest the avatar tapered (bottom-right) so it reads as a deliberate
        * bubble rather than a flat rectangle. Distinct from the wide frosted
        * assistant cards, and always high-contrast. */
-      <div className="flex justify-end gap-3">
+      <div className="flex justify-end gap-3 max-md:gap-2">
         <div
           className={cn(
             "max-w-[min(34rem,80%)] rounded-[18px] rounded-br-[6px] bg-accent",
             "px-[18px] py-3 text-sm leading-relaxed whitespace-pre-wrap",
             "font-medium text-accent-foreground shadow-[0_2px_8px_rgba(0,0,0,0.15)]",
+            "max-md:px-4 max-md:py-2.5 max-md:text-[15px] max-md:leading-[1.6]",
           )}
         >
           {turn.content}
         </div>
-        <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-full bg-surface-raised text-muted">
-          <User className="size-3.5" aria-hidden />
+        <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-full bg-surface-raised text-muted max-md:size-6">
+          <User className="size-3.5 max-md:size-3" aria-hidden />
         </div>
       </div>
     );
@@ -78,20 +79,21 @@ export function MessageBubble({
      * background. The avatar floats to its left; everything else — routing
      * note, answer text, honesty markers, citations, model line — lives
      * inside the card. */
-    <div className="flex gap-3">
+    <div className="flex gap-3 max-md:gap-2.5">
       <div
         className={cn(
           "mt-1 flex size-7 shrink-0 items-center justify-center rounded-full",
           "border border-[rgba(255,255,255,0.12)] bg-[#0F1A15] text-xs font-semibold",
           "text-[rgba(245,243,236,0.85)]",
+          "max-md:size-6",
         )}
         aria-hidden
       >
-        <img src="/logo.png" alt="" className="size-5 rounded-full object-cover" />
+        <img src="/logo.png" alt="" className="size-5 rounded-full object-cover max-md:size-4" />
       </div>
 
       <div className="min-w-0 flex-1">
-        <div className="glass-message p-5">
+        <div className="glass-message p-5 max-md:p-3.5">
           <div className="space-y-3">
             {hasContent && (
               <div>

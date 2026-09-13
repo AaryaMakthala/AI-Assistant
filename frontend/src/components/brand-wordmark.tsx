@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 
 /** The wordmark's canonical typographic treatment. */
 const WORDMARK_CLASS =
-  "font-sans text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground/80";
+  "font-sans text-[12px] font-semibold uppercase tracking-[0.14em] text-foreground/85";
 
 export function BrandWordmark({
   className,

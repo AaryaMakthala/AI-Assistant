@@ -31,7 +31,7 @@ export function SourcesPanel({
   onClose: () => void;
 }) {
   return (
-    <aside className="flex h-full w-80 shrink-0 flex-col border-l border-border bg-[#0F1A15]">
+    <aside className="sources-panel flex h-full w-80 shrink-0 flex-col border-l border-border bg-[#0F1A15] max-md:fixed max-md:inset-0 max-md:w-full max-md:z-50 max-md:border-l-0">
       <header className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="min-w-0">
           <h2 className="font-display text-sm">Sources</h2>

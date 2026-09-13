@@ -106,7 +106,7 @@ export function ChatPane({
         }}
         className="chat-scroll relative z-10 min-h-0 flex-1 overflow-y-auto"
       >
-        <div className="chat-scroll-container mx-auto w-full max-w-[780px] px-4 py-8">
+        <div className="chat-scroll-container mx-auto w-full max-w-[780px] px-4 py-8 max-md:px-4 max-md:py-3">
           {isLoadingHistory && (
             <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
               <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -164,20 +164,20 @@ function EmptyState({
   disabled?: boolean;
 }) {
   return (
-    <div className="flex flex-col items-center py-16 text-center">
+    <div className="flex flex-col items-center py-16 text-center max-md:py-10">
       <div className="flex size-11 items-center justify-center rounded-xl bg-accent-subtle text-accent">
         <MessageSquareText className="size-5" aria-hidden />
       </div>
-      <h2 className="font-display mt-4 text-xl tracking-tight">
+      <h2 className="mt-5 max-w-sm text-[17px] font-semibold leading-[1.35] tracking-tight text-foreground max-md:text-[15px] max-md:leading-[1.4]">
         Ask about anything your organization knows
       </h2>
-      <p className="mt-1.5 max-w-md text-sm text-muted">
+      <p className="mt-2 max-w-md text-[13px] leading-[1.55] text-muted max-md:px-2 max-md:text-[12.5px] max-md:leading-[1.5]">
         Questions are routed automatically to your documents, your business
         database, or connected repositories — and answers cite where they came
         from.
       </p>
 
-      <div className="mt-6 flex w-full max-w-lg flex-col gap-2">
+      <div className="mt-6 flex w-full max-w-lg flex-col gap-2 max-md:mt-5 max-md:gap-2.5">
         {SUGGESTIONS.map((suggestion) => (
           <button
             key={suggestion}
@@ -186,10 +186,11 @@ function EmptyState({
             onClick={() => onSend(suggestion)}
             className={cn(
               "rounded-xl border border-[rgba(255,255,255,0.12)] bg-[rgba(255,255,255,0.06)]",
-              "px-3.5 py-2.5 text-left text-sm text-muted transition-colors",
+              "px-3.5 py-2.5 text-left text-[13px] font-normal leading-[1.45] text-muted transition-colors",
               "hover:border-[rgba(255,255,255,0.2)] hover:bg-[rgba(255,255,255,0.1)]",
               "hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent",
               "focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+              "max-md:px-4 max-md:py-3.5 max-md:text-[13px] max-md:leading-[1.45] max-md:min-h-[48px]",
             )}
           >
             {suggestion}

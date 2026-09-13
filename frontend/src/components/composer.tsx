@@ -14,7 +14,7 @@ export function Composer({
   onStop,
   isStreaming,
   disabled,
-  placeholder = "Ask about your documents, business data, or code…",
+  placeholder = "Ask about your workspace...",
 }: {
   onSend: (message: string) => void;
   onStop: () => void;
@@ -42,18 +42,12 @@ export function Composer({
   };
 
   return (
-    /* The composer floats as a glass box over the SAME continuous chat
-     * backdrop the messages sit on (chat-pane draws one image layer behind
-     * this whole panel) — no solid bar, no seam. The wrapper is transparent
-     * and margins the box off the panel's bottom edge so it reads as
-     * floating. It is relative z-10: the content is static HTML and would
-     * otherwise paint beneath the panel's fixed backdrop/scrim layers (both
-     * positioned with positive z-index), which would swallow pointer
-     * events meant for the textarea and send button. */
-    <div className="relative z-10 px-4 pt-1 pb-6">
+    <div className="relative z-10 px-4 pt-1 pb-6 max-md:px-3 max-md:pt-1.5 max-md:pb-3">
+      {/* Unified composer container — one rounded box with embedded send button */}
       <div
         className={cn(
-          "glass-composer mx-auto flex max-w-[780px] items-end gap-2 p-2",
+          "glass-composer mx-auto flex max-w-[780px] items-end gap-2 p-2.5",
+          "max-md:mx-auto max-md:w-full max-md:max-w-none max-md:rounded-[20px] max-md:p-2",
         )}
       >
         <textarea
@@ -78,9 +72,10 @@ export function Composer({
             }
           }}
           className={cn(
-            "max-h-[200px] min-h-[2.25rem] flex-1 resize-none bg-transparent px-2 py-1.5",
-            "text-sm leading-relaxed outline-none placeholder:text-muted",
+            "max-h-[200px] min-h-[2.5rem] flex-1 resize-none bg-transparent px-2.5 py-2",
+            "text-[14px] leading-relaxed outline-none placeholder:text-muted/60",
             "disabled:cursor-not-allowed disabled:opacity-60",
+            "max-md:text-[14px] max-md:leading-[1.5] max-md:py-2 max-md:px-2",
           )}
         />
 
@@ -90,9 +85,10 @@ export function Composer({
             onClick={onStop}
             aria-label="Stop generating"
             className={cn(
-              "flex size-8 shrink-0 items-center justify-center rounded-full",
+              "flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full",
               "border border-border text-muted transition-colors hover:text-foreground",
               "focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none",
+              "max-md:h-10 max-md:w-10",
             )}
           >
             <Square className="size-3.5 fill-current" aria-hidden />
@@ -104,10 +100,11 @@ export function Composer({
             disabled={!value.trim() || disabled}
             aria-label="Send message"
             className={cn(
-              "flex size-8 shrink-0 items-center justify-center rounded-full",
+              "flex h-[38px] w-[38px] shrink-0 items-center justify-center rounded-full",
               "bg-accent text-accent-foreground transition-[filter]",
               "hover:brightness-110 focus-visible:ring-2 focus-visible:ring-accent",
               "focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40",
+              "max-md:h-10 max-md:w-10",
             )}
           >
             <ArrowUp className="size-4" aria-hidden />
@@ -115,7 +112,7 @@ export function Composer({
         )}
       </div>
 
-      <p className="mx-auto mt-2 max-w-[780px] px-2 text-center text-[0.6875rem] text-muted">
+      <p className="mx-auto mt-2 max-w-[780px] px-2 text-center text-[0.6875rem] text-muted max-md:mt-1.5 max-md:text-[10px]">
         Answers are drawn from your organization&apos;s documents and data. Check
         cited sources for anything consequential.
       </p>
